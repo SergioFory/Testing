@@ -10,6 +10,7 @@ from loguru import logger
 from signals.setups.breakout      import detect_breakouts
 from signals.setups.trend_pullback import detect_pullbacks
 from signals.setups.reversal       import detect_reversals
+from config.settings               import ASSET_PARAMS_OVERRIDE
 
 
 SETUP_WEIGHTS = {
@@ -40,11 +41,17 @@ def detect_all_setups(
     if df_4h.empty:
         return pd.DataFrame()
 
+    # Parámetros con overrides por símbolo
+    overrides = ASSET_PARAMS_OVERRIDE.get(symbol.upper(), {})
+    p_breakout = overrides.get("BREAKOUT", {})
+    p_pullback = overrides.get("PULLBACK", {})
+    p_reversal = overrides.get("REVERSAL", {})
+
     results = []
 
     # --- 1. Breakouts ---
     try:
-        df_b = detect_breakouts(df_4h.copy())
+        df_b = detect_breakouts(df_4h.copy(), params=p_breakout)
         for ts, row in df_b[df_b["breakout_long"] | df_b["breakout_short"]].iterrows():
             results.append({
                 "ts":         ts,
@@ -64,7 +71,7 @@ def detect_all_setups(
 
     # --- 2. Pullbacks ---
     try:
-        df_p = detect_pullbacks(df_4h.copy(), df_daily)
+        df_p = detect_pullbacks(df_4h.copy(), df_daily, params=p_pullback)
         for ts, row in df_p[df_p["pullback_long"] | df_p["pullback_short"]].iterrows():
             results.append({
                 "ts":         ts,
@@ -84,7 +91,7 @@ def detect_all_setups(
 
     # --- 3. Reversals ---
     try:
-        df_r = detect_reversals(df_4h.copy(), df_daily)
+        df_r = detect_reversals(df_4h.copy(), df_daily, params=p_reversal)
         for ts, row in df_r[df_r["reversal_long"] | df_r["reversal_short"]].iterrows():
             results.append({
                 "ts":         ts,

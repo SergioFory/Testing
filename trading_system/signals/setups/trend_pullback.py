@@ -19,7 +19,8 @@ from loguru import logger
 from config.settings import PULLBACK_PARAMS
 
 
-def add_trend_filter(df_daily: pd.DataFrame) -> pd.DataFrame:
+def add_trend_filter(df_daily: pd.DataFrame,
+                     min_trend_bars: int = None) -> pd.DataFrame:
     """
     Calcula el contexto de tendencia en timeframe diario.
     Retorna df_daily con columna 'trend' (+1 alcista, -1 bajista, 0 lateral).
@@ -30,8 +31,7 @@ def add_trend_filter(df_daily: pd.DataFrame) -> pd.DataFrame:
     df["trend_ema_fast"] = ema_fast
     df["trend_ema_slow"] = ema_slow
 
-    # Mínimo N barras en la misma dirección para confirmar tendencia
-    min_bars = PULLBACK_PARAMS["min_trend_bars"]
+    min_bars = min_trend_bars or PULLBACK_PARAMS["min_trend_bars"]
     bull = (ema_fast > ema_slow)
     bear = (ema_fast < ema_slow)
 
@@ -79,7 +79,7 @@ def detect_pullbacks(df_4h: pd.DataFrame,
 
     # --- Contexto de tendencia desde daily ---
     if df_daily is not None and not df_daily.empty:
-        df_d = add_trend_filter(df_daily)
+        df_d = add_trend_filter(df_daily, min_trend_bars=p["min_trend_bars"])
         # Propagar tendencia diaria a 4H (forward fill)
         trend_daily = df_d["trend"].copy()
         # Reindex daily trend to 4H timestamps (use date matching)

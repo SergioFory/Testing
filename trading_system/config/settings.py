@@ -78,32 +78,58 @@ TIMEFRAME_ENTRY   = "1h"    # Timeframe para afinar entrada (futuro)
 DAYS_HISTORY      = 730     # 2 años de historia para backtest
 
 # =============================================================================
-# SETUPS TÉCNICOS — parámetros por setup
+# SETUPS TÉCNICOS — parámetros base (calibrados para 4H crypto)
 # =============================================================================
 BREAKOUT_PARAMS = {
     "donchian_period":  20,     # Período del canal Donchian
     "vol_factor":       1.3,    # Volumen debe ser X veces el promedio
     "atr_min_move":     1.5,    # Movimiento mínimo en ATRs para confirmar
-    "lookback_days":    5,      # Días de consolidación previa requeridos
+    "lookback_days":    5,
 }
 
 PULLBACK_PARAMS = {
     "ema_fast":         21,
     "ema_slow":         55,
     "rsi_period":       14,
-    "rsi_oversold":     45,     # RSI < 45 en pullback alcista (zona de compra)
-    "rsi_overbought":   55,     # RSI > 55 en pullback bajista (zona de venta)
-    "min_trend_bars":   10,     # Barras en tendencia para confirmar dirección
-    "max_pullback_pct": 0.05,   # Máximo 5% de corrección para seguir siendo pullback
+    "rsi_oversold":     45,
+    "rsi_overbought":   55,
+    "min_trend_bars":   10,
+    "max_pullback_pct": 0.05,
 }
 
 REVERSAL_PARAMS = {
     "rsi_period":       14,
-    "rsi_extreme_low":  30,     # RSI < 30 para buscar reversal alcista
-    "rsi_extreme_high": 70,     # RSI > 70 para buscar reversal bajista
+    "rsi_extreme_low":  30,
+    "rsi_extreme_high": 70,
     "bb_period":        20,
     "bb_std":           2.0,
     "volume_confirm":   True,
+}
+
+# =============================================================================
+# OVERRIDES POR ACTIVO
+# Permiten ajustar parámetros según el instrumento y timeframe.
+# Gold usa datos diarios → filtros más relajados que crypto 4H.
+# =============================================================================
+ASSET_PARAMS_OVERRIDE = {
+    "XAUUSD": {
+        "BREAKOUT": {
+            # Diario: barras más pequeñas en ATR relativo; volumen de GC=F
+            # no siempre tiene el spike típico de crypto → bajar filtros
+            "vol_factor":   1.05,   # Casi cualquier volumen confirmado
+            "atr_min_move": 0.6,    # Barra más pequeña aceptable en diario
+        },
+        "PULLBACK": {
+            "min_trend_bars": 5,    # Menos barras para confirmar tendencia en diario
+            "rsi_oversold":   50,   # RSI ≤ 50 en pullback alcista (zona media)
+            "rsi_overbought": 50,   # RSI ≥ 50 en pullback bajista
+        },
+        "REVERSAL": {
+            "rsi_extreme_low":  35, # RSI < 35 en diario (menos extremo que 30)
+            "rsi_extreme_high": 65, # RSI > 65 en diario
+            "volume_confirm":   False,  # No requerir spike de volumen en GC=F
+        },
+    },
 }
 
 # =============================================================================

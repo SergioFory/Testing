@@ -55,12 +55,13 @@ def _load_data(symbol: str):
     logger.info(f"Cargando datos para {symbol}...")
 
     if is_gold:
-        # Gold: una sola descarga de datos diarios.
-        # Los datos diarios se usan para ambos timeframes (diario es
-        # el frame apropiado para Gold, que cotiza en sesiones).
-        df_daily = fetch_gold(timeframe="1d", days=730)
-        df_4h    = df_daily.copy() if not df_daily.empty else None
-        macro_df = fetch_macro(days=730)
+        # Gold: datos diarios para ambos timeframes.
+        # Usamos 2500 días (~6.8 años) para tener suficientes setups
+        # para entrenamiento ML (GC=F tiene historia desde los años 80).
+        gold_days = ASSETS.get(symbol, {}).get("days_history", 2500)
+        df_daily  = fetch_gold(timeframe="1d", days=gold_days)
+        df_4h     = df_daily.copy() if not df_daily.empty else None
+        macro_df  = fetch_macro(days=min(gold_days, 730))
     else:
         data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=730)
         df_4h    = data.get("4h")

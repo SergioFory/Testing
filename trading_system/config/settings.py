@@ -66,6 +66,7 @@ ASSETS = {
         "yf_ticker":    "GC=F",
         "min_range_pct": 0.008,
         "pip_value":    1.0,
+        "days_history": 2500,   # ~6.8 años de diarios para tener suficientes setups ML
     },
 }
 
@@ -143,7 +144,7 @@ ML_PARAMS = {
     "min_child_samples":20,
     "subsample":        0.8,
     "colsample_bytree": 0.8,
-    "min_train_samples":100,    # Mínimo de setups históricos para entrenar
+    "min_train_samples": 50,    # Mínimo de setups históricos para entrenar
     "retrain_every":    7,      # Reentrenar cada N días
     "prob_threshold":   0.58,   # Umbral de confianza para emitir señal
 }

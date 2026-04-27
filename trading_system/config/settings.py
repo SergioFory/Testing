@@ -22,12 +22,25 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # =============================================================================
 # CREDENCIALES
 # =============================================================================
-BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY", "")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
-CRYPTOPANIC_KEY    = os.getenv("CRYPTOPANIC_API_KEY", "")
-ANTHROPIC_KEY      = os.getenv("ANTHROPIC_API_KEY", "")
-TELEGRAM_TOKEN     = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+def _clean_env(key: str) -> str:
+    """Lee variable de entorno e ignora placeholders del .env.example."""
+    val = os.getenv(key, "").strip()
+    placeholders = {
+        "tu_api_key_aqui", "tu_api_secret_aqui", "tu_key_aqui",
+        "tu_bot_token", "tu_chat_id",
+        "your_api_key_here", "your_secret_here", "changeme",
+    }
+    if val.lower() in placeholders:
+        return ""
+    return val
+
+
+BINANCE_API_KEY    = _clean_env("BINANCE_API_KEY")
+BINANCE_API_SECRET = _clean_env("BINANCE_API_SECRET")
+CRYPTOPANIC_KEY    = _clean_env("CRYPTOPANIC_API_KEY")
+ANTHROPIC_KEY      = _clean_env("ANTHROPIC_API_KEY")
+TELEGRAM_TOKEN     = _clean_env("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID   = _clean_env("TELEGRAM_CHAT_ID")
 
 # =============================================================================
 # ACTIVOS

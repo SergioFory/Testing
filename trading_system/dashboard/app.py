@@ -113,7 +113,7 @@ with tab_signal:
         st.info("Presiona **Generar señal** en el sidebar para ejecutar el análisis.")
 
         # Mostrar última señal guardada si existe
-        hist_df = load_signals(symbol=asset_cfg["label"], limit=1)
+        hist_df = load_signals(symbol=symbol, limit=1)
         if not hist_df.empty:
             st.markdown("**Última señal guardada:**")
             last = hist_df.iloc[0]
@@ -134,17 +134,18 @@ with tab_signal:
     # Ejecutar análisis
     # ----------------------------------------------------------------
     with st.spinner("Descargando datos..."):
+        gold_days = asset_cfg.get("days_history", 730)
         if asset_cfg["source"] == "binance":
             data = fetch_multi_timeframe(symbol, ["4h", "1d"], days=730)
             df_4h    = data.get("4h",  pd.DataFrame())
             df_daily = data.get("1d",  pd.DataFrame())
             funding  = fetch_funding_rates(symbol, days=90)
         else:
-            df_4h    = fetch_gold(timeframe="4h", days=730)
-            df_daily = fetch_gold(timeframe="1d", days=730)
+            df_daily = fetch_gold(timeframe="1d", days=gold_days)
+            df_4h    = df_daily.copy() if not df_daily.empty else pd.DataFrame()
             funding  = pd.Series(dtype=float)
 
-        macro_df = fetch_macro(days=730)
+        macro_df = fetch_macro(days=min(gold_days, 730))
 
     if df_4h.empty:
         st.error("No se pudieron obtener datos. Revisa tu conexión o las credenciales.")
@@ -154,13 +155,13 @@ with tab_signal:
     # Detectar setups
     # ----------------------------------------------------------------
     with st.spinner("Detectando setups técnicos..."):
-        df_setups = detect_all_setups(df_4h, df_daily, symbol=asset_cfg["label"])
+        df_setups = detect_all_setups(df_4h, df_daily, symbol=symbol)
 
     # ----------------------------------------------------------------
     # Entrenamiento / carga de modelo ML
     # ----------------------------------------------------------------
     with st.spinner("Preparando modelo ML..."):
-        model, feat_cols, medians = load_model(asset_cfg["label"])
+        model, feat_cols, medians = load_model(symbol)
 
         if model is None:
             st.info("Entrenando modelo por primera vez (puede tardar 1-2 min)...")
@@ -170,7 +171,7 @@ with tab_signal:
                 macro_df=macro_df,
             )
             if not dataset.empty and len(dataset) >= ML_PARAMS["min_train_samples"]:
-                model, feat_cols, wf = train_model(dataset, symbol=asset_cfg["label"])
+                model, feat_cols, wf = train_model(dataset, symbol=symbol)
                 if wf:
                     st.success(
                         f"Modelo entrenado | AUC WF: {wf.get('auc',0):.3f} | "
@@ -187,7 +188,7 @@ with tab_signal:
     # ----------------------------------------------------------------
     with st.spinner("Evaluando setups con ML..."):
         if not df_setups.empty:
-            df_setups = score_setups(df_setups, df_4h, asset_cfg["label"], macro_df)
+            df_setups = score_setups(df_setups, df_4h, symbol, macro_df)
 
     # ----------------------------------------------------------------
     # Sentimiento
@@ -205,7 +206,11 @@ with tab_signal:
         recent = df_setups[
             df_setups["ts"] >= df_setups["ts"].max() - pd.Timedelta(hours=12)
         ]
-        approved = recent[recent.get("ml_approved", pd.Series(True, index=recent.index))]
+        # Usar el umbral del slider del sidebar (no el hardcoded de ML_PARAMS)
+        if "ml_score" in recent.columns:
+            approved = recent[recent["ml_score"] >= ml_threshold]
+        else:
+            approved = recent
         if not approved.empty:
             best = approved.loc[approved["ml_score"].idxmax()]
 
@@ -435,7 +440,7 @@ with tab_backtest:
             results = run_backtest(
                 df_4h=df_4h_bt,
                 df_daily=df_1d_bt,
-                symbol=asset_cfg["label"],
+                symbol=symbol,
                 macro_df=bt_macro,
                 initial_capital=capital,
             )
@@ -492,12 +497,12 @@ with tab_backtest:
 with tab_model:
     st.header("Análisis del Modelo ML")
 
-    model_loaded, feat_cols, medians = load_model(asset_cfg["label"])
+    model_loaded, feat_cols, medians = load_model(symbol)
     if model_loaded is None:
         st.info("Aún no hay modelo entrenado para este activo. Genera una señal primero.")
     else:
         # Feature importance
-        imp = get_model_importance(asset_cfg["label"], top_n=20)
+        imp = get_model_importance(symbol, top_n=20)
         if not imp.empty:
             st.subheader("Top 20 Features (Importancia)")
             fig_imp = px.bar(
@@ -543,7 +548,7 @@ with tab_model:
 with tab_history:
     st.header("Historial de Señales")
 
-    hist_df = load_signals(symbol=asset_cfg["label"], limit=200)
+    hist_df = load_signals(symbol=symbol, limit=200)
     if hist_df.empty:
         st.info("No hay señales guardadas para este activo aún.")
     else:

@@ -1,7 +1,14 @@
 """
 Descarga datos del Oro y activos macro via yfinance.
 GC=F (Gold Futures CME) como fuente principal.
+
+Nota sobre timeframes:
+  yfinance no tiene intervalo 4H nativo y limita datos intradiarios.
+  Para Gold, se usan datos DIARIOS como timeframe primario (apropiado
+  porque el oro opera en sesiones, no 24/7 como crypto, y los setups
+  técnicos funcionan mejor en diario para commodities).
 """
+import time
 from datetime import datetime, timedelta
 import pandas as pd
 from loguru import logger
@@ -15,12 +22,9 @@ except ImportError:
 
 def fetch_gold(timeframe: str = "1d", days: int = 730) -> pd.DataFrame:
     """
-    Descarga OHLCV del Oro. Prioriza GC=F (futuros CME).
-    Valida que el precio sea > $1500/oz.
-
-    Args:
-        timeframe: "1h", "4h" (usa yf interval), "1d"
-        days: Historia hacia atrás
+    Descarga OHLCV del Oro desde GC=F (futuros CME).
+    Para Gold, siempre usa datos diarios (más fiables y con más historia).
+    El timeframe "4h" devuelve los mismos datos diarios (proxy).
 
     Returns:
         DataFrame OHLCV con index datetime UTC.
@@ -29,86 +33,62 @@ def fetch_gold(timeframe: str = "1d", days: int = 730) -> pd.DataFrame:
         logger.warning("yfinance no instalado. pip install yfinance")
         return pd.DataFrame()
 
-    end = datetime.now()
-
-    # yfinance limita datos intradiarios a ~730 días; para 4h usamos
-    # 1h con ventana corta y resampleamos. Si falla, usamos daily como proxy.
-    if timeframe == "4h":
-        df = _fetch_gold_4h(end, days)
-        return df
-
-    # Para 1d: descarga directa
+    end   = datetime.now()
     start = end - timedelta(days=days)
-    return _fetch_gold_raw("1d", start, end)
+    return _fetch_gold_daily(start, end)
 
 
-def _fetch_gold_raw(yf_interval: str, start, end) -> pd.DataFrame:
-    """Descarga OHLCV de GC=F (o XAUUSD=X como fallback)."""
-    candidatos = [("GC=F", "Gold Futures CME"), ("XAUUSD=X", "Spot Gold FX")]
+def _fetch_gold_daily(start, end) -> pd.DataFrame:
+    """Descarga datos diarios de GC=F con reintentos."""
+    candidatos = [("GC=F", "Gold Futures CME"), ("GLD", "SPDR Gold ETF")]
+
     for ticker, desc in candidatos:
-        try:
-            raw = yf.download(
-                ticker, start=start, end=end,
-                interval=yf_interval,
-                progress=False, auto_adjust=True,
-            )
-            if raw.empty:
-                continue
-            if isinstance(raw.columns, pd.MultiIndex):
-                raw.columns = raw.columns.get_level_values(0)
+        for attempt in range(3):
+            try:
+                raw = yf.download(
+                    ticker, start=start, end=end,
+                    interval="1d",
+                    progress=False, auto_adjust=True,
+                )
+                if raw.empty:
+                    break
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = raw.columns.get_level_values(0)
 
-            df = raw[["Open", "High", "Low", "Close", "Volume"]].copy()
-            df.columns = ["open", "high", "low", "close", "volume"]
-            df.index = pd.to_datetime(df.index)
-            if df.index.tz is None:
-                df.index = df.index.tz_localize("UTC")
-            df = df.dropna()
+                df = raw[["Open", "High", "Low", "Close", "Volume"]].copy()
+                df.columns = ["open", "high", "low", "close", "volume"]
+                df.index = pd.to_datetime(df.index)
+                if df.index.tz is None:
+                    df.index = df.index.tz_localize("UTC")
+                df = df.dropna()
 
-            if df.empty:
-                continue
-            last_close = float(df.iloc[-1]["close"])
-            if last_close < 1500:
-                logger.warning(f"{ticker} precio inesperado (${last_close:.0f}), descartado")
-                continue
+                if df.empty:
+                    break
 
-            logger.success(f"Oro cargado desde {ticker} | "
-                           f"${last_close:,.0f}/oz | {len(df)} barras")
-            return df
-        except Exception as e:
-            logger.warning(f"Error con {ticker}: {e}")
-            continue
+                last_close = float(df.iloc[-1]["close"])
+                # GLD cotiza ~1/10 del precio del oro → multiplicar
+                if ticker == "GLD":
+                    df[["open", "high", "low", "close"]] *= 10
+
+                last_close_adj = float(df.iloc[-1]["close"])
+                if last_close_adj < 500:
+                    logger.warning(f"{ticker} precio inesperado (${last_close_adj:.0f}), descartado")
+                    break
+
+                logger.success(
+                    f"Oro cargado desde {ticker} ({desc}) | "
+                    f"${last_close_adj:,.0f}/oz | {len(df)} barras"
+                )
+                return df
+
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.warning(f"{ticker}: {e}")
+
     logger.error("No se pudo obtener datos del Oro")
     return pd.DataFrame()
-
-
-def _fetch_gold_4h(end: datetime, days: int) -> pd.DataFrame:
-    """
-    Intenta obtener datos 4H del Oro.
-    yfinance no tiene intervalo 4h nativo — usa 1h (max ~60 días) y resamplea.
-    Si el resultado tiene < 100 barras, hace fallback a datos diarios como proxy.
-    """
-    # Intentar 1h para los últimos 59 días (límite seguro de yfinance)
-    window_days = min(days, 59)
-    start_1h = end - timedelta(days=window_days)
-    df_1h = _fetch_gold_raw("1h", start_1h, end)
-
-    if not df_1h.empty:
-        df_4h = df_1h.resample("4h").agg({
-            "open":   "first",
-            "high":   "max",
-            "low":    "min",
-            "close":  "last",
-            "volume": "sum",
-        }).dropna()
-        if len(df_4h) >= 100:
-            logger.info(f"Gold 4H: {len(df_4h)} barras (desde 1H resampled, últimos {window_days}d)")
-            return df_4h
-
-    # Fallback: datos diarios como proxy de 4H
-    # (1 barra diaria ≈ comportamiento de sesión completa, válido para Gold)
-    logger.info("Gold 4H: usando datos diarios como proxy (yfinance no provee 4H histórico)")
-    start_daily = end - timedelta(days=days)
-    return _fetch_gold_raw("1d", start_daily, end)
 
 
 def fetch_macro(days: int = 730) -> pd.DataFrame:

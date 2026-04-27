@@ -55,8 +55,11 @@ def _load_data(symbol: str):
     logger.info(f"Cargando datos para {symbol}...")
 
     if is_gold:
-        df_4h    = fetch_gold(timeframe="4h",    days=730)
-        df_daily = fetch_gold(timeframe="1d",    days=730)
+        # Gold: una sola descarga de datos diarios.
+        # Los datos diarios se usan para ambos timeframes (diario es
+        # el frame apropiado para Gold, que cotiza en sesiones).
+        df_daily = fetch_gold(timeframe="1d", days=730)
+        df_4h    = df_daily.copy() if not df_daily.empty else None
         macro_df = fetch_macro(days=730)
     else:
         data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=730)

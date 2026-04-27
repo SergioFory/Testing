@@ -20,12 +20,15 @@ def _ccxt_exchange(testnet: bool = False):
     if not HAS_CCXT:
         raise ImportError("pip install ccxt")
     from config.settings import BINANCE_API_KEY, BINANCE_API_SECRET
-    ex = ccxt.binance({
-        "apiKey":  BINANCE_API_KEY,
-        "secret":  BINANCE_API_SECRET,
+    config = {
         "options": {"defaultType": "future"},
         "enableRateLimit": True,
-    })
+    }
+    # Solo incluir keys si están configuradas (OHLCV es endpoint público)
+    if BINANCE_API_KEY and BINANCE_API_SECRET:
+        config["apiKey"] = BINANCE_API_KEY
+        config["secret"] = BINANCE_API_SECRET
+    ex = ccxt.binance(config)
     return ex
 
 
@@ -129,12 +132,14 @@ def fetch_open_interest(symbol: str, days: int = 29) -> pd.DataFrame:
     """
     Open interest histórico diario (Binance limita a ~30 días).
     Retorna DataFrame con columna 'oi', index datetime UTC.
+    Requiere API keys — devuelve vacío si no están configuradas.
     """
-    if not HAS_CCXT:
+    from config.settings import BINANCE_API_KEY, BINANCE_API_SECRET
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        logger.debug("Open interest omitido: API keys no configuradas.")
         return pd.DataFrame()
     try:
         from binance.client import Client
-        from config.settings import BINANCE_API_KEY, BINANCE_API_SECRET
         client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
         start_ms = int(
             (datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000

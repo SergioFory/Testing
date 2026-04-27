@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.db
+*.sqlite
+data/raw/
+data/cache/
+*.log
+.vscode/settings.json

@@ -1,0 +1,40 @@
+# Core
+pandas>=2.0.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
+
+# Data sources
+ccxt>=4.2.0
+yfinance>=0.2.36
+python-binance>=1.0.19
+requests>=2.31.0
+
+# Technical analysis
+ta>=0.11.0
+pandas-ta>=0.3.14b
+
+# Machine Learning
+lightgbm>=4.3.0
+scikit-learn>=1.4.0
+xgboost>=2.0.0
+shap>=0.44.0
+
+# Hidden Markov Models
+hmmlearn>=0.3.2
+
+# Backtest
+vectorbt>=0.26.2
+
+# Dashboard
+streamlit>=1.35.0
+plotly>=5.20.0
+matplotlib>=3.8.0
+
+# Database
+sqlalchemy>=2.0.0
+
+# Utilities
+pytz>=2024.1
+schedule>=1.2.1
+loguru>=0.7.2
+rich>=13.7.0

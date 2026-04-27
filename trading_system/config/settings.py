@@ -1,0 +1,152 @@
+"""
+Configuración central del sistema de trading.
+Todos los parámetros operativos viven aquí.
+"""
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# =============================================================================
+# RUTAS
+# =============================================================================
+BASE_DIR   = Path(__file__).parent.parent
+DATA_DIR   = BASE_DIR / "data" / "cache"
+DB_PATH    = BASE_DIR / "data" / "trading.db"
+LOG_DIR    = BASE_DIR / "logs"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# =============================================================================
+# CREDENCIALES
+# =============================================================================
+BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+CRYPTOPANIC_KEY    = os.getenv("CRYPTOPANIC_API_KEY", "")
+ANTHROPIC_KEY      = os.getenv("ANTHROPIC_API_KEY", "")
+TELEGRAM_TOKEN     = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# =============================================================================
+# ACTIVOS
+# =============================================================================
+ASSETS = {
+    "BTCUSDT": {
+        "label":        "BTC",
+        "source":       "binance",
+        "exchange":     "binanceusdm",
+        "min_range_pct": 0.015,   # 1.5% rango mínimo para contar como "movimiento grande"
+        "pip_value":    1.0,
+    },
+    "ETHUSDT": {
+        "label":        "ETH",
+        "source":       "binance",
+        "exchange":     "binanceusdm",
+        "min_range_pct": 0.020,
+        "pip_value":    1.0,
+    },
+    "XAUUSD": {
+        "label":        "GOLD",
+        "source":       "yfinance",
+        "yf_ticker":    "GC=F",
+        "min_range_pct": 0.008,
+        "pip_value":    1.0,
+    },
+}
+
+# =============================================================================
+# TIMEFRAMES
+# =============================================================================
+TIMEFRAME_PRIMARY = "4h"    # Timeframe para generar setups
+TIMEFRAME_TREND   = "1d"    # Timeframe para filtro de tendencia
+TIMEFRAME_ENTRY   = "1h"    # Timeframe para afinar entrada (futuro)
+DAYS_HISTORY      = 730     # 2 años de historia para backtest
+
+# =============================================================================
+# SETUPS TÉCNICOS — parámetros por setup
+# =============================================================================
+BREAKOUT_PARAMS = {
+    "donchian_period":  20,     # Período del canal Donchian
+    "vol_factor":       1.3,    # Volumen debe ser X veces el promedio
+    "atr_min_move":     1.5,    # Movimiento mínimo en ATRs para confirmar
+    "lookback_days":    5,      # Días de consolidación previa requeridos
+}
+
+PULLBACK_PARAMS = {
+    "ema_fast":         21,
+    "ema_slow":         55,
+    "rsi_period":       14,
+    "rsi_oversold":     45,     # RSI < 45 en pullback alcista (zona de compra)
+    "rsi_overbought":   55,     # RSI > 55 en pullback bajista (zona de venta)
+    "min_trend_bars":   10,     # Barras en tendencia para confirmar dirección
+    "max_pullback_pct": 0.05,   # Máximo 5% de corrección para seguir siendo pullback
+}
+
+REVERSAL_PARAMS = {
+    "rsi_period":       14,
+    "rsi_extreme_low":  30,     # RSI < 30 para buscar reversal alcista
+    "rsi_extreme_high": 70,     # RSI > 70 para buscar reversal bajista
+    "bb_period":        20,
+    "bb_std":           2.0,
+    "volume_confirm":   True,
+}
+
+# =============================================================================
+# MODELO ML
+# =============================================================================
+ML_PARAMS = {
+    "n_estimators":     400,
+    "learning_rate":    0.02,
+    "num_leaves":       31,
+    "max_depth":        6,
+    "min_child_samples":20,
+    "subsample":        0.8,
+    "colsample_bytree": 0.8,
+    "min_train_samples":100,    # Mínimo de setups históricos para entrenar
+    "retrain_every":    7,      # Reentrenar cada N días
+    "prob_threshold":   0.58,   # Umbral de confianza para emitir señal
+}
+
+WALK_FORWARD = {
+    "n_splits":         5,
+    "train_size":       180,    # Días de entrenamiento por fold
+    "test_size":        30,     # Días de evaluación por fold
+}
+
+# =============================================================================
+# GESTIÓN DE RIESGO
+# =============================================================================
+RISK = {
+    "capital_inicial":  10_000,     # Capital inicial en USD (para backtest)
+    "risk_per_trade":   0.01,       # 1% del capital por operación
+    "atr_stop_mult":    1.5,        # Stop loss = 1.5 × ATR
+    "atr_target_mult":  3.0,        # Take profit = 3.0 × ATR (R:R 2:1)
+    "max_positions":    3,          # Máximo de posiciones abiertas simultáneas
+    "max_daily_loss":   0.03,       # Si pierdas 3% en un día, parar
+    "max_drawdown":     0.15,       # Si drawdown alcanza 15%, revisar sistema
+    "atr_period":       14,
+}
+
+# =============================================================================
+# SENTIMENT
+# =============================================================================
+SENTIMENT = {
+    "min_news_score":   0.0,        # Score mínimo para no vetar una señal
+    "veto_threshold":  -0.4,        # Si sentiment < -0.4 → no operar LONG
+    "boost_threshold":  0.4,        # Si sentiment > 0.4 → boost de confianza
+    "lookback_hours":   24,         # Horas de noticias a considerar
+    "enabled":          True,
+}
+
+# =============================================================================
+# BACKTEST
+# =============================================================================
+BACKTEST = {
+    "start_date":       "2022-01-01",
+    "end_date":         None,           # None = hasta hoy
+    "commission":       0.0004,         # 0.04% (Binance Maker fee)
+    "slippage":         0.0002,         # 0.02% slippage estimado
+    "initial_capital":  10_000,
+}

@@ -35,7 +35,7 @@ logger.add(
     level="DEBUG",
 )
 
-from config.settings import ASSETS, BACKTEST, RISK
+from config.settings import ASSETS, BACKTEST, RISK, ML_PARAMS
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +200,9 @@ def cmd_train(symbol: str):
 
     logger.info(
         f"Modelo guardado | "
-        f"CV ROC-AUC: {metrics.get('mean_roc_auc', 0):.3f} ± "
-        f"{metrics.get('std_roc_auc', 0):.3f}"
+        f"Walk-Forward AUC: {metrics.get('auc', 0):.3f} | "
+        f"Precision@{ML_PARAMS['prob_threshold']}: {metrics.get('precision', 0):.3f} | "
+        f"Folds: {metrics.get('n_folds', 0)}"
     )
 
 

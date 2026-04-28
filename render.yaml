@@ -4,7 +4,7 @@ services:
     name: trading-dashboard
     runtime: python
     plan: starter
-    region: oregon
+    region: frankfurt
 
     buildCommand: |
       pip install --upgrade pip
@@ -36,6 +36,7 @@ services:
     name: trading-scheduler
     runtime: python
     plan: starter
+    region: frankfurt
 
     buildCommand: |
       pip install --upgrade pip

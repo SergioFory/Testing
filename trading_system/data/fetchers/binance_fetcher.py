@@ -1,8 +1,11 @@
 """
 Descarga datos de mercado: OHLCV, funding rates.
 
-Fuente primaria:  Binance Futures (ccxt) — puede fallar desde IPs de EE.UU.
-Fuente de respaldo: Bybit (ccxt) — sin restricciones geográficas, mismos datos.
+Jerarquía de fuentes (se prueban en orden hasta obtener datos):
+  1. Binance Futures (ccxt)  — bloquea IPs de EE.UU. (HTTP 451)
+  2. Bybit (ccxt)            — CloudFront bloquea IPs AWS US (HTTP 403)
+  3. Gate.io (ccxt)          — futuros perpetuos, sin restricción geográfica conocida
+  4. yfinance                — precios spot (BTC-USD/ETH-USD), último recurso
 """
 import time
 from datetime import datetime, timezone, timedelta
@@ -17,10 +20,17 @@ except ImportError:
     HAS_CCXT = False
     logger.warning("ccxt no instalado. Instala con: pip install ccxt")
 
-# Mapa de símbolos Binance → Bybit (futuros perpetuos lineales)
 _BYBIT_SYMBOL = {
     "BTCUSDT": "BTC/USDT:USDT",
     "ETHUSDT": "ETH/USDT:USDT",
+}
+_GATEIO_SYMBOL = {
+    "BTCUSDT": "BTC/USDT:USDT",
+    "ETHUSDT": "ETH/USDT:USDT",
+}
+_YFINANCE_SYMBOL = {
+    "BTCUSDT": "BTC-USD",
+    "ETHUSDT": "ETH-USD",
 }
 
 
@@ -39,6 +49,12 @@ def _bybit_exchange():
     if not HAS_CCXT:
         raise ImportError("pip install ccxt")
     return ccxt.bybit({"options": {"defaultType": "linear"}, "enableRateLimit": True})
+
+
+def _gateio_exchange():
+    if not HAS_CCXT:
+        raise ImportError("pip install ccxt")
+    return ccxt.gateio({"options": {"defaultType": "swap"}, "enableRateLimit": True})
 
 
 def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int) -> pd.DataFrame:
@@ -76,17 +92,56 @@ def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int) -> pd.Da
     return df
 
 
+def _fetch_ohlcv_yfinance(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
+    """Fallback final: precios spot via yfinance (BTC-USD / ETH-USD)."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        return pd.DataFrame()
+
+    ticker = _YFINANCE_SYMBOL.get(symbol)
+    if not ticker:
+        return pd.DataFrame()
+
+    # yfinance 1h solo va 730 días atrás; 1d va a max
+    yf_interval = "1h" if timeframe in ("1h", "4h") else "1d"
+    period = f"{min(days, 729)}d" if yf_interval == "1h" else "max"
+
+    try:
+        raw = yf.download(ticker, period=period, interval=yf_interval,
+                          progress=False, auto_adjust=True)
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+
+        df = raw.copy()
+        df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower()
+                      for c in df.columns]
+        df.index = pd.to_datetime(df.index, utc=True)
+        df = df[["open", "high", "low", "close", "volume"]].astype(float)
+
+        if timeframe == "4h" and yf_interval == "1h":
+            df = df.resample("4h").agg({
+                "open": "first", "high": "max", "low": "min",
+                "close": "last", "volume": "sum",
+            }).dropna()
+
+        return df
+    except Exception as e:
+        logger.error(f"yfinance falló para {symbol}: {e}")
+        return pd.DataFrame()
+
+
 def fetch_ohlcv(symbol: str, timeframe: str = "4h", days: int = 730) -> pd.DataFrame:
     """
-    Descarga OHLCV. Intenta Binance primero; si falla por bloqueo de IP (error 451),
-    usa Bybit automáticamente.
+    Descarga OHLCV con fallback automático:
+      Binance → Bybit → Gate.io → yfinance
     """
     if not HAS_CCXT:
         return pd.DataFrame()
 
     logger.info(f"Descargando {symbol} {timeframe} ({days} días)...")
 
-    # Intento 1: Binance
+    # 1. Binance
     try:
         df = _fetch_ohlcv_from(_binance_exchange(), symbol, timeframe, days)
         if not df.empty:
@@ -96,41 +151,57 @@ def fetch_ohlcv(symbol: str, timeframe: str = "4h", days: int = 730) -> pd.DataF
     except Exception as e:
         logger.warning(f"Binance no disponible para {symbol}: {e}")
 
-    # Intento 2: Bybit (sin restricciones geográficas)
+    # 2. Bybit
     bybit_sym = _BYBIT_SYMBOL.get(symbol)
-    if not bybit_sym:
-        logger.warning(f"Sin datos para {symbol} {timeframe}")
-        return pd.DataFrame()
+    if bybit_sym:
+        logger.info(f"Intentando Bybit para {symbol}...")
+        try:
+            df = _fetch_ohlcv_from(_bybit_exchange(), bybit_sym, timeframe, days)
+            if not df.empty:
+                logger.success(f"{symbol} {timeframe} vía Bybit: {len(df)} barras | "
+                               f"{df.index[0].date()} → {df.index[-1].date()}")
+                return df
+        except Exception as e:
+            logger.warning(f"Bybit no disponible para {symbol}: {e}")
 
-    logger.info(f"Usando Bybit como fuente alternativa para {symbol}...")
-    try:
-        df = _fetch_ohlcv_from(_bybit_exchange(), bybit_sym, timeframe, days)
-        if not df.empty:
-            logger.success(f"{symbol} {timeframe} vía Bybit: {len(df)} barras | "
-                           f"{df.index[0].date()} → {df.index[-1].date()}")
-            return df
-    except Exception as e:
-        logger.error(f"Bybit también falló para {symbol}: {e}")
+    # 3. Gate.io
+    gateio_sym = _GATEIO_SYMBOL.get(symbol)
+    if gateio_sym:
+        logger.info(f"Intentando Gate.io para {symbol}...")
+        try:
+            df = _fetch_ohlcv_from(_gateio_exchange(), gateio_sym, timeframe, days)
+            if not df.empty:
+                logger.success(f"{symbol} {timeframe} vía Gate.io: {len(df)} barras | "
+                               f"{df.index[0].date()} → {df.index[-1].date()}")
+                return df
+        except Exception as e:
+            logger.warning(f"Gate.io no disponible para {symbol}: {e}")
 
-    logger.warning(f"Sin datos para {symbol} {timeframe}")
+    # 4. yfinance (precios spot, último recurso)
+    logger.info(f"Intentando yfinance (spot) para {symbol}...")
+    df = _fetch_ohlcv_yfinance(symbol, timeframe, days)
+    if not df.empty:
+        logger.success(f"{symbol} {timeframe} vía yfinance: {len(df)} barras | "
+                       f"{df.index[0].date()} → {df.index[-1].date()}")
+        return df
+
+    logger.warning(f"Sin datos para {symbol} {timeframe} (todas las fuentes fallaron)")
     return pd.DataFrame()
 
 
 def fetch_funding_rates(symbol: str, days: int = 365) -> pd.Series:
     """
     Tasa de financiamiento diaria promedio.
-    Intenta Binance (con API key) → Bybit (público).
+    Intenta Binance → Bybit → Gate.io.
     """
     if not HAS_CCXT:
         return pd.Series(dtype=float)
 
-    # Intento Binance
-    try:
-        ex = _binance_exchange()
+    def _fetch_rates(ex, sym):
         since_ms = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
         all_rates = []
         while True:
-            chunk = ex.fetch_funding_rate_history(symbol, since=since_ms, limit=1000)
+            chunk = ex.fetch_funding_rate_history(sym, since=since_ms, limit=1000)
             if not chunk:
                 break
             all_rates.extend(chunk)
@@ -138,42 +209,46 @@ def fetch_funding_rates(symbol: str, days: int = 365) -> pd.Series:
             if len(chunk) < 1000:
                 break
             time.sleep(0.5)
-        if all_rates:
-            df = pd.DataFrame(all_rates)
-            df["ts"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-            df["rate"] = df["fundingRate"].astype(float)
-            df.set_index("ts", inplace=True)
-            return df["rate"].resample("1D").mean()
+        return all_rates
+
+    def _rates_to_series(all_rates):
+        df = pd.DataFrame(all_rates)
+        df["ts"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df["rate"] = df["fundingRate"].astype(float)
+        df.set_index("ts", inplace=True)
+        return df["rate"].resample("1D").mean()
+
+    # Binance
+    try:
+        rates = _fetch_rates(_binance_exchange(), symbol)
+        if rates:
+            return _rates_to_series(rates)
     except Exception as e:
         logger.warning(f"Funding rates Binance no disponibles para {symbol}: {e}")
 
-    # Fallback Bybit
+    # Bybit
     bybit_sym = _BYBIT_SYMBOL.get(symbol)
-    if not bybit_sym:
-        return pd.Series(dtype=float)
-    try:
-        ex = _bybit_exchange()
-        since_ms = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
-        all_rates = []
-        while True:
-            chunk = ex.fetch_funding_rate_history(bybit_sym, since=since_ms, limit=1000)
-            if not chunk:
-                break
-            all_rates.extend(chunk)
-            since_ms = chunk[-1]["timestamp"] + 1
-            if len(chunk) < 1000:
-                break
-            time.sleep(0.5)
-        if all_rates:
-            df = pd.DataFrame(all_rates)
-            df["ts"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-            df["rate"] = df["fundingRate"].astype(float)
-            df.set_index("ts", inplace=True)
-            daily = df["rate"].resample("1D").mean()
-            logger.success(f"Funding rates {symbol} vía Bybit: {len(daily)} días")
-            return daily
-    except Exception as e:
-        logger.warning(f"Funding rates Bybit no disponibles para {symbol}: {e}")
+    if bybit_sym:
+        try:
+            rates = _fetch_rates(_bybit_exchange(), bybit_sym)
+            if rates:
+                series = _rates_to_series(rates)
+                logger.success(f"Funding rates {symbol} vía Bybit: {len(series)} días")
+                return series
+        except Exception as e:
+            logger.warning(f"Funding rates Bybit no disponibles para {symbol}: {e}")
+
+    # Gate.io
+    gateio_sym = _GATEIO_SYMBOL.get(symbol)
+    if gateio_sym:
+        try:
+            rates = _fetch_rates(_gateio_exchange(), gateio_sym)
+            if rates:
+                series = _rates_to_series(rates)
+                logger.success(f"Funding rates {symbol} vía Gate.io: {len(series)} días")
+                return series
+        except Exception as e:
+            logger.warning(f"Funding rates Gate.io no disponibles para {symbol}: {e}")
 
     return pd.Series(dtype=float)
 

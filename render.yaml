@@ -1,46 +1,22 @@
-##
-## render.yaml — Infraestructura del Sistema de Trading ML v5.0
-##
-## Servicios:
-##   trading-dashboard  → Web (Streamlit, accesible desde el browser)
-##   trading-scheduler  → Worker en background (señales + reentrenamiento)
-##
-## Base de datos:
-##   trading-db         → PostgreSQL gestionado por Render
-##
-## Deploy:
-##   1. render.com → New → Blueprint → conecta repo SergioFory/Testing
-##   2. Render detecta este archivo y crea los 3 recursos automáticamente
-##   3. Añade las variables secretas (sync: false) en el dashboard de Render
-##
-
 databases:
   - name: trading-db
     databaseName: trading
     user: trading_user
-    plan: free               # 90 días gratis; luego "starter" ($7/mes) para persistencia duradera
+    plan: free
 
 services:
-  # -------------------------------------------------------------------------
-  # Dashboard Streamlit (interfaz web)
-  # -------------------------------------------------------------------------
+  # Dashboard Streamlit
   - type: web
     name: trading-dashboard
     runtime: python
-    plan: free               # 512 MB RAM; se duerme tras 15 min de inactividad
-    region: oregon           # Opciones: oregon | frankfurt | singapore | ohio
-    pythonVersion: "3.11.0"
+    plan: free
+    region: oregon
 
     buildCommand: |
       pip install --upgrade pip
       pip install -r trading_system/requirements.txt
 
-    startCommand: >
-      streamlit run trading_system/dashboard/app.py
-      --server.port $PORT
-      --server.address 0.0.0.0
-      --server.headless true
-      --browser.gatherUsageStats false
+    startCommand: streamlit run trading_system/dashboard/app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false
 
     healthCheckPath: /
     autoDeploy: true
@@ -50,64 +26,45 @@ services:
         fromDatabase:
           name: trading-db
           property: connectionString
-
+      - key: PYTHON_VERSION
+        value: 3.11.0
       - key: PYTHONPATH
         value: /opt/render/project/src
-
-      # --- Credenciales: añadir manualmente en Environment del dashboard de Render ---
       - key: BINANCE_API_KEY
         sync: false
-
       - key: BINANCE_API_SECRET
         sync: false
-
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-
       - key: TELEGRAM_CHAT_ID
         sync: false
 
-  # -------------------------------------------------------------------------
-  # Scheduler / Worker
-  # Arranca descargando datos y entrenando modelos, luego pasa a modo daemon.
-  # Los modelos se guardan en el filesystem (efímero en free tier):
-  #   → se reentrenan automáticamente al reiniciar (~10 min) y cada 7 días.
-  #   → Para persistencia permanente añade un Render Disk montado en
-  #     /opt/render/project/src/trading_system/models  ($0.25/GB/mes)
-  # -------------------------------------------------------------------------
+  # Worker: entrena modelos al arrancar y luego corre el scheduler
   - type: worker
     name: trading-scheduler
     runtime: python
     plan: free
-    pythonVersion: "3.11.0"
 
     buildCommand: |
       pip install --upgrade pip
       pip install -r trading_system/requirements.txt
 
-    # 1. Actualiza datos y entrena los 3 modelos desde cero
-    # 2. Arranca el daemon de señales con reentrenamiento nocturno
-    startCommand: >
-      python trading_system/main.py retrain --all &&
-      python trading_system/main.py schedule --interval 60 --retrain-hour 03:00
+    startCommand: python trading_system/main.py retrain --all && python trading_system/main.py schedule --interval 60 --retrain-hour 03:00
 
     envVars:
       - key: DATABASE_URL
         fromDatabase:
           name: trading-db
           property: connectionString
-
+      - key: PYTHON_VERSION
+        value: 3.11.0
       - key: PYTHONPATH
         value: /opt/render/project/src
-
       - key: BINANCE_API_KEY
         sync: false
-
       - key: BINANCE_API_SECRET
         sync: false
-
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-
       - key: TELEGRAM_CHAT_ID
         sync: false

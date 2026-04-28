@@ -2,14 +2,14 @@ databases:
   - name: trading-db
     databaseName: trading
     user: trading_user
-    plan: free
+    plan: starter
 
 services:
   # Dashboard Streamlit
   - type: web
     name: trading-dashboard
     runtime: python
-    plan: free
+    plan: starter
     region: oregon
 
     buildCommand: |
@@ -43,7 +43,7 @@ services:
   - type: worker
     name: trading-scheduler
     runtime: python
-    plan: free
+    plan: starter
 
     buildCommand: |
       pip install --upgrade pip

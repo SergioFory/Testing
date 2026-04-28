@@ -35,7 +35,7 @@ logger.add(
     level="DEBUG",
 )
 
-from config.settings import ASSETS, BACKTEST, RISK, ML_PARAMS
+from config.settings import ASSETS, BACKTEST, RISK, ML_PARAMS, DAYS_HISTORY
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +63,8 @@ def _load_data(symbol: str):
         df_4h     = df_daily.copy() if not df_daily.empty else None
         macro_df  = fetch_macro(days=min(gold_days, 730))
     else:
-        data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=730)
+        crypto_days = ASSETS.get(symbol, {}).get("days_history", DAYS_HISTORY)
+        data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
         df_4h    = data.get("4h")
         df_daily = data.get("1d")
         macro_df = None

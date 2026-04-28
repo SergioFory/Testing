@@ -15,7 +15,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timezone
 from loguru import logger
 
-from config.settings import ASSETS, RISK, ML_PARAMS, SENTIMENT as SENT_CFG
+from config.settings import ASSETS, RISK, ML_PARAMS, SENTIMENT as SENT_CFG, DAYS_HISTORY
 from data.database   import init_db, load_signals
 from data.fetchers   import fetch_ohlcv, fetch_multi_timeframe, fetch_gold, fetch_macro, fetch_funding_rates
 from signals.detector import detect_all_setups, get_current_setup
@@ -90,7 +90,7 @@ with st.sidebar:
     backtest_days   = st.slider("Días de backtest", 90, 730, 365) if run_backtest_cb else 365
 
     st.markdown("---")
-    run_btn = st.button("🔄 Generar señal", use_container_width=True, type="primary")
+    run_btn = st.button("🔄 Generar señal", width="stretch", type="primary")
     st.caption(f"v5.0 | Setup→ML→Risk | {datetime.now().strftime('%H:%M')}")
 
 # =============================================================================
@@ -136,7 +136,8 @@ with tab_signal:
     with st.spinner("Descargando datos..."):
         gold_days = asset_cfg.get("days_history", 730)
         if asset_cfg["source"] == "binance":
-            data = fetch_multi_timeframe(symbol, ["4h", "1d"], days=730)
+            crypto_days = asset_cfg.get("days_history", DAYS_HISTORY)
+            data = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
             df_4h    = data.get("4h",  pd.DataFrame())
             df_daily = data.get("1d",  pd.DataFrame())
             funding  = fetch_funding_rates(symbol, days=90)
@@ -202,11 +203,12 @@ with tab_signal:
     # Obtener mejor setup reciente
     # ----------------------------------------------------------------
     best = None
+    # Para activos con velas diarias (Gold) usamos ventana de 3 días; crypto 4H usa 12h
+    signal_lookback_h = 72 if asset_cfg["source"] != "binance" else 12
     if not df_setups.empty:
         recent = df_setups[
-            df_setups["ts"] >= df_setups["ts"].max() - pd.Timedelta(hours=12)
+            df_setups["ts"] >= df_setups["ts"].max() - pd.Timedelta(hours=signal_lookback_h)
         ]
-        # Usar el umbral del slider del sidebar (no el hardcoded de ML_PARAMS)
         if "ml_score" in recent.columns:
             approved = recent[recent["ml_score"] >= ml_threshold]
         else:
@@ -256,10 +258,11 @@ with tab_signal:
                 </div>
                 """, unsafe_allow_html=True)
         else:
-            st.markdown("""
+            window_label = f"{signal_lookback_h} horas" if signal_lookback_h < 48 else f"{signal_lookback_h // 24} días"
+            st.markdown(f"""
             <div class="signal-none">
             <h2>⚪ SIN SEÑAL</h2>
-            <p>No hay setups de alta probabilidad en las últimas 12 horas.</p>
+            <p>No hay setups de alta probabilidad en las últimas {window_label}.</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -394,7 +397,7 @@ with tab_signal:
             margin=dict(l=0, r=0, t=10, b=0),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     # ----------------------------------------------------------------
     # Todos los setups detectados
@@ -465,7 +468,7 @@ with tab_backtest:
                 )
                 fig_eq.add_hline(y=capital, line_dash="dash", line_color="gray",
                                   annotation_text="Capital inicial")
-                st.plotly_chart(fig_eq, use_container_width=True)
+                st.plotly_chart(fig_eq, width="stretch")
 
             # Trades
             trades_df = results.get("trades_df")
@@ -514,7 +517,7 @@ with tab_model:
                 color_continuous_scale="Blues",
             )
             fig_imp.update_layout(height=500, showlegend=False)
-            st.plotly_chart(fig_imp, use_container_width=True)
+            st.plotly_chart(fig_imp, width="stretch")
 
         st.subheader("Parámetros del Modelo")
         params_data = {

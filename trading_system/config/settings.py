@@ -50,8 +50,9 @@ ASSETS = {
         "label":        "BTC",
         "source":       "binance",
         "exchange":     "binanceusdm",
-        "min_range_pct": 0.015,   # 1.5% rango mínimo para contar como "movimiento grande"
+        "min_range_pct": 0.015,
         "pip_value":    1.0,
+        "days_history": 1095,   # 3 años → más muestras de entrenamiento ML
     },
     "ETHUSDT": {
         "label":        "ETH",
@@ -59,6 +60,7 @@ ASSETS = {
         "exchange":     "binanceusdm",
         "min_range_pct": 0.020,
         "pip_value":    1.0,
+        "days_history": 1095,   # 3 años → más muestras de entrenamiento ML
     },
     "XAUUSD": {
         "label":        "GOLD",

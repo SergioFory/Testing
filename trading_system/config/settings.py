@@ -52,9 +52,9 @@ ASSETS = {
         "exchange":     "binanceusdm",
         "min_range_pct": 0.015,
         "pip_value":    1.0,
-        "days_history": 1095,   # 3 años
+        "days_history": 1825,   # 5 años → ~400 setups esperados
         "forward_bars": 24,     # 24 × 4H = 4 días para resolver el trade
-        "ml_threshold": 0.52,   # calibrado al AUC=0.535 del modelo actual
+        "ml_threshold": 0.52,
     },
     "ETHUSDT": {
         "label":        "ETH",
@@ -62,9 +62,9 @@ ASSETS = {
         "exchange":     "binanceusdm",
         "min_range_pct": 0.020,
         "pip_value":    1.0,
-        "days_history": 1095,
-        "forward_bars": 24,     # 24 × 4H = 4 días para resolver el trade
-        "ml_threshold": 0.52,   # calibrado al AUC=0.502 del modelo actual
+        "days_history": 1825,
+        "forward_bars": 24,
+        "ml_threshold": 0.52,
     },
     "XAUUSD": {
         "label":        "GOLD",
@@ -72,9 +72,9 @@ ASSETS = {
         "yf_ticker":    "GC=F",
         "min_range_pct": 0.008,
         "pip_value":    1.0,
-        "days_history": 2500,   # ~6.8 años de diarios
-        "forward_bars": 12,     # 12 días hábiles ≈ 2.5 semanas (AUC=0.629, funciona bien)
-        "ml_threshold": 0.55,   # ligeramente menor a 0.58 para capturar más señales Gold
+        "days_history": 2500,
+        "forward_bars": 12,
+        "ml_threshold": 0.55,
     },
 }
 
@@ -121,6 +121,18 @@ REVERSAL_PARAMS = {
 # Gold usa datos diarios → filtros más relajados que crypto 4H.
 # =============================================================================
 ASSET_PARAMS_OVERRIDE = {
+    # Crypto: solo breakouts en mercado en tendencia (ADX > 20 = trending)
+    # Elimina los fakeouts que dominaban el dataset (249/282 breakouts en BTC)
+    "BTCUSDT": {
+        "BREAKOUT": {
+            "adx_min_trend": 20,
+        },
+    },
+    "ETHUSDT": {
+        "BREAKOUT": {
+            "adx_min_trend": 20,
+        },
+    },
     "XAUUSD": {
         "BREAKOUT": {
             # Diario: barras más pequeñas en ATR relativo; volumen de GC=F

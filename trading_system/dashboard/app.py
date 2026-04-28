@@ -190,7 +190,7 @@ with tab_signal:
             # ----------------------------------------------------------------
             with st.spinner("Evaluando setups con ML..."):
                 if not df_setups.empty:
-                    df_setups = score_setups(df_setups, df_4h, symbol, macro_df)
+                    df_setups = score_setups(df_setups, df_4h, symbol, macro_df, funding)
 
             # ----------------------------------------------------------------
             # Sentimiento

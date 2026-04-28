@@ -11,11 +11,12 @@ from config.settings import ML_PARAMS
 
 
 def score_setups(
-    df_setups:  pd.DataFrame,
-    df_ohlcv:   pd.DataFrame,
-    symbol:     str,
-    macro_df:   pd.DataFrame = None,
-    threshold:  float = None,
+    df_setups:      pd.DataFrame,
+    df_ohlcv:       pd.DataFrame,
+    symbol:         str,
+    macro_df:       pd.DataFrame = None,
+    funding_series: pd.Series = None,
+    threshold:      float = None,
 ) -> pd.DataFrame:
     """
     Aplica el modelo ML a cada setup en df_setups y agrega la columna 'ml_score'.
@@ -55,6 +56,7 @@ def score_setups(
             setup["direction"],
             setup["raw_score"],
             macro_df,
+            funding_series,
         )
         if not feat_row:
             scores.append(0.5)

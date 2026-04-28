@@ -140,6 +140,7 @@ def build_setup_feature_row(
     direction: str,
     raw_score: float,
     macro_df: pd.DataFrame = None,
+    funding_series: pd.Series = None,
 ) -> dict:
     """
     Construye el vector de features para UN setup específico.
@@ -202,6 +203,24 @@ def build_setup_feature_row(
             if col in features:
                 features[col] = -features[col]
 
+    # Funding rate (solo crypto): tasa actual, promedio 7d y señal direccional
+    if funding_series is not None and not funding_series.empty:
+        try:
+            setup_date = setup_ts.date() if hasattr(setup_ts, "date") else pd.Timestamp(setup_ts).date()
+            fr = funding_series.copy()
+            fr.index = pd.to_datetime(fr.index).normalize()
+            past = fr[fr.index.date <= setup_date].tail(7)
+            if len(past) > 0:
+                features["funding_current"] = float(past.iloc[-1])
+                features["funding_7d_mean"] = float(past.mean())
+                features["funding_7d_std"]  = float(past.std()) if len(past) > 1 else 0.0
+                features["funding_trend"]   = float(past.iloc[-1] - past.iloc[0]) if len(past) > 1 else 0.0
+                # Señal: funding positivo = mercado sobrecargado de longs (contrarian para LONG)
+                features["funding_signal"] = -1.0 if (direction == "long" and past.iloc[-1] > 0.001) else \
+                                              1.0 if (direction == "long" and past.iloc[-1] < -0.001) else 0.0
+        except Exception:
+            pass
+
     # Macro (alinear por fecha calendario)
     if macro_df is not None and not macro_df.empty:
         setup_date = setup_ts.date()
@@ -221,6 +240,7 @@ def build_training_dataset(
     df_ohlcv:  pd.DataFrame,
     forward_bars: int = 12,
     macro_df:  pd.DataFrame = None,
+    funding_series: pd.Series = None,
 ) -> pd.DataFrame:
     """
     Construye el dataset completo de entrenamiento.
@@ -263,6 +283,7 @@ def build_training_dataset(
             direction,
             setup["raw_score"],
             macro_df,
+            funding_series,
         )
         if not feat_row:
             continue

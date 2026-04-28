@@ -180,12 +180,21 @@ def cmd_train(symbol: str):
         )
 
     forward_bars = ASSETS.get(symbol, {}).get("forward_bars", 12)
+
+    # Funding rates para crypto (señal de sentimiento de mercado)
+    funding_series = None
+    if ASSETS.get(symbol, {}).get("source") == "binance":
+        from data.fetchers.binance_fetcher import fetch_funding_rates
+        days_hist = ASSETS.get(symbol, {}).get("days_history", 730)
+        funding_series = fetch_funding_rates(symbol, days=days_hist)
+
     logger.info(f"Construyendo dataset de entrenamiento ({len(df_setups)} setups, forward_bars={forward_bars})...")
     dataset = build_training_dataset(
-        df_setups    = df_setups,
-        df_ohlcv     = df_4h,
-        forward_bars = forward_bars,
-        macro_df     = macro_df,
+        df_setups      = df_setups,
+        df_ohlcv       = df_4h,
+        forward_bars   = forward_bars,
+        macro_df       = macro_df,
+        funding_series = funding_series,
     )
 
     if dataset.empty:

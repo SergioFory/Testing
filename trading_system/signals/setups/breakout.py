@@ -59,12 +59,23 @@ def detect_breakouts(df: pd.DataFrame,
     # --- ATR percentil (filtro: no operar en mercado dormido) ---
     df["atr_pct_rank"] = df["atr_pct"].rolling(100).rank(pct=True)
 
+    # --- ADX (opcional: filtro de tendencia para evitar fakeouts en ranging) ---
+    adx_min = p.get("adx_min_trend", 0)
+    if adx_min > 0:
+        df["_adx"] = ta.trend.ADXIndicator(
+            df["high"], df["low"], df["close"], window=14
+        ).adx()
+        adx_filter = df["_adx"] >= adx_min
+    else:
+        adx_filter = pd.Series(True, index=df.index)
+
     # --- Condiciones LONG ---
     cond_long = (
         (df["close"] > df["dc_upper"]) &                # Breakout al alza
         (df["vol_ratio"] >= p["vol_factor"]) &           # Volumen confirmado
         (df["bar_size"]  >= p["atr_min_move"]) &         # Barra grande
-        (df["atr_pct_rank"] >= 0.30)                     # ATR no en zona muerta
+        (df["atr_pct_rank"] >= 0.30) &                   # ATR no en zona muerta
+        adx_filter                                        # Mercado en tendencia
     )
 
     # --- Condiciones SHORT ---
@@ -72,7 +83,8 @@ def detect_breakouts(df: pd.DataFrame,
         (df["close"] < df["dc_lower"]) &
         (df["vol_ratio"] >= p["vol_factor"]) &
         (df["bar_size"]  >= p["atr_min_move"]) &
-        (df["atr_pct_rank"] >= 0.30)
+        (df["atr_pct_rank"] >= 0.30) &
+        adx_filter
     )
 
     # --- Score de fuerza (0-1) ---

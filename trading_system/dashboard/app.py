@@ -78,9 +78,10 @@ with st.sidebar:
         float(RISK["risk_per_trade"] * 100), 0.1
     ) / 100
 
+    _default_threshold = float(asset_cfg.get("ml_threshold", ML_PARAMS["prob_threshold"]))
     ml_threshold = st.slider(
         "Umbral ML", 0.50, 0.80,
-        float(ML_PARAMS["prob_threshold"]), 0.01
+        _default_threshold, 0.01
     )
 
     st.markdown("---")
@@ -165,9 +166,10 @@ with tab_signal:
 
                 if model is None:
                     st.info("Entrenando modelo por primera vez (puede tardar 1-2 min)...")
+                    _fwd_bars = asset_cfg.get("forward_bars", 12)
                     dataset = build_training_dataset(
                         df_setups, df_4h,
-                        forward_bars=12,
+                        forward_bars=_fwd_bars,
                         macro_df=macro_df,
                     )
                     if not dataset.empty and len(dataset) >= ML_PARAMS["min_train_samples"]:

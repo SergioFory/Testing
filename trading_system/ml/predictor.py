@@ -15,6 +15,7 @@ def score_setups(
     df_ohlcv:   pd.DataFrame,
     symbol:     str,
     macro_df:   pd.DataFrame = None,
+    threshold:  float = None,
 ) -> pd.DataFrame:
     """
     Aplica el modelo ML a cada setup en df_setups y agrega la columna 'ml_score'.
@@ -31,12 +32,16 @@ def score_setups(
     if df_setups.empty:
         return df_setups
 
+    from config.settings import ASSETS
+    effective_threshold = threshold if threshold is not None else \
+        ASSETS.get(symbol, {}).get("ml_threshold", ML_PARAMS["prob_threshold"])
+
     model, feature_cols, medians = load_model(symbol)
     if model is None:
         logger.warning(f"No hay modelo para {symbol}. Usando raw_score como proxy.")
         df_setups = df_setups.copy()
         df_setups["ml_score"]    = df_setups["raw_score"]
-        df_setups["ml_approved"] = df_setups["ml_score"] >= ML_PARAMS["prob_threshold"]
+        df_setups["ml_approved"] = df_setups["ml_score"] >= effective_threshold
         return df_setups
 
     df_feat = compute_base_features(df_ohlcv)
@@ -76,12 +81,12 @@ def score_setups(
 
     df_setups = df_setups.copy()
     df_setups["ml_score"]    = scores
-    df_setups["ml_approved"] = df_setups["ml_score"] >= ML_PARAMS["prob_threshold"]
+    df_setups["ml_approved"] = df_setups["ml_score"] >= effective_threshold
 
     n_approved = df_setups["ml_approved"].sum()
     logger.info(
         f"ML scoring {symbol}: {len(df_setups)} setups → "
-        f"{n_approved} aprobados (umbral {ML_PARAMS['prob_threshold']})"
+        f"{n_approved} aprobados (umbral {effective_threshold:.2f})"
     )
     return df_setups
 

@@ -52,7 +52,9 @@ ASSETS = {
         "exchange":     "binanceusdm",
         "min_range_pct": 0.015,
         "pip_value":    1.0,
-        "days_history": 1095,   # 3 años → más muestras de entrenamiento ML
+        "days_history": 1095,   # 3 años
+        "forward_bars": 24,     # 24 × 4H = 4 días para resolver el trade
+        "ml_threshold": 0.52,   # calibrado al AUC=0.535 del modelo actual
     },
     "ETHUSDT": {
         "label":        "ETH",
@@ -60,7 +62,9 @@ ASSETS = {
         "exchange":     "binanceusdm",
         "min_range_pct": 0.020,
         "pip_value":    1.0,
-        "days_history": 1095,   # 3 años → más muestras de entrenamiento ML
+        "days_history": 1095,
+        "forward_bars": 24,     # 24 × 4H = 4 días para resolver el trade
+        "ml_threshold": 0.52,   # calibrado al AUC=0.502 del modelo actual
     },
     "XAUUSD": {
         "label":        "GOLD",
@@ -68,7 +72,9 @@ ASSETS = {
         "yf_ticker":    "GC=F",
         "min_range_pct": 0.008,
         "pip_value":    1.0,
-        "days_history": 2500,   # ~6.8 años de diarios para tener suficientes setups ML
+        "days_history": 2500,   # ~6.8 años de diarios
+        "forward_bars": 12,     # 12 días hábiles ≈ 2.5 semanas (AUC=0.629, funciona bien)
+        "ml_threshold": 0.55,   # ligeramente menor a 0.58 para capturar más señales Gold
     },
 }
 

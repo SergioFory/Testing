@@ -179,11 +179,12 @@ def cmd_train(symbol: str):
             "Se recomienda ≥ 200 para entrenamiento robusto."
         )
 
-    logger.info(f"Construyendo dataset de entrenamiento ({len(df_setups)} setups)...")
+    forward_bars = ASSETS.get(symbol, {}).get("forward_bars", 12)
+    logger.info(f"Construyendo dataset de entrenamiento ({len(df_setups)} setups, forward_bars={forward_bars})...")
     dataset = build_training_dataset(
         df_setups    = df_setups,
         df_ohlcv     = df_4h,
-        forward_bars = 12,
+        forward_bars = forward_bars,
         macro_df     = macro_df,
     )
 

@@ -160,6 +160,10 @@ def cmd_signal(symbol: str, notify: bool = False):
 
     _print_signal(trade, sentiment)
 
+    # Persistir señal en la base de datos
+    from data.outcome_tracker import save_signal_from_trade
+    save_signal_from_trade(trade, sentiment)
+
     if notify:
         send_signal_alert(trade, sentiment)
 
@@ -369,6 +373,15 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
     )
 
     def _run_all_signals():
+        # Resolver resultados pendientes antes de generar nuevas señales
+        try:
+            from data.outcome_tracker import resolve_open_signals
+            resolved = resolve_open_signals()
+            if resolved:
+                logger.info(f"Outcome tracker: {resolved} señal(es) resuelta(s).")
+        except Exception as exc:
+            logger.warning(f"Outcome tracker error: {exc}")
+
         for symbol in ASSETS:
             try:
                 cmd_signal(symbol, notify=notify)

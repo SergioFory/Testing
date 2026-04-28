@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from config.settings import ASSETS, RISK, ML_PARAMS, SENTIMENT as SENT_CFG, DAYS_HISTORY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
-from data.database   import init_db, load_signals
+from data.database        import init_db, load_signals
+from data.outcome_tracker import save_signal_from_trade, resolve_open_signals, get_outcome_stats
 from notifications.telegram import send_signal_alert, test_connection as tg_test
 from data.fetchers   import fetch_ohlcv, fetch_multi_timeframe, fetch_gold, fetch_macro, fetch_funding_rates
 from signals.detector import detect_all_setups, get_current_setup
@@ -304,13 +305,22 @@ with tab_signal:
                     c7.metric("Reward USD",    f"${trade.reward_usd:,.0f}")
                     c8.metric("ATR (14)",      f"{trade.atr_pct*100:.2f}%")
 
-                    if tg_notify:
-                        if st.button("📲 Enviar señal a Telegram", type="secondary"):
-                            ok = send_signal_alert(trade, sentiment)
-                            if ok:
-                                st.success("Notificación enviada a Telegram.")
+                    col_btns = st.columns(2)
+                    with col_btns[0]:
+                        if st.button("💾 Registrar señal en DB", type="secondary"):
+                            sig_id = save_signal_from_trade(trade, sentiment)
+                            if sig_id > 0:
+                                st.success(f"Señal guardada (ID #{sig_id}). El resultado se resolverá automáticamente.")
                             else:
-                                st.error("No se pudo enviar. Verifica TOKEN y CHAT_ID en .env")
+                                st.error("Error al guardar la señal.")
+                    with col_btns[1]:
+                        if tg_notify:
+                            if st.button("📲 Enviar a Telegram", type="secondary"):
+                                ok = send_signal_alert(trade, sentiment)
+                                if ok:
+                                    st.success("Notificación enviada a Telegram.")
+                                else:
+                                    st.error("No se pudo enviar. Verifica TOKEN y CHAT_ID en .env")
 
             with col_risk:
                 st.subheader("Gestión de Riesgo")
@@ -591,22 +601,26 @@ with tab_model:
 with tab_history:
     st.header("Historial de Señales")
 
+    col_refresh, col_resolve = st.columns([1, 1])
+    with col_refresh:
+        if st.button("🔄 Resolver señales pendientes ahora"):
+            with st.spinner("Consultando precios y resolviendo..."):
+                n = resolve_open_signals()
+            st.success(f"{n} señal(es) resuelta(s).") if n else st.info("No hay señales pendientes por resolver.")
+
     hist_df = load_signals(symbol=symbol, limit=200)
     if hist_df.empty:
-        st.info("No hay señales guardadas para este activo aún.")
+        st.info("No hay señales guardadas para este activo aún. Genera una señal y pulsa 'Registrar señal en DB'.")
     else:
-        # Métricas del historial
-        wins = hist_df[hist_df["resultado_real"] == "win"]
-        loss = hist_df[hist_df["resultado_real"] == "loss"]
-        resolved = len(wins) + len(loss)
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total señales",  len(hist_df))
-        c2.metric("Resueltas",       resolved)
-        c3.metric("Win Rate real",
-                  f"{len(wins)/resolved*100:.1f}%" if resolved > 0 else "—")
-        c4.metric("PnL total",
-                  f"${hist_df['pnl_usd'].sum():,.2f}" if "pnl_usd" in hist_df else "—")
+        stats = get_outcome_stats(symbol=symbol)
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total señales",  stats.get("total", 0))
+        c2.metric("Resueltas",      stats.get("resolved", 0))
+        c3.metric("Pendientes",     stats.get("pending", 0))
+        c4.metric("Win Rate real",
+                  f"{stats['win_rate']*100:.1f}%" if stats.get("resolved", 0) > 0 else "—")
+        c5.metric("PnL total",
+                  f"${stats.get('total_pnl', 0):+,.2f}")
 
         st.dataframe(
             hist_df.sort_values("ts", ascending=False),

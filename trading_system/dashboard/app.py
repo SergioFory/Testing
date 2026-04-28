@@ -15,8 +15,9 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timezone
 from loguru import logger
 
-from config.settings import ASSETS, RISK, ML_PARAMS, SENTIMENT as SENT_CFG, DAYS_HISTORY
+from config.settings import ASSETS, RISK, ML_PARAMS, SENTIMENT as SENT_CFG, DAYS_HISTORY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 from data.database   import init_db, load_signals
+from notifications.telegram import send_signal_alert, test_connection as tg_test
 from data.fetchers   import fetch_ohlcv, fetch_multi_timeframe, fetch_gold, fetch_macro, fetch_funding_rates
 from signals.detector import detect_all_setups, get_current_setup
 from ml.features      import build_training_dataset, compute_base_features
@@ -89,6 +90,24 @@ with st.sidebar:
     use_sentiment   = st.checkbox("Filtro de sentimiento", value=True)
     run_backtest_cb = st.checkbox("Ejecutar backtest", value=False)
     backtest_days   = st.slider("Días de backtest", 90, 730, 365) if run_backtest_cb else 365
+
+    st.markdown("---")
+    _tg_ready = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
+    tg_notify = st.checkbox(
+        "📲 Notificar por Telegram",
+        value=_tg_ready,
+        disabled=not _tg_ready,
+        help="Envía la señal a tu Telegram si hay resultado. Requiere TOKEN y CHAT_ID en .env",
+    )
+    if not _tg_ready:
+        st.caption("Telegram no configurado. Añade TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID al .env")
+    else:
+        if st.button("🔔 Test Telegram", help="Envía mensaje de prueba al bot"):
+            ok = tg_test()
+            if ok:
+                st.success("Telegram: conexión OK")
+            else:
+                st.error("Telegram: fallo — revisa el .env")
 
     st.markdown("---")
     run_btn = st.button("🔄 Generar señal", width="stretch", type="primary")
@@ -284,6 +303,14 @@ with tab_signal:
                     c6.metric("Riesgo USD",    f"${trade.risk_usd:,.0f}")
                     c7.metric("Reward USD",    f"${trade.reward_usd:,.0f}")
                     c8.metric("ATR (14)",      f"{trade.atr_pct*100:.2f}%")
+
+                    if tg_notify:
+                        if st.button("📲 Enviar señal a Telegram", type="secondary"):
+                            ok = send_signal_alert(trade, sentiment)
+                            if ok:
+                                st.success("Notificación enviada a Telegram.")
+                            else:
+                                st.error("No se pudo enviar. Verifica TOKEN y CHAT_ID en .env")
 
             with col_risk:
                 st.subheader("Gestión de Riesgo")

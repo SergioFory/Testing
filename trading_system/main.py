@@ -84,12 +84,13 @@ def _load_data(symbol: str):
 # Comandos
 # ---------------------------------------------------------------------------
 
-def cmd_signal(symbol: str):
+def cmd_signal(symbol: str, notify: bool = False):
     """Genera la señal actual para el símbolo."""
-    from signals.detector      import detect_all_setups, get_current_setup
-    from ml.predictor          import score_setups, get_best_setup
-    from risk.position_sizer   import build_trade_setup, PortfolioRiskManager
-    from sentiment.cryptopanic import get_sentiment_summary
+    from signals.detector          import detect_all_setups, get_current_setup
+    from ml.predictor              import score_setups, get_best_setup
+    from risk.position_sizer       import build_trade_setup, PortfolioRiskManager
+    from sentiment.cryptopanic     import get_sentiment_summary
+    from notifications.telegram    import send_signal_alert, send_no_signal
 
     df_4h, df_daily, macro_df = _load_data(symbol)
     if df_4h is None:
@@ -119,10 +120,13 @@ def cmd_signal(symbol: str):
         return
 
     # Sentimiento
-    base_sym = symbol.replace("USDT", "").replace("USDT", "")
+    base_sym = symbol.replace("USDT", "")
     sentiment = get_sentiment_summary(base_sym)
 
     _print_signal(trade, sentiment)
+
+    if notify:
+        send_signal_alert(trade, sentiment)
 
 
 def cmd_backtest(symbol: str, start: str = None, end: str = None,
@@ -241,16 +245,23 @@ def cmd_schedule(interval_minutes: int = 60):
     """
     import time
     import schedule as sched
+    from notifications.telegram  import test_connection
+    from config.settings         import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+
+    notify = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
+    if notify:
+        test_connection()
 
     logger.info(
         f"Iniciando modo daemon — señales cada {interval_minutes} minutos. "
+        f"Telegram: {'ON' if notify else 'OFF (configura TOKEN y CHAT_ID)'}. "
         "Ctrl+C para detener."
     )
 
     def _run_all_signals():
         for symbol in ASSETS:
             try:
-                cmd_signal(symbol)
+                cmd_signal(symbol, notify=notify)
             except Exception as e:
                 logger.error(f"Error generando señal para {symbol}: {e}")
 
@@ -320,10 +331,12 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 Ejemplos:
   python main.py signal   --symbol BTCUSDT
+  python main.py signal   --symbol BTCUSDT --notify
   python main.py backtest --symbol ETHUSDT --start 2023-01-01 --capital 10000
   python main.py train    --symbol BTCUSDT
   python main.py update
   python main.py schedule --interval 60
+  python main.py telegram                           # test de conexión
         """,
     )
     sub = p.add_subparsers(dest="command", required=True)
@@ -333,6 +346,8 @@ Ejemplos:
     ps.add_argument("--symbol", default="BTCUSDT",
                     choices=list(ASSETS.keys()),
                     help="Símbolo a analizar")
+    ps.add_argument("--notify", action="store_true",
+                    help="Enviar alerta a Telegram si hay señal")
 
     # backtest
     pb = sub.add_parser("backtest", help="Ejecutar backtest")
@@ -353,6 +368,9 @@ Ejemplos:
     psc.add_argument("--interval", default=60, type=int,
                      help="Intervalo en minutos (default: 60)")
 
+    # telegram (test de conexión)
+    sub.add_parser("telegram", help="Verificar conexión a Telegram y enviar mensaje de prueba")
+
     return p
 
 
@@ -365,7 +383,7 @@ def main():
     args   = parser.parse_args()
 
     if args.command == "signal":
-        cmd_signal(args.symbol)
+        cmd_signal(args.symbol, notify=args.notify)
 
     elif args.command == "backtest":
         cmd_backtest(args.symbol, args.start, args.end, args.capital)
@@ -378,6 +396,10 @@ def main():
 
     elif args.command == "schedule":
         cmd_schedule(args.interval)
+
+    elif args.command == "telegram":
+        from notifications.telegram import test_connection
+        test_connection()
 
 
 if __name__ == "__main__":

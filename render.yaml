@@ -1,24 +1,24 @@
 ##
 ## render.yaml — Infraestructura del Sistema de Trading ML v5.0
 ##
-## Servicios definidos:
+## Servicios:
 ##   trading-dashboard  → Web (Streamlit, accesible desde el browser)
 ##   trading-scheduler  → Worker en background (señales + reentrenamiento)
 ##
 ## Base de datos:
 ##   trading-db         → PostgreSQL gestionado por Render
 ##
-## Primeros pasos en Render:
-##   1. Conecta tu repo GitHub en render.com → New → Blueprint
-##   2. Render detecta este archivo y crea todos los recursos automáticamente
-##   3. Añade las variables secretas marcadas como "sync: false" en el dashboard
+## Deploy:
+##   1. render.com → New → Blueprint → conecta repo SergioFory/Testing
+##   2. Render detecta este archivo y crea los 3 recursos automáticamente
+##   3. Añade las variables secretas (sync: false) en el dashboard de Render
 ##
 
 databases:
   - name: trading-db
     databaseName: trading
     user: trading_user
-    plan: free               # Cambia a "starter" para persistencia duradera
+    plan: free               # 90 días gratis; luego "starter" ($7/mes) para persistencia duradera
 
 services:
   # -------------------------------------------------------------------------
@@ -27,8 +27,9 @@ services:
   - type: web
     name: trading-dashboard
     runtime: python
-    plan: free               # free tier: 512 MB RAM, se duerme tras inactividad
-    region: oregon           # Cambia según tu zona: oregon | frankfurt | singapore
+    plan: free               # 512 MB RAM; se duerme tras 15 min de inactividad
+    region: oregon           # Opciones: oregon | frankfurt | singapore | ohio
+    pythonVersion: "3.11.0"
 
     buildCommand: |
       pip install --upgrade pip
@@ -53,17 +54,11 @@ services:
       - key: PYTHONPATH
         value: /opt/render/project/src
 
-      # --- Credenciales (añadir manualmente en el dashboard de Render) ---
+      # --- Credenciales: añadir manualmente en Environment del dashboard de Render ---
       - key: BINANCE_API_KEY
         sync: false
 
       - key: BINANCE_API_SECRET
-        sync: false
-
-      - key: ANTHROPIC_API_KEY
-        sync: false
-
-      - key: CRYPTOPANIC_API_KEY
         sync: false
 
       - key: TELEGRAM_BOT_TOKEN
@@ -73,21 +68,28 @@ services:
         sync: false
 
   # -------------------------------------------------------------------------
-  # Scheduler / Worker (daemon: señales + reentrenamiento)
+  # Scheduler / Worker
+  # Arranca descargando datos y entrenando modelos, luego pasa a modo daemon.
+  # Los modelos se guardan en el filesystem (efímero en free tier):
+  #   → se reentrenan automáticamente al reiniciar (~10 min) y cada 7 días.
+  #   → Para persistencia permanente añade un Render Disk montado en
+  #     /opt/render/project/src/trading_system/models  ($0.25/GB/mes)
   # -------------------------------------------------------------------------
   - type: worker
     name: trading-scheduler
     runtime: python
     plan: free
+    pythonVersion: "3.11.0"
 
     buildCommand: |
       pip install --upgrade pip
       pip install -r trading_system/requirements.txt
 
+    # 1. Actualiza datos y entrena los 3 modelos desde cero
+    # 2. Arranca el daemon de señales con reentrenamiento nocturno
     startCommand: >
-      python trading_system/main.py schedule
-      --interval 60
-      --retrain-hour 03:00
+      python trading_system/main.py retrain --all &&
+      python trading_system/main.py schedule --interval 60 --retrain-hour 03:00
 
     envVars:
       - key: DATABASE_URL
@@ -102,12 +104,6 @@ services:
         sync: false
 
       - key: BINANCE_API_SECRET
-        sync: false
-
-      - key: ANTHROPIC_API_KEY
-        sync: false
-
-      - key: CRYPTOPANIC_API_KEY
         sync: false
 
       - key: TELEGRAM_BOT_TOKEN

@@ -37,6 +37,41 @@ logger.add(
 
 from config.settings import ASSETS, BACKTEST, RISK, ML_PARAMS, DAYS_HISTORY
 
+import json
+from datetime import datetime, timedelta, timezone
+
+_RETRAIN_LOG = Path(__file__).parent / "data" / "retrain_log.json"
+
+
+def _get_last_train_ts(symbol: str) -> datetime | None:
+    """Lee la fecha del último entrenamiento desde el log persistente."""
+    try:
+        data = json.loads(_RETRAIN_LOG.read_text()) if _RETRAIN_LOG.exists() else {}
+        ts_str = data.get(symbol)
+        return datetime.fromisoformat(ts_str) if ts_str else None
+    except Exception:
+        return None
+
+
+def _set_last_train_ts(symbol: str) -> None:
+    """Guarda la fecha actual como último entrenamiento del símbolo."""
+    try:
+        data = json.loads(_RETRAIN_LOG.read_text()) if _RETRAIN_LOG.exists() else {}
+        data[symbol] = datetime.now(timezone.utc).isoformat()
+        _RETRAIN_LOG.parent.mkdir(parents=True, exist_ok=True)
+        _RETRAIN_LOG.write_text(json.dumps(data, indent=2))
+    except Exception as exc:
+        logger.warning(f"No se pudo guardar retrain log: {exc}")
+
+
+def _should_retrain(symbol: str) -> bool:
+    """True si han pasado ML_PARAMS['retrain_every'] días desde el último entreno."""
+    last = _get_last_train_ts(symbol)
+    if last is None:
+        return True
+    days = ML_PARAMS.get("retrain_every", 7)
+    return (datetime.now(timezone.utc) - last) >= timedelta(days=days)
+
 
 # ---------------------------------------------------------------------------
 # Helpers de datos
@@ -238,14 +273,88 @@ def cmd_update():
             logger.error(f"{symbol}: error al actualizar — {e}")
 
 
-def cmd_schedule(interval_minutes: int = 60):
+def cmd_auto_retrain(symbol: str, notify: bool = False) -> bool:
+    """
+    Reentrena el modelo del símbolo si han pasado retrain_every días.
+    Retorna True si se reentrenó efectivamente.
+    """
+    if not _should_retrain(symbol):
+        last = _get_last_train_ts(symbol)
+        days_ago = (datetime.now(timezone.utc) - last).days if last else "?"
+        logger.info(
+            f"[{symbol}] Reentrenamiento no necesario — "
+            f"último hace {days_ago} día(s), umbral={ML_PARAMS['retrain_every']}d"
+        )
+        return False
+
+    logger.info(f"[{symbol}] Iniciando reentrenamiento automático...")
+    try:
+        from signals.detector import detect_all_setups
+        from ml.features      import build_training_dataset
+        from ml.trainer       import train_model
+
+        df_4h, df_daily, macro_df = _load_data(symbol)
+        if df_4h is None:
+            logger.error(f"[{symbol}] Sin datos para reentrenar.")
+            return False
+
+        df_setups    = detect_all_setups(df_4h, df_daily, symbol)
+        forward_bars = ASSETS.get(symbol, {}).get("forward_bars", 12)
+
+        funding_series = None
+        if ASSETS.get(symbol, {}).get("source") == "binance":
+            from data.fetchers.binance_fetcher import fetch_funding_rates
+            days_hist = ASSETS.get(symbol, {}).get("days_history", 730)
+            funding_series = fetch_funding_rates(symbol, days=days_hist)
+
+        dataset = build_training_dataset(
+            df_setups=df_setups, df_ohlcv=df_4h,
+            forward_bars=forward_bars, macro_df=macro_df,
+            funding_series=funding_series,
+        )
+        if dataset.empty or len(dataset) < ML_PARAMS.get("min_train_samples", 50):
+            logger.warning(f"[{symbol}] Dataset insuficiente para reentrenar.")
+            return False
+
+        model, _, metrics = train_model(dataset, symbol=symbol, save=True)
+        if model is None:
+            logger.error(f"[{symbol}] Entrenamiento fallido.")
+            return False
+
+        metrics["n_samples"] = len(dataset)
+        metrics["threshold"] = ML_PARAMS["prob_threshold"]
+        _set_last_train_ts(symbol)
+
+        logger.info(
+            f"[{symbol}] Reentrenamiento OK | "
+            f"AUC={metrics.get('auc',0):.3f} | "
+            f"Precision={metrics.get('precision',0):.3f} | "
+            f"Folds={metrics.get('n_folds',0)}"
+        )
+
+        if notify:
+            from notifications.telegram import send_retrain_alert
+            send_retrain_alert(symbol, metrics)
+
+        return True
+
+    except Exception as exc:
+        logger.error(f"[{symbol}] Error durante reentrenamiento: {exc}")
+        if notify:
+            from notifications.telegram import send_error_alert
+            send_error_alert(symbol, f"Reentrenamiento fallido: {exc}")
+        return False
+
+
+def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
     """
     Modo daemon: genera señales en un intervalo fijo.
     Envía notificaciones por Telegram si está configurado.
+    Reentrena los modelos automáticamente según ML_PARAMS['retrain_every'].
     """
     import time
     import schedule as sched
-    from notifications.telegram  import test_connection
+    from notifications.telegram  import test_connection, send_daily_summary
     from config.settings         import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 
     notify = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
@@ -253,8 +362,9 @@ def cmd_schedule(interval_minutes: int = 60):
         test_connection()
 
     logger.info(
-        f"Iniciando modo daemon — señales cada {interval_minutes} minutos. "
-        f"Telegram: {'ON' if notify else 'OFF (configura TOKEN y CHAT_ID)'}. "
+        f"Iniciando modo daemon — señales cada {interval_minutes} min | "
+        f"Reentrenamiento diario a las {retrain_hour} UTC | "
+        f"Telegram: {'ON' if notify else 'OFF'}. "
         "Ctrl+C para detener."
     )
 
@@ -262,10 +372,35 @@ def cmd_schedule(interval_minutes: int = 60):
         for symbol in ASSETS:
             try:
                 cmd_signal(symbol, notify=notify)
-            except Exception as e:
-                logger.error(f"Error generando señal para {symbol}: {e}")
+            except Exception as exc:
+                logger.error(f"Error generando señal para {symbol}: {exc}")
 
+    def _run_nightly():
+        """Actualiza datos y reentrena si es necesario (se ejecuta 1× al día)."""
+        logger.info("Tarea nocturna: actualizando datos y verificando reentrenamiento...")
+        portfolio = None
+        for symbol in ASSETS:
+            try:
+                _load_data(symbol)
+                cmd_auto_retrain(symbol, notify=notify)
+            except Exception as exc:
+                logger.error(f"Error en tarea nocturna para {symbol}: {exc}")
+
+        # Resumen diario por Telegram
+        if notify:
+            from risk.position_sizer import PortfolioRiskManager
+            try:
+                portfolio = PortfolioRiskManager()
+                send_daily_summary(portfolio.summary())
+            except Exception:
+                pass
+
+    # Señales recurrentes
     sched.every(interval_minutes).minutes.do(_run_all_signals)
+
+    # Tarea nocturna a hora fija (UTC)
+    sched.every().day.at(retrain_hour).do(_run_nightly)
+
     _run_all_signals()   # Ejecución inmediata al arrancar
 
     while True:
@@ -334,8 +469,11 @@ Ejemplos:
   python main.py signal   --symbol BTCUSDT --notify
   python main.py backtest --symbol ETHUSDT --start 2023-01-01 --capital 10000
   python main.py train    --symbol BTCUSDT
+  python main.py retrain  --symbol BTCUSDT          # fuerza reentrenamiento
+  python main.py retrain  --all                     # reentrena todos los activos
   python main.py update
   python main.py schedule --interval 60
+  python main.py schedule --interval 60 --retrain-hour 03:00
   python main.py telegram                           # test de conexión
         """,
     )
@@ -363,10 +501,22 @@ Ejemplos:
     # update
     sub.add_parser("update", help="Actualizar todos los datos OHLCV")
 
+    # retrain
+    pr = sub.add_parser("retrain", help="Forzar reentrenamiento del modelo ML")
+    pr_grp = pr.add_mutually_exclusive_group(required=True)
+    pr_grp.add_argument("--symbol", choices=list(ASSETS.keys()),
+                        help="Símbolo a reentrenar")
+    pr_grp.add_argument("--all", action="store_true",
+                        help="Reentrenar todos los activos")
+    pr.add_argument("--notify", action="store_true",
+                    help="Enviar resultado a Telegram")
+
     # schedule (daemon)
     psc = sub.add_parser("schedule", help="Modo daemon con señales periódicas")
     psc.add_argument("--interval", default=60, type=int,
                      help="Intervalo en minutos (default: 60)")
+    psc.add_argument("--retrain-hour", default="03:00", dest="retrain_hour",
+                     help="Hora UTC para la tarea nocturna de reentrenamiento (HH:MM, default: 03:00)")
 
     # telegram (test de conexión)
     sub.add_parser("telegram", help="Verificar conexión a Telegram y enviar mensaje de prueba")
@@ -391,11 +541,23 @@ def main():
     elif args.command == "train":
         cmd_train(args.symbol)
 
+    elif args.command == "retrain":
+        symbols = list(ASSETS.keys()) if args.all else [args.symbol]
+        for sym in symbols:
+            # Forzar fecha a None para que _should_retrain siempre sea True
+            try:
+                data = json.loads(_RETRAIN_LOG.read_text()) if _RETRAIN_LOG.exists() else {}
+                data.pop(sym, None)
+                _RETRAIN_LOG.write_text(json.dumps(data, indent=2))
+            except Exception:
+                pass
+            cmd_auto_retrain(sym, notify=args.notify)
+
     elif args.command == "update":
         cmd_update()
 
     elif args.command == "schedule":
-        cmd_schedule(args.interval)
+        cmd_schedule(args.interval, args.retrain_hour)
 
     elif args.command == "telegram":
         from notifications.telegram import test_connection

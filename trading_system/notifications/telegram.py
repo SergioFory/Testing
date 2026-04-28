@@ -145,6 +145,27 @@ def send_daily_summary(summary: dict) -> bool:
     return _send(msg)
 
 
+def send_retrain_alert(symbol: str, metrics: dict) -> bool:
+    """Notificación de reentrenamiento automático con métricas del nuevo modelo."""
+    auc       = metrics.get("auc", 0)
+    precision = metrics.get("precision", 0)
+    n_folds   = metrics.get("n_folds", 0)
+    n_samples = metrics.get("n_samples", 0)
+    threshold = metrics.get("threshold", 0)
+
+    icon = "🟢" if auc >= 0.55 else "🟡" if auc >= 0.50 else "🔴"
+
+    msg = (
+        f"🔁 <b>Reentrenamiento automático — {symbol}</b>\n\n"
+        f"{icon} <b>AUC Walk-Forward:</b> {auc:.3f}\n"
+        f"<b>Precision@{threshold:.2f}:</b>  {precision:.3f}\n"
+        f"<b>Folds:</b>               {n_folds}\n"
+        f"<b>Muestras:</b>            {n_samples}\n\n"
+        f"<i>Modelo actualizado y listo para operar.</i>"
+    )
+    return _send(msg)
+
+
 def test_connection() -> bool:
     """Verifica que el bot y el chat_id son válidos enviando un mensaje de prueba."""
     msg = "✅ <b>Sistema de Trading</b>\nConexión a Telegram verificada correctamente."

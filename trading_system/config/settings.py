@@ -54,7 +54,7 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 1825,   # 5 años → ~400 setups esperados
         "forward_bars": 24,     # 24 × 4H = 4 días para resolver el trade
-        "ml_threshold": 0.52,
+        "ml_threshold": 0.45,   # calibrado al rango real del modelo (~0.35-0.48)
     },
     "ETHUSDT": {
         "label":        "ETH",
@@ -64,7 +64,7 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 1825,
         "forward_bars": 24,
-        "ml_threshold": 0.52,
+        "ml_threshold": 0.45,   # calibrado al rango real del modelo (~0.35-0.48)
     },
     "XAUUSD": {
         "label":        "GOLD",
@@ -74,7 +74,7 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 2500,
         "forward_bars": 12,
-        "ml_threshold": 0.55,
+        "ml_threshold": 0.52,   # AUC=0.629 → modelo sí produce scores > 0.52
     },
 }
 

@@ -54,7 +54,7 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 1825,   # 5 años → ~400 setups esperados
         "forward_bars": 24,     # 24 × 4H = 4 días para resolver el trade
-        "ml_threshold": 0.45,   # calibrado al rango real del modelo (~0.35-0.48)
+        "ml_threshold": 0.40,   # BTC: modelo muy conservador, scores en rango 0.35-0.43
     },
     "ETHUSDT": {
         "label":        "ETH",

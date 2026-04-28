@@ -37,10 +37,13 @@ def _clean_env(key: str) -> str:
 
 BINANCE_API_KEY    = _clean_env("BINANCE_API_KEY")
 BINANCE_API_SECRET = _clean_env("BINANCE_API_SECRET")
-CRYPTOPANIC_KEY    = _clean_env("CRYPTOPANIC_API_KEY")
 ANTHROPIC_KEY      = _clean_env("ANTHROPIC_API_KEY")
 TELEGRAM_TOKEN     = _clean_env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = _clean_env("TELEGRAM_CHAT_ID")
+
+# CryptoPanic discontinuó su plan gratuito el 01-Apr-2026.
+# Sentimiento ahora usa Fear & Greed Index (Alternative.me) — sin API key.
+CRYPTOPANIC_KEY    = ""  # deprecated — mantenido para no romper imports antiguos
 
 # =============================================================================
 # ACTIVOS

@@ -324,16 +324,29 @@ with tab_signal:
 
                 if use_sentiment:
                     st.subheader("Sentimiento")
-                    score = sentiment["score"]
-                    color = {"green": "🟢", "red": "🔴", "gray": "⚪"}.get(sentiment["color"], "⚪")
-                    st.markdown(
-                        f"{color} **{sentiment['label']}** | Score: {score:+.2f}\n\n"
-                        f"Noticias analizadas: {sentiment.get('n_news', 0)}"
-                    )
-                    if sentiment.get("latest_headlines"):
-                        with st.expander("Últimas noticias"):
-                            for h in sentiment["latest_headlines"]:
-                                st.caption(f"• {h}")
+                    fg_val  = sentiment.get("fg_value", 0)
+                    fg_cls  = sentiment.get("fg_classification", "N/A")
+                    score   = sentiment["score"]
+                    label   = sentiment["label"]
+                    trend7  = sentiment.get("trend_7d", 0.0)
+
+                    color_icon = {
+                        "green":  "🟢", "red": "🔴",
+                        "gray":   "⚪", "orange": "🟡",
+                    }.get(sentiment["color"], "⚪")
+
+                    if fg_val > 0:
+                        # Barra de progreso del F&G Index
+                        st.markdown(f"{color_icon} **{label}** — Fear & Greed: **{fg_val}/100**")
+                        st.progress(fg_val / 100)
+                        delta_str = f"{trend7:+.0f} pts vs hace 7 días" if trend7 != 0 else "sin cambio en 7 días"
+                        st.caption(
+                            f"Clasificación: *{fg_cls}* | "
+                            f"Score contrarian: {score:+.2f} | {delta_str}"
+                        )
+                    else:
+                        st.markdown(f"{color_icon} **{label}** (N/A para este activo)")
+                        st.caption("El Fear & Greed Index es específico de crypto.")
 
             # ----------------------------------------------------------------
             # Gráfico de precio

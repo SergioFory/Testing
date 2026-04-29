@@ -130,65 +130,48 @@ tab_signal, tab_backtest, tab_model, tab_history = st.tabs([
 with tab_signal:
     st.header(f"Señal en Tiempo Real — {asset_cfg['label']}")
 
-    if not run_btn:
-        st.info("Presiona **Generar señal** en el sidebar para ejecutar el análisis.")
+    # Limpiar caché si el usuario cambia de activo en el selector
+    if st.session_state.get("_sig_symbol") != symbol:
+        for _k in ("_sig_trade", "_sig_sentiment", "_sig_df4h", "_sig_dfsetups", "_sig_lookback"):
+            st.session_state.pop(_k, None)
+        st.session_state["_sig_symbol"] = symbol
 
-        # Mostrar última señal guardada si existe
-        hist_df = load_signals(symbol=symbol, limit=1)
-        if not hist_df.empty:
-            st.markdown("**Última señal guardada:**")
-            last = hist_df.iloc[0]
-            _dir = last.get("direction", "")
-            if _dir == "long":
-                st.success(f"LONG | ML: {last.get('ml_score',0):.2f} | "
-                           f"Entry: ${last.get('entry_price',0):,.2f} | "
-                           f"SL: ${last.get('stop_loss',0):,.2f} | "
-                           f"TP: ${last.get('take_profit',0):,.2f}")
-            elif _dir == "short":
-                st.error(f"SHORT | ML: {last.get('ml_score',0):.2f} | "
-                         f"Entry: ${last.get('entry_price',0):,.2f} | "
-                         f"SL: ${last.get('stop_loss',0):,.2f} | "
-                         f"TP: ${last.get('take_profit',0):,.2f}")
+    # ---- Ejecutar análisis solo cuando se presiona "Generar señal" ----
+    if run_btn:
+        _trade     = None
+        _df4h      = pd.DataFrame()
+        _dfsetups  = pd.DataFrame()
+        _sent      = {"score": 0.0, "label": "N/A", "color": "gray", "n_news": 0}
+        _lookback  = 72 if asset_cfg["source"] != "binance" else 12
 
-    else:
-        # ----------------------------------------------------------------
-        # Ejecutar análisis
-        # ----------------------------------------------------------------
         with st.spinner("Descargando datos..."):
             gold_days = asset_cfg.get("days_history", 730)
             if asset_cfg["source"] == "binance":
                 crypto_days = asset_cfg.get("days_history", DAYS_HISTORY)
                 data = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
-                df_4h    = data.get("4h",  pd.DataFrame())
+                _df4h    = data.get("4h",  pd.DataFrame())
                 df_daily = data.get("1d",  pd.DataFrame())
                 funding  = fetch_funding_rates(symbol, days=90)
             else:
                 df_daily = fetch_gold(timeframe="1d", days=gold_days)
-                df_4h    = df_daily.copy() if not df_daily.empty else pd.DataFrame()
+                _df4h    = df_daily.copy() if not df_daily.empty else pd.DataFrame()
                 funding  = pd.Series(dtype=float)
 
             macro_df = fetch_macro(days=min(gold_days, 730))
 
-        if df_4h.empty:
+        if _df4h.empty:
             st.error("No se pudieron obtener datos. Revisa tu conexión o las credenciales.")
         else:
-            # ----------------------------------------------------------------
-            # Detectar setups
-            # ----------------------------------------------------------------
             with st.spinner("Detectando setups técnicos..."):
-                df_setups = detect_all_setups(df_4h, df_daily, symbol=symbol)
+                _dfsetups = detect_all_setups(_df4h, df_daily, symbol=symbol)
 
-            # ----------------------------------------------------------------
-            # Entrenamiento / carga de modelo ML
-            # ----------------------------------------------------------------
             with st.spinner("Preparando modelo ML..."):
                 model, feat_cols, medians = load_model(symbol)
-
                 if model is None:
                     st.info("Entrenando modelo por primera vez (puede tardar 1-2 min)...")
                     _fwd_bars = asset_cfg.get("forward_bars", 12)
                     dataset = build_training_dataset(
-                        df_setups, df_4h,
+                        _dfsetups, _df4h,
                         forward_bars=_fwd_bars,
                         macro_df=macro_df,
                     )
@@ -205,259 +188,258 @@ with tab_signal:
                             "El modelo usará el score técnico como proxy."
                         )
 
-            # ----------------------------------------------------------------
-            # ML Scoring de setups
-            # ----------------------------------------------------------------
             with st.spinner("Evaluando setups con ML..."):
-                if not df_setups.empty:
-                    df_setups = score_setups(df_setups, df_4h, symbol, macro_df, funding)
+                if not _dfsetups.empty:
+                    _dfsetups = score_setups(_dfsetups, _df4h, symbol, macro_df, funding)
 
-            # ----------------------------------------------------------------
-            # Sentimiento
-            # ----------------------------------------------------------------
-            sentiment = {"score": 0.0, "label": "N/A", "color": "gray", "n_news": 0}
             if use_sentiment and asset_cfg["source"] == "binance":
                 with st.spinner("Analizando sentimiento..."):
-                    sentiment = get_sentiment_summary(asset_cfg["label"])
+                    _sent = get_sentiment_summary(asset_cfg["label"])
 
-            # ----------------------------------------------------------------
-            # Obtener mejor setup reciente
-            # ----------------------------------------------------------------
             best = None
-            # Para activos con velas diarias (Gold) usamos ventana de 3 días; crypto 4H usa 12h
-            signal_lookback_h = 72 if asset_cfg["source"] != "binance" else 12
-            if not df_setups.empty:
-                recent = df_setups[
-                    df_setups["ts"] >= df_setups["ts"].max() - pd.Timedelta(hours=signal_lookback_h)
+            _lookback = 72 if asset_cfg["source"] != "binance" else 12
+            if not _dfsetups.empty:
+                recent = _dfsetups[
+                    _dfsetups["ts"] >= _dfsetups["ts"].max() - pd.Timedelta(hours=_lookback)
                 ]
-                if "ml_score" in recent.columns:
-                    approved = recent[recent["ml_score"] >= ml_threshold]
-                else:
-                    approved = recent
+                approved = recent[recent["ml_score"] >= ml_threshold] if "ml_score" in recent.columns else recent
                 if not approved.empty:
                     best = approved.loc[approved["ml_score"].idxmax()]
 
-            # ----------------------------------------------------------------
-            # Construir trade setup con gestión de riesgo
-            # ----------------------------------------------------------------
-            trade = None
             if best is not None:
-                trade = build_trade_setup(
+                _trade = build_trade_setup(
                     best, capital, float(best["ml_score"]),
-                    sentiment_score=sentiment["score"]
+                    sentiment_score=_sent["score"]
                 )
-                # Veto por sentimiento
-                if trade and use_sentiment and asset_cfg["source"] == "binance":
-                    vetoed, veto_reason = should_veto_signal(trade.direction, sentiment["score"])
+                if _trade and use_sentiment and asset_cfg["source"] == "binance":
+                    vetoed, veto_reason = should_veto_signal(_trade.direction, _sent["score"])
                     if vetoed:
                         st.warning(f"⚠️ Señal vetada por sentimiento: {veto_reason}")
-                        trade = None
+                        _trade = None
 
-            # ================================================================
-            # DISPLAY PRINCIPAL
-            # ================================================================
-            col_signal, col_risk = st.columns([3, 2])
+        # Persistir en session_state para que los botones secundarios no borren la señal
+        st.session_state["_sig_trade"]    = _trade
+        st.session_state["_sig_sentiment"] = _sent
+        st.session_state["_sig_df4h"]     = _df4h
+        st.session_state["_sig_dfsetups"] = _dfsetups
+        st.session_state["_sig_lookback"] = _lookback
 
-            with col_signal:
-                if trade is not None:
-                    if trade.direction == "long":
-                        st.markdown(f"""
-                        <div class="signal-long">
-                        <h2>🟢 LONG — {asset_cfg['label']}</h2>
-                        <p>Setup: <b>{trade.setup_type.upper()}</b> |
-                           Timeframe: 4H |
-                           ML Score: <b>{trade.ml_score:.0%}</b></p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    else:
-                        st.markdown(f"""
-                        <div class="signal-short">
-                        <h2>🔴 SHORT — {asset_cfg['label']}</h2>
-                        <p>Setup: <b>{trade.setup_type.upper()}</b> |
-                           Timeframe: 4H |
-                           ML Score: <b>{trade.ml_score:.0%}</b></p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                else:
-                    window_label = f"{signal_lookback_h} horas" if signal_lookback_h < 48 else f"{signal_lookback_h // 24} días"
+    # =========================================================================
+    # DISPLAY — siempre lee de session_state (persiste cuando se pulsan botones)
+    # =========================================================================
+    _trade    = st.session_state.get("_sig_trade")
+    _sent     = st.session_state.get("_sig_sentiment", {"score": 0.0, "label": "N/A", "color": "gray", "n_news": 0})
+    _df4h     = st.session_state.get("_sig_df4h",    pd.DataFrame())
+    _dfsetups = st.session_state.get("_sig_dfsetups", pd.DataFrame())
+    _lookback = st.session_state.get("_sig_lookback", 12)
+
+    if "_sig_trade" not in st.session_state:
+        # Primera visita — análisis nunca ejecutado
+        st.info("Presiona **Generar señal** en el sidebar para ejecutar el análisis.")
+        hist_df = load_signals(symbol=symbol, limit=1)
+        if not hist_df.empty:
+            st.markdown("**Última señal guardada:**")
+            last = hist_df.iloc[0]
+            _dir = last.get("direction", "")
+            if _dir == "long":
+                st.success(f"LONG | ML: {last.get('ml_score',0):.2f} | "
+                           f"Entry: ${last.get('entry_price',0):,.2f} | "
+                           f"SL: ${last.get('stop_loss',0):,.2f} | "
+                           f"TP: ${last.get('take_profit',0):,.2f}")
+            elif _dir == "short":
+                st.error(f"SHORT | ML: {last.get('ml_score',0):.2f} | "
+                         f"Entry: ${last.get('entry_price',0):,.2f} | "
+                         f"SL: ${last.get('stop_loss',0):,.2f} | "
+                         f"TP: ${last.get('take_profit',0):,.2f}")
+    else:
+        # Análisis ya ejecutado — mostrar resultado (y los botones de acción)
+        col_signal, col_risk = st.columns([3, 2])
+
+        with col_signal:
+            if _trade is not None:
+                if _trade.direction == "long":
                     st.markdown(f"""
-                    <div class="signal-none">
-                    <h2>⚪ SIN SEÑAL</h2>
-                    <p>No hay setups de alta probabilidad en las últimas {window_label}.</p>
+                    <div class="signal-long">
+                    <h2>🟢 LONG — {asset_cfg['label']}</h2>
+                    <p>Setup: <b>{_trade.setup_type.upper()}</b> |
+                       Timeframe: 4H |
+                       ML Score: <b>{_trade.ml_score:.0%}</b></p>
                     </div>
                     """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class="signal-short">
+                    <h2>🔴 SHORT — {asset_cfg['label']}</h2>
+                    <p>Setup: <b>{_trade.setup_type.upper()}</b> |
+                       Timeframe: 4H |
+                       ML Score: <b>{_trade.ml_score:.0%}</b></p>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                window_label = f"{_lookback} horas" if _lookback < 48 else f"{_lookback // 24} días"
+                st.markdown(f"""
+                <div class="signal-none">
+                <h2>⚪ SIN SEÑAL</h2>
+                <p>No hay setups de alta probabilidad en las últimas {window_label}.</p>
+                </div>
+                """, unsafe_allow_html=True)
 
-                # Métricas de la señal
-                if trade is not None:
-                    st.markdown("---")
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Entrada",      f"${trade.entry_price:,.2f}")
-                    c2.metric("Stop Loss",    f"${trade.stop_loss:,.2f}",
-                              delta=f"-{trade.stop_distance_pct*100:.1f}%",
-                              delta_color="inverse")
-                    c3.metric("Take Profit",  f"${trade.take_profit:,.2f}",
-                              delta=f"+{trade.target_distance_pct*100:.1f}%")
-                    c4.metric("R:R",          f"{trade.rr_ratio:.1f}:1")
+            if _trade is not None:
+                st.markdown("---")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Entrada",      f"${_trade.entry_price:,.2f}")
+                c2.metric("Stop Loss",    f"${_trade.stop_loss:,.2f}",
+                          delta=f"-{_trade.stop_distance_pct*100:.1f}%",
+                          delta_color="inverse")
+                c3.metric("Take Profit",  f"${_trade.take_profit:,.2f}",
+                          delta=f"+{_trade.target_distance_pct*100:.1f}%")
+                c4.metric("R:R",          f"{_trade.rr_ratio:.1f}:1")
 
-                    c5, c6, c7, c8 = st.columns(4)
-                    c5.metric("Tamaño USD",    f"${trade.position_size:,.0f}")
-                    c6.metric("Riesgo USD",    f"${trade.risk_usd:,.0f}")
-                    c7.metric("Reward USD",    f"${trade.reward_usd:,.0f}")
-                    c8.metric("ATR (14)",      f"{trade.atr_pct*100:.2f}%")
+                c5, c6, c7, c8 = st.columns(4)
+                c5.metric("Tamaño USD",    f"${_trade.position_size:,.0f}")
+                c6.metric("Riesgo USD",    f"${_trade.risk_usd:,.0f}")
+                c7.metric("Reward USD",    f"${_trade.reward_usd:,.0f}")
+                c8.metric("ATR (14)",      f"{_trade.atr_pct*100:.2f}%")
 
-                    col_btns = st.columns(2)
-                    with col_btns[0]:
-                        if st.button("💾 Registrar señal en DB", type="secondary"):
-                            sig_id = save_signal_from_trade(trade, sentiment)
-                            if sig_id > 0:
-                                st.success(f"Señal guardada (ID #{sig_id}). El resultado se resolverá automáticamente.")
+                col_btns = st.columns(2)
+                with col_btns[0]:
+                    if st.button("💾 Registrar señal en DB", type="secondary"):
+                        sig_id = save_signal_from_trade(_trade, _sent)
+                        if sig_id > 0:
+                            st.success(f"Señal guardada (ID #{sig_id}). El resultado se resolverá automáticamente.")
+                        else:
+                            st.error("Error al guardar la señal.")
+                with col_btns[1]:
+                    if tg_notify:
+                        if st.button("📲 Enviar a Telegram", type="secondary"):
+                            ok = send_signal_alert(_trade, _sent)
+                            if ok:
+                                st.success("Notificación enviada a Telegram.")
                             else:
-                                st.error("Error al guardar la señal.")
-                    with col_btns[1]:
-                        if tg_notify:
-                            if st.button("📲 Enviar a Telegram", type="secondary"):
-                                ok = send_signal_alert(trade, sentiment)
-                                if ok:
-                                    st.success("Notificación enviada a Telegram.")
-                                else:
-                                    st.error("No se pudo enviar. Verifica TOKEN y CHAT_ID en .env")
+                                st.error("No se pudo enviar. Verifica TOKEN y CHAT_ID en .env")
 
-            with col_risk:
-                st.subheader("Gestión de Riesgo")
-                st.info(
-                    f"**Capital:** ${capital:,.0f}\n\n"
-                    f"**Riesgo/trade:** {risk_pct*100:.1f}%\n\n"
-                    f"**Max posiciones:** {RISK['max_positions']}\n\n"
-                    f"**Stop:** {RISK['atr_stop_mult']}× ATR\n\n"
-                    f"**Target:** {RISK['atr_target_mult']}× ATR"
+        with col_risk:
+            st.subheader("Gestión de Riesgo")
+            st.info(
+                f"**Capital:** ${capital:,.0f}\n\n"
+                f"**Riesgo/trade:** {risk_pct*100:.1f}%\n\n"
+                f"**Max posiciones:** {RISK['max_positions']}\n\n"
+                f"**Stop:** {RISK['atr_stop_mult']}× ATR\n\n"
+                f"**Target:** {RISK['atr_target_mult']}× ATR"
+            )
+
+            if use_sentiment:
+                st.subheader("Sentimiento")
+                fg_val  = _sent.get("fg_value", 0)
+                fg_cls  = _sent.get("fg_classification", "N/A")
+                score   = _sent["score"]
+                label   = _sent["label"]
+                trend7  = _sent.get("trend_7d", 0.0)
+
+                color_icon = {
+                    "green":  "🟢", "red": "🔴",
+                    "gray":   "⚪", "orange": "🟡",
+                }.get(_sent["color"], "⚪")
+
+                if fg_val > 0:
+                    st.markdown(f"{color_icon} **{label}** — Fear & Greed: **{fg_val}/100**")
+                    st.progress(fg_val / 100)
+                    delta_str = f"{trend7:+.0f} pts vs hace 7 días" if trend7 != 0 else "sin cambio en 7 días"
+                    st.caption(
+                        f"Clasificación: *{fg_cls}* | "
+                        f"Score contrarian: {score:+.2f} | {delta_str}"
+                    )
+                else:
+                    st.markdown(f"{color_icon} **{label}** (N/A para este activo)")
+                    st.caption("El Fear & Greed Index es específico de crypto.")
+
+        st.markdown("---")
+        if not _df4h.empty and len(_df4h) > 50:
+            st.subheader(f"📈 {asset_cfg['label']} — Últimas 120 barras 4H")
+            last_n = _df4h.iloc[-120:].copy()
+            last_n["ema_21"] = last_n["close"].ewm(span=21).mean()
+            last_n["ema_55"] = last_n["close"].ewm(span=55).mean()
+
+            fig = make_subplots(
+                rows=2, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.05,
+                row_heights=[0.75, 0.25],
+            )
+            fig.add_trace(go.Candlestick(
+                x=last_n.index,
+                open=last_n["open"], high=last_n["high"],
+                low=last_n["low"],   close=last_n["close"],
+                name="OHLC",
+                increasing_line_color="#26a69a",
+                decreasing_line_color="#ef5350",
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=last_n.index, y=last_n["ema_21"],
+                name="EMA 21", line=dict(color="orange", width=1.5)
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=last_n.index, y=last_n["ema_55"],
+                name="EMA 55", line=dict(color="royalblue", width=1.5, dash="dash")
+            ), row=1, col=1)
+
+            if not _dfsetups.empty:
+                recent_setups = _dfsetups[_dfsetups["ts"] >= last_n.index[0]]
+                longs  = recent_setups[recent_setups["direction"] == "long"]
+                shorts = recent_setups[recent_setups["direction"] == "short"]
+                if not longs.empty:
+                    fig.add_trace(go.Scatter(
+                        x=longs["ts"], y=longs["close"] * 0.998,
+                        mode="markers",
+                        marker=dict(symbol="triangle-up", size=10, color="lime"),
+                        name="Setup LONG",
+                    ), row=1, col=1)
+                if not shorts.empty:
+                    fig.add_trace(go.Scatter(
+                        x=shorts["ts"], y=shorts["close"] * 1.002,
+                        mode="markers",
+                        marker=dict(symbol="triangle-down", size=10, color="red"),
+                        name="Setup SHORT",
+                    ), row=1, col=1)
+
+            if _trade is not None:
+                fig.add_hline(
+                    y=_trade.entry_price, line_color="white",
+                    line_dash="dash", line_width=1,
+                    annotation_text="Entry", row=1, col=1
+                )
+                fig.add_hline(
+                    y=_trade.stop_loss, line_color="red",
+                    line_dash="dot", line_width=1.5,
+                    annotation_text="Stop Loss", row=1, col=1
+                )
+                fig.add_hline(
+                    y=_trade.take_profit, line_color="lime",
+                    line_dash="dot", line_width=1.5,
+                    annotation_text="Take Profit", row=1, col=1
                 )
 
-                if use_sentiment:
-                    st.subheader("Sentimiento")
-                    fg_val  = sentiment.get("fg_value", 0)
-                    fg_cls  = sentiment.get("fg_classification", "N/A")
-                    score   = sentiment["score"]
-                    label   = sentiment["label"]
-                    trend7  = sentiment.get("trend_7d", 0.0)
+            colors = ["#26a69a" if last_n["close"].iloc[i] >= last_n["open"].iloc[i]
+                      else "#ef5350" for i in range(len(last_n))]
+            fig.add_trace(go.Bar(
+                x=last_n.index, y=last_n["volume"],
+                name="Volumen", marker_color=colors, opacity=0.6,
+            ), row=2, col=1)
 
-                    color_icon = {
-                        "green":  "🟢", "red": "🔴",
-                        "gray":   "⚪", "orange": "🟡",
-                    }.get(sentiment["color"], "⚪")
+            fig.update_layout(
+                template="plotly_dark",
+                xaxis_rangeslider_visible=False,
+                height=550,
+                margin=dict(l=0, r=0, t=10, b=0),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(fig, width="stretch")
 
-                    if fg_val > 0:
-                        # Barra de progreso del F&G Index
-                        st.markdown(f"{color_icon} **{label}** — Fear & Greed: **{fg_val}/100**")
-                        st.progress(fg_val / 100)
-                        delta_str = f"{trend7:+.0f} pts vs hace 7 días" if trend7 != 0 else "sin cambio en 7 días"
-                        st.caption(
-                            f"Clasificación: *{fg_cls}* | "
-                            f"Score contrarian: {score:+.2f} | {delta_str}"
-                        )
-                    else:
-                        st.markdown(f"{color_icon} **{label}** (N/A para este activo)")
-                        st.caption("El Fear & Greed Index es específico de crypto.")
-
-            # ----------------------------------------------------------------
-            # Gráfico de precio
-            # ----------------------------------------------------------------
-            st.markdown("---")
-            if not df_4h.empty and len(df_4h) > 50:
-                st.subheader(f"📈 {asset_cfg['label']} — Últimas 120 barras 4H")
-                last_n = df_4h.iloc[-120:].copy()
-
-                # EMAs
-                last_n["ema_21"] = last_n["close"].ewm(span=21).mean()
-                last_n["ema_55"] = last_n["close"].ewm(span=55).mean()
-
-                fig = make_subplots(
-                    rows=2, cols=1,
-                    shared_xaxes=True,
-                    vertical_spacing=0.05,
-                    row_heights=[0.75, 0.25],
-                )
-                # Velas
-                fig.add_trace(go.Candlestick(
-                    x=last_n.index,
-                    open=last_n["open"], high=last_n["high"],
-                    low=last_n["low"],   close=last_n["close"],
-                    name="OHLC",
-                    increasing_line_color="#26a69a",
-                    decreasing_line_color="#ef5350",
-                ), row=1, col=1)
-
-                fig.add_trace(go.Scatter(
-                    x=last_n.index, y=last_n["ema_21"],
-                    name="EMA 21", line=dict(color="orange", width=1.5)
-                ), row=1, col=1)
-                fig.add_trace(go.Scatter(
-                    x=last_n.index, y=last_n["ema_55"],
-                    name="EMA 55", line=dict(color="royalblue", width=1.5, dash="dash")
-                ), row=1, col=1)
-
-                # Marcadores de setups
-                if not df_setups.empty:
-                    recent_setups = df_setups[df_setups["ts"] >= last_n.index[0]]
-                    longs  = recent_setups[recent_setups["direction"] == "long"]
-                    shorts = recent_setups[recent_setups["direction"] == "short"]
-                    if not longs.empty:
-                        fig.add_trace(go.Scatter(
-                            x=longs["ts"], y=longs["close"] * 0.998,
-                            mode="markers",
-                            marker=dict(symbol="triangle-up", size=10, color="lime"),
-                            name="Setup LONG",
-                        ), row=1, col=1)
-                    if not shorts.empty:
-                        fig.add_trace(go.Scatter(
-                            x=shorts["ts"], y=shorts["close"] * 1.002,
-                            mode="markers",
-                            marker=dict(symbol="triangle-down", size=10, color="red"),
-                            name="Setup SHORT",
-                        ), row=1, col=1)
-
-                # Si hay trade activo, mostrar niveles
-                if trade is not None:
-                    fig.add_hline(
-                        y=trade.entry_price, line_color="white",
-                        line_dash="dash", line_width=1,
-                        annotation_text="Entry", row=1, col=1
-                    )
-                    fig.add_hline(
-                        y=trade.stop_loss, line_color="red",
-                        line_dash="dot", line_width=1.5,
-                        annotation_text="Stop Loss", row=1, col=1
-                    )
-                    fig.add_hline(
-                        y=trade.take_profit, line_color="lime",
-                        line_dash="dot", line_width=1.5,
-                        annotation_text="Take Profit", row=1, col=1
-                    )
-
-                # Volumen
-                colors = ["#26a69a" if last_n["close"].iloc[i] >= last_n["open"].iloc[i]
-                          else "#ef5350" for i in range(len(last_n))]
-                fig.add_trace(go.Bar(
-                    x=last_n.index, y=last_n["volume"],
-                    name="Volumen", marker_color=colors, opacity=0.6,
-                ), row=2, col=1)
-
-                fig.update_layout(
-                    template="plotly_dark",
-                    xaxis_rangeslider_visible=False,
-                    height=550,
-                    margin=dict(l=0, r=0, t=10, b=0),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                )
-                st.plotly_chart(fig, width="stretch")
-
-            # ----------------------------------------------------------------
-            # Todos los setups detectados
-            # ----------------------------------------------------------------
-            if not df_setups.empty:
-                with st.expander(f"🔍 Todos los setups detectados ({len(df_setups)})"):
-                    show = df_setups[["ts","setup_type","direction","raw_score",
-                                       "ml_score","close","atr","rr_ratio"]].tail(30)
-                    st.dataframe(show.sort_values("ts", ascending=False), use_container_width=True)
+        if not _dfsetups.empty:
+            with st.expander(f"🔍 Todos los setups detectados ({len(_dfsetups)})"):
+                show = _dfsetups[["ts","setup_type","direction","raw_score",
+                                   "ml_score","close","atr","rr_ratio"]].tail(30)
+                st.dataframe(show.sort_values("ts", ascending=False), use_container_width=True)
 
 
 # =============================================================================
@@ -635,11 +617,12 @@ with tab_history:
             outcome = st.radio("Resultado", ["win", "loss", "be"])
             pnl     = st.number_input("PnL (USD)", value=0.0, step=10.0)
             if st.button("Guardar resultado"):
-                from data.database import get_connection
-                with get_connection() as conn:
-                    conn.execute(
-                        "UPDATE signals SET resultado_real=?, pnl_usd=? WHERE id=?",
-                        (outcome, pnl, sel_id)
+                from data.database import get_engine
+                from sqlalchemy import text as _sql
+                with get_engine().begin() as _conn:
+                    _conn.execute(
+                        _sql("UPDATE signals SET resultado_real=:outcome, pnl_usd=:pnl WHERE id=:id"),
+                        {"outcome": outcome, "pnl": float(pnl), "id": int(sel_id)}
                     )
                 st.success("Resultado guardado.")
                 st.rerun()

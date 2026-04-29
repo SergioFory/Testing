@@ -75,7 +75,7 @@ ASSETS = {
         "yf_ticker":    "GC=F",
         "min_range_pct": 0.008,
         "pip_value":    1.0,
-        "days_history": 2500,
+        "days_history": 7300,   # era 2500 (~7 años) → ahora ~20 años; GC=F tiene datos desde 2000
         "forward_bars": 12,
         "ml_threshold": 0.58,   # era 0.52 — Gold tiene modelo más débil
     },
@@ -172,7 +172,7 @@ ML_PARAMS = {
     "lambda_l2":        0.2,    # NUEVO: regularización L2 (Ridge)
     "min_train_samples": 80,    # era 50 — requerir más datos mínimos
     "top_features":     20,     # Selección de top-N features por importancia
-    "train_window_days": 730,   # Solo entrenar con setups de los últimos 2 años
+    "train_window_days": 1000,  # Últimos ~2.75 años; cubre bull market desde jul-2023 sin datos del crash 2022
     "retrain_every":    7,      # Reentrenar cada N días
     "prob_threshold":   0.55,   # Umbral para métricas walk-forward
 }

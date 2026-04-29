@@ -172,7 +172,7 @@ ML_PARAMS = {
     "lambda_l2":        0.2,    # NUEVO: regularización L2 (Ridge)
     "min_train_samples": 80,    # era 50 — requerir más datos mínimos
     "top_features":     20,     # Selección de top-N features por importancia
-    "train_window_days": 1000,  # Últimos ~2.75 años; cubre bull market desde jul-2023 sin datos del crash 2022
+    "train_window_days": 730,   # Últimos 2 años; 1000 días incorpora 2023 que genera ruido en crypto
     "retrain_every":    7,      # Reentrenar cada N días
     "prob_threshold":   0.55,   # Umbral para métricas walk-forward
 }

@@ -34,14 +34,15 @@ _YFINANCE_SYMBOL = {
 }
 
 
-def _binance_exchange():
+def _binance_exchange(private: bool = False):
     if not HAS_CCXT:
         raise ImportError("pip install ccxt")
-    from config.settings import BINANCE_API_KEY, BINANCE_API_SECRET
     config = {"options": {"defaultType": "future"}, "enableRateLimit": True}
-    if BINANCE_API_KEY and BINANCE_API_SECRET:
-        config["apiKey"] = BINANCE_API_KEY
-        config["secret"] = BINANCE_API_SECRET
+    if private:
+        from config.settings import BINANCE_API_KEY, BINANCE_API_SECRET
+        if BINANCE_API_KEY and BINANCE_API_SECRET:
+            config["apiKey"] = BINANCE_API_KEY
+            config["secret"] = BINANCE_API_SECRET
     return ccxt.binance(config)
 
 
@@ -141,9 +142,9 @@ def fetch_ohlcv(symbol: str, timeframe: str = "4h", days: int = 730) -> pd.DataF
 
     logger.info(f"Descargando {symbol} {timeframe} ({days} días)...")
 
-    # 1. Binance
+    # 1. Binance (sin API keys — OHLCV es público; keys activan endpoints privados que dan 451)
     try:
-        df = _fetch_ohlcv_from(_binance_exchange(), symbol, timeframe, days)
+        df = _fetch_ohlcv_from(_binance_exchange(private=False), symbol, timeframe, days)
         if not df.empty:
             logger.success(f"{symbol} {timeframe} vía Binance: {len(df)} barras | "
                            f"{df.index[0].date()} → {df.index[-1].date()}")
@@ -164,12 +165,14 @@ def fetch_ohlcv(symbol: str, timeframe: str = "4h", days: int = 730) -> pd.DataF
         except Exception as e:
             logger.warning(f"Bybit no disponible para {symbol}: {e}")
 
-    # 3. Gate.io
+    # 3. Gate.io (máx 10000 puntos; limitar days según timeframe)
     gateio_sym = _GATEIO_SYMBOL.get(symbol)
     if gateio_sym:
+        _gateio_max = {"1h": 400, "4h": 1650, "1d": 9000}
+        gateio_days = min(days, _gateio_max.get(timeframe, 1000))
         logger.info(f"Intentando Gate.io para {symbol}...")
         try:
-            df = _fetch_ohlcv_from(_gateio_exchange(), gateio_sym, timeframe, days)
+            df = _fetch_ohlcv_from(_gateio_exchange(), gateio_sym, timeframe, gateio_days)
             if not df.empty:
                 logger.success(f"{symbol} {timeframe} vía Gate.io: {len(df)} barras | "
                                f"{df.index[0].date()} → {df.index[-1].date()}")
@@ -220,7 +223,7 @@ def fetch_funding_rates(symbol: str, days: int = 365) -> pd.Series:
 
     # Binance
     try:
-        rates = _fetch_rates(_binance_exchange(), symbol)
+        rates = _fetch_rates(_binance_exchange(private=True), symbol)
         if rates:
             return _rates_to_series(rates)
     except Exception as e:

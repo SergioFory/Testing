@@ -61,8 +61,10 @@ def _gateio_exchange():
 def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int) -> pd.DataFrame:
     """Descarga OHLCV de cualquier exchange ccxt."""
     since_ms = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     all_candles = []
     limit = 1000
+    prev_last_ts = None
 
     while True:
         try:
@@ -74,9 +76,14 @@ def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int) -> pd.Da
 
         if not candles:
             break
-        all_candles.extend(candles)
         last_ts = candles[-1][0]
-        if len(candles) < limit:
+        # Guard: si el exchange no avanza en el tiempo, salir
+        if last_ts == prev_last_ts:
+            break
+        prev_last_ts = last_ts
+        all_candles.extend(candles)
+        # Terminar cuando se alcanza el tiempo actual (en lugar de contar candles)
+        if last_ts >= now_ms:
             break
         since_ms = last_ts + 1
         time.sleep(exchange.rateLimit / 1000)

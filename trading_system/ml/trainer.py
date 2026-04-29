@@ -71,6 +71,17 @@ def train_model(
         )
         return None, [], {}
 
+    # Filtrar a ventana de entrenamiento reciente (evita regímenes de mercado obsoletos)
+    train_window = p.get("train_window_days", 0)
+    if train_window and isinstance(df_train.index, pd.DatetimeIndex):
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=train_window)
+        if df_train.index.tz is None:
+            cutoff = cutoff.tz_localize(None)
+        recent = df_train[df_train.index >= cutoff]
+        if len(recent) >= p["min_train_samples"]:
+            df_train = recent
+            logger.info(f"Ventana de entrenamiento: últimos {train_window} días → {len(df_train)} muestras")
+
     X = df_train[feature_cols].copy()
     y = df_train["target"].copy()
 

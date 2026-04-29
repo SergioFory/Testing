@@ -171,7 +171,8 @@ ML_PARAMS = {
     "lambda_l1":        0.2,    # NUEVO: regularización L1 (LASSO)
     "lambda_l2":        0.2,    # NUEVO: regularización L2 (Ridge)
     "min_train_samples": 80,    # era 50 — requerir más datos mínimos
-    "top_features":     20,     # NUEVO: selección de top-N features por importancia
+    "top_features":     20,     # Selección de top-N features por importancia
+    "train_window_days": 730,   # Solo entrenar con setups de los últimos 2 años
     "retrain_every":    7,      # Reentrenar cada N días
     "prob_threshold":   0.55,   # Umbral para métricas walk-forward
 }

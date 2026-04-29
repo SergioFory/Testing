@@ -28,6 +28,23 @@ def _get_feature_cols(df: pd.DataFrame) -> list:
     return [c for c in df.columns if c not in exclude and df[c].dtype in [np.float64, np.int64, float, int]]
 
 
+def _select_top_features(X: pd.DataFrame, y: pd.Series, top_n: int = 20) -> list:
+    """
+    Selecciona las top_n features por importancia usando un modelo ligero.
+    Reduce overfitting cuando hay pocas muestras y muchas features.
+    """
+    selector = lgb.LGBMClassifier(
+        n_estimators=80, learning_rate=0.1, num_leaves=8,
+        max_depth=3, min_child_samples=15,
+        class_weight="balanced", random_state=42, verbose=-1,
+    )
+    selector.fit(X, y)
+    imp = pd.Series(selector.feature_importances_, index=X.columns)
+    top = imp.nlargest(top_n).index.tolist()
+    logger.info(f"Feature selection: {len(X.columns)} → {len(top)} features")
+    return top
+
+
 def train_model(
     df_train: pd.DataFrame,
     symbol:   str = "ALL",
@@ -61,6 +78,12 @@ def train_model(
     medians = X.median()
     X = X.fillna(medians)
 
+    # --- Selección de features: top N por importancia ---
+    top_n = p.get("top_features", 20)
+    if len(feature_cols) > top_n:
+        feature_cols = _select_top_features(X, y, top_n=top_n)
+        X = X[feature_cols]
+
     logger.info(f"Entrenando modelo | {len(X)} muestras | {len(feature_cols)} features")
 
     # --- Walk-forward para métricas honestas ---
@@ -75,6 +98,8 @@ def train_model(
         min_child_samples= p["min_child_samples"],
         subsample        = p["subsample"],
         colsample_bytree = p["colsample_bytree"],
+        reg_alpha        = p.get("lambda_l1", 0.1),
+        reg_lambda       = p.get("lambda_l2", 0.1),
         class_weight     = "balanced",
         random_state     = 42,
         verbose          = -1,
@@ -131,6 +156,8 @@ def _walk_forward_eval(X: pd.DataFrame, y: pd.Series) -> dict:
             min_child_samples= p["min_child_samples"],
             subsample        = p["subsample"],
             colsample_bytree = p["colsample_bytree"],
+            reg_alpha        = p.get("lambda_l1", 0.1),
+            reg_lambda       = p.get("lambda_l2", 0.1),
             class_weight     = "balanced",
             random_state     = 42,
             verbose          = -1,

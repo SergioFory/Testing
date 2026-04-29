@@ -55,9 +55,9 @@ ASSETS = {
         "exchange":     "binanceusdm",
         "min_range_pct": 0.015,
         "pip_value":    1.0,
-        "days_history": 1825,   # 5 años → ~400 setups esperados
-        "forward_bars": 24,     # 24 × 4H = 4 días para resolver el trade
-        "ml_threshold": 0.40,   # BTC: modelo muy conservador, scores en rango 0.35-0.43
+        "days_history": 1825,
+        "forward_bars": 24,
+        "ml_threshold": 0.55,   # era 0.40 — umbral más selectivo tras regularización
     },
     "ETHUSDT": {
         "label":        "ETH",
@@ -67,7 +67,7 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 1825,
         "forward_bars": 24,
-        "ml_threshold": 0.45,   # calibrado al rango real del modelo (~0.35-0.48)
+        "ml_threshold": 0.55,   # era 0.45
     },
     "XAUUSD": {
         "label":        "GOLD",
@@ -77,7 +77,7 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 2500,
         "forward_bars": 12,
-        "ml_threshold": 0.52,   # AUC=0.629 → modelo sí produce scores > 0.52
+        "ml_threshold": 0.58,   # era 0.52 — Gold tiene modelo más débil
     },
 }
 
@@ -160,22 +160,26 @@ ASSET_PARAMS_OVERRIDE = {
 # MODELO ML
 # =============================================================================
 ML_PARAMS = {
-    "n_estimators":     400,
-    "learning_rate":    0.02,
-    "num_leaves":       31,
-    "max_depth":        6,
-    "min_child_samples":20,
-    "subsample":        0.8,
-    "colsample_bytree": 0.8,
-    "min_train_samples": 50,    # Mínimo de setups históricos para entrenar
+    # Modelo más simple y regularizado para datasets pequeños (< 500 muestras)
+    "n_estimators":     150,    # era 400 — menos árboles, menos overfitting
+    "learning_rate":    0.05,   # era 0.02 — más rápido con menos árboles
+    "num_leaves":       15,     # era 31 — árbol más simple
+    "max_depth":        4,      # era 6  — profundidad limitada
+    "min_child_samples":30,     # era 20 — más muestras mínimas por hoja
+    "subsample":        0.7,    # era 0.8
+    "colsample_bytree": 0.6,    # era 0.8 — usar 60% de features por árbol
+    "lambda_l1":        0.2,    # NUEVO: regularización L1 (LASSO)
+    "lambda_l2":        0.2,    # NUEVO: regularización L2 (Ridge)
+    "min_train_samples": 80,    # era 50 — requerir más datos mínimos
+    "top_features":     20,     # NUEVO: selección de top-N features por importancia
     "retrain_every":    7,      # Reentrenar cada N días
-    "prob_threshold":   0.58,   # Umbral de confianza para emitir señal
+    "prob_threshold":   0.55,   # Umbral para métricas walk-forward
 }
 
 WALK_FORWARD = {
-    "n_splits":         5,
-    "train_size":       180,    # Días de entrenamiento por fold
-    "test_size":        30,     # Días de evaluación por fold
+    "n_splits":         3,      # era 5 — con < 400 muestras, 5 folds dejan folds de 60 muestras (muy poco)
+    "train_size":       240,
+    "test_size":        60,
 }
 
 # =============================================================================

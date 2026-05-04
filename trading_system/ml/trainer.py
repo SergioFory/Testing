@@ -93,6 +93,13 @@ def train_model(
         logger.warning(f"Features con >30% NaN (se imputan con mediana): {high_null.round(2).to_dict()}")
     X = X.fillna(medians)
 
+    # Descartar features con >50% NaN: son ruido puro (la imputación no aporta señal)
+    cols_high_null = pct_null[pct_null > 0.5].index.tolist()
+    if cols_high_null:
+        logger.warning(f"Descartando {len(cols_high_null)} features con >50% NaN: {cols_high_null}")
+        X = X.drop(columns=cols_high_null)
+        feature_cols = [c for c in feature_cols if c not in cols_high_null]
+
     top_n = p.get("top_features", 20)
 
     # --- Walk-forward con feature selection por fold (sin data leakage) ---
@@ -127,6 +134,13 @@ def train_model(
     calibrated = CalibratedClassifierCV(model, cv=3, method="sigmoid")
     calibrated.fit(X, y)
 
+    # Threshold adaptativo: percentil 85 de los scores en training.
+    # Se ajusta solo cuando el modelo mejora; garantiza ~15% de setups aprobados.
+    train_scores = calibrated.predict_proba(X)[:, 1]
+    adaptive_threshold = round(float(np.percentile(train_scores, 85)), 4)
+    wf_metrics["adaptive_threshold"] = adaptive_threshold
+    logger.info(f"Threshold adaptativo (p85 training): {adaptive_threshold:.4f}")
+
     if save:
         model_path = MODEL_DIR / f"model_{symbol}.pkl"
         meta_path  = MODEL_DIR / f"model_{symbol}_meta.pkl"
@@ -134,11 +148,12 @@ def train_model(
             pickle.dump(calibrated, f)
         with open(meta_path, "wb") as f:
             pickle.dump({
-                "feature_cols": feature_cols,
-                "medians":      medians.to_dict(),
-                "trained_at":   datetime.utcnow().isoformat(),
-                "n_samples":    len(X),
-                "wf_metrics":   wf_metrics,
+                "feature_cols":       feature_cols,
+                "medians":            medians.to_dict(),
+                "trained_at":         datetime.utcnow().isoformat(),
+                "n_samples":          len(X),
+                "wf_metrics":         wf_metrics,
+                "adaptive_threshold": adaptive_threshold,
             }, f)
         logger.success(f"Modelo guardado: {model_path}")
 
@@ -217,7 +232,7 @@ def load_model(symbol: str) -> tuple:
 
     if not model_path.exists():
         logger.warning(f"Modelo no encontrado para {symbol}. Hay que entrenarlo primero.")
-        return None, [], {}
+        return None, [], {}, None
 
     with open(model_path, "rb") as f:
         model = pickle.load(f)
@@ -229,7 +244,7 @@ def load_model(symbol: str) -> tuple:
         f"Entrenado: {meta.get('trained_at', '?')} | "
         f"Muestras: {meta.get('n_samples', '?')}"
     )
-    return model, meta["feature_cols"], meta["medians"]
+    return model, meta["feature_cols"], meta["medians"], meta.get("adaptive_threshold")
 
 
 def get_model_importance(symbol: str, top_n: int = 20) -> pd.Series:

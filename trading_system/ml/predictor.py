@@ -34,10 +34,12 @@ def score_setups(
         return df_setups
 
     from config.settings import ASSETS
+    model, feature_cols, medians, adaptive_threshold = load_model(symbol)
+
     effective_threshold = threshold if threshold is not None else \
+        adaptive_threshold if adaptive_threshold is not None else \
         ASSETS.get(symbol, {}).get("ml_threshold", ML_PARAMS["prob_threshold"])
 
-    model, feature_cols, medians = load_model(symbol)
     if model is None:
         logger.warning(f"No hay modelo para {symbol}. Usando raw_score como proxy.")
         df_setups = df_setups.copy()

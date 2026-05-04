@@ -152,16 +152,17 @@ def send_retrain_alert(symbol: str, metrics: dict) -> bool:
     precision = metrics.get("precision", 0)
     n_folds   = metrics.get("n_folds", 0)
     n_samples = metrics.get("n_samples", 0)
-    threshold = metrics.get("threshold", 0)
+    threshold = metrics.get("adaptive_threshold", metrics.get("threshold", 0))
 
     icon = "🟢" if auc >= 0.55 else "🟡" if auc >= 0.50 else "🔴"
 
     msg = (
         f"🔁 <b>Reentrenamiento automático — {symbol}</b>\n\n"
         f"{icon} <b>AUC Walk-Forward:</b> {auc:.3f}\n"
-        f"<b>Precision@{threshold:.2f}:</b>  {precision:.3f}\n"
-        f"<b>Folds:</b>               {n_folds}\n"
-        f"<b>Muestras:</b>            {n_samples}\n\n"
+        f"<b>Precision (p0.50):</b>  {precision:.3f}\n"
+        f"<b>Umbral efectivo:</b>    {threshold:.4f}\n"
+        f"<b>Folds:</b>              {n_folds}\n"
+        f"<b>Muestras:</b>           {n_samples}\n\n"
         f"<i>Modelo actualizado y listo para operar.</i>"
     )
     return _send(msg)

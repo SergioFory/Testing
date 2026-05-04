@@ -42,7 +42,7 @@ services:
       pip install --upgrade pip
       pip install -r trading_system/requirements.txt
 
-    startCommand: python trading_system/main.py retrain --all && python trading_system/main.py schedule --interval 60 --retrain-hour 03:00
+    startCommand: python trading_system/main.py retrain --all --notify && python trading_system/main.py schedule --interval 60 --retrain-hour 03:00
 
     envVars:
       - key: DATABASE_URL

@@ -86,9 +86,11 @@ def score_setups(
     df_setups["ml_approved"] = df_setups["ml_score"] >= effective_threshold
 
     n_approved = df_setups["ml_approved"].sum()
+    scores = df_setups["ml_score"]
     logger.info(
         f"ML scoring {symbol}: {len(df_setups)} setups → "
-        f"{n_approved} aprobados (umbral {effective_threshold:.2f})"
+        f"{n_approved} aprobados (umbral {effective_threshold:.2f}) | "
+        f"scores min={scores.min():.3f} med={scores.median():.3f} max={scores.max():.3f}"
     )
     return df_setups
 

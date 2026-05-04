@@ -93,16 +93,19 @@ def train_model(
         logger.warning(f"Features con >30% NaN (se imputan con mediana): {high_null.round(2).to_dict()}")
     X = X.fillna(medians)
 
-    # --- Selección de features: top N por importancia ---
     top_n = p.get("top_features", 20)
+
+    # --- Walk-forward con feature selection por fold (sin data leakage) ---
+    wf_metrics = _walk_forward_eval(X, y, top_n=top_n if len(feature_cols) > top_n else 0)
+    wf_metrics["n_samples"] = len(X)
+    wf_metrics["threshold"] = p.get("prob_threshold", 0.5)
+
+    # --- Selección de features para modelo final (correcto: usa todos los datos) ---
     if len(feature_cols) > top_n:
         feature_cols = _select_top_features(X, y, top_n=top_n)
         X = X[feature_cols]
 
     logger.info(f"Entrenando modelo | {len(X)} muestras | {len(feature_cols)} features")
-
-    # --- Walk-forward para métricas honestas ---
-    wf_metrics = _walk_forward_eval(X, y)
 
     # --- Entrenamiento final sobre todos los datos ---
     model = lgb.LGBMClassifier(
@@ -147,7 +150,7 @@ def train_model(
     return calibrated, feature_cols, wf_metrics
 
 
-def _walk_forward_eval(X: pd.DataFrame, y: pd.Series) -> dict:
+def _walk_forward_eval(X: pd.DataFrame, y: pd.Series, top_n: int = 0) -> dict:
     """Evaluación walk-forward con TimeSeriesSplit."""
     p = ML_PARAMS
     tss = TimeSeriesSplit(n_splits=WALK_FORWARD["n_splits"])
@@ -162,6 +165,12 @@ def _walk_forward_eval(X: pd.DataFrame, y: pd.Series) -> dict:
             continue
         if y_tr.nunique() < 2:
             continue
+
+        # Feature selection sólo sobre datos de train de este fold (evita data leakage)
+        if top_n and len(X_tr.columns) > top_n:
+            fold_features = _select_top_features(X_tr, y_tr, top_n=top_n)
+            X_tr = X_tr[fold_features]
+            X_te = X_te[fold_features]
 
         m = lgb.LGBMClassifier(
             n_estimators     = p["n_estimators"],

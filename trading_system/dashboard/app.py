@@ -166,7 +166,7 @@ with tab_signal:
                 _dfsetups = detect_all_setups(_df4h, df_daily, symbol=symbol)
 
             with st.spinner("Preparando modelo ML..."):
-                model, feat_cols, medians = load_model(symbol)
+                model, feat_cols, medians, _ = load_model(symbol)
                 if model is None:
                     st.info("Entrenando modelo por primera vez (puede tardar 1-2 min)...")
                     _fwd_bars = asset_cfg.get("forward_bars", 12)
@@ -532,7 +532,7 @@ with tab_backtest:
 with tab_model:
     st.header("Análisis del Modelo ML")
 
-    model_loaded, feat_cols, medians = load_model(symbol)
+    model_loaded, feat_cols, medians, _ = load_model(symbol)
     if model_loaded is None:
         st.info("Aún no hay modelo entrenado para este activo. Genera una señal primero.")
     else:

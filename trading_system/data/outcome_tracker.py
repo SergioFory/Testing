@@ -93,6 +93,16 @@ def resolve_open_signals() -> int:
                 sig_ts = pd.Timestamp(ts_unix)
                 if sig_ts.tz is None:
                     sig_ts = sig_ts.tz_localize("UTC")
+
+            # Timeout absoluto: señales con más de 7 días se fuerzan a expiradas
+            from datetime import timedelta
+            age = datetime.now(timezone.utc) - sig_ts
+            if age > timedelta(days=7):
+                _update_signal_result(sig_id, "expired", None, None)
+                resolved_count += 1
+                logger.info(f"Señal #{sig_id} {symbol} expirada por antigüedad ({age.days}d > 7d)")
+                continue
+
             outcome, pnl_pct = _check_outcome(symbol, sig_ts, direction, entry, sl, tp)
 
             if outcome is not None:

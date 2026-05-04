@@ -87,6 +87,10 @@ def train_model(
 
     # Imputar NaN con mediana (los NaN vienen de indicadores con lookback)
     medians = X.median()
+    pct_null = X.isna().mean()
+    high_null = pct_null[pct_null > 0.3]
+    if not high_null.empty:
+        logger.warning(f"Features con >30% NaN (se imputan con mediana): {high_null.round(2).to_dict()}")
     X = X.fillna(medians)
 
     # --- Selección de features: top N por importancia ---

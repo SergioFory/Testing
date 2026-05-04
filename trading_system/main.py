@@ -141,9 +141,9 @@ def cmd_signal(symbol: str, notify: bool = False):
     df_scored = score_setups(df_setups, df_4h, symbol, macro_df)
 
     # Mejor setup actual
-    best = get_best_setup(df_scored, n_last_bars=3)
+    best = get_best_setup(df_scored, n_last_bars=6)
     if best is None:
-        logger.info(f"[{symbol}] Sin setup de alta confianza en las últimas 3 barras.")
+        logger.info(f"[{symbol}] Sin setup de alta confianza en las últimas 6 barras (24h).")
         return
 
     ml_score = float(best.get("ml_score", best.get("raw_score", 0)))
@@ -405,8 +405,9 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
             try:
                 portfolio = PortfolioRiskManager()
                 send_daily_summary(portfolio.summary())
-            except Exception:
-                pass
+                logger.info("Resumen diario enviado a Telegram.")
+            except Exception as exc:
+                logger.error(f"Error enviando resumen diario a Telegram: {exc}")
 
     # Señales recurrentes
     sched.every(interval_minutes).minutes.do(_run_all_signals)

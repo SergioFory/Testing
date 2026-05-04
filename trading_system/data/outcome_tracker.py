@@ -15,11 +15,31 @@ from data.database import get_engine, save_signal, load_signals
 from sqlalchemy import text
 
 
+def _is_duplicate_signal(symbol: str, direction: str, entry_price: float,
+                          hours: int = 8) -> bool:
+    """True si ya existe una señal similar (mismo símbolo+dirección) en las últimas N horas."""
+    from datetime import datetime, timezone, timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT COUNT(*) FROM signals "
+                "WHERE symbol=:sym AND direction=:dir AND ts >= :cutoff"
+            ), {"sym": symbol, "dir": direction, "cutoff": cutoff}).scalar()
+            return (row or 0) > 0
+    except Exception:
+        return False
+
+
 def save_signal_from_trade(trade, sentiment: dict = None) -> int:
     """
     Persiste una señal generada (TradeSetup) en la tabla signals.
-    Retorna el ID asignado, o -1 si falló.
+    Retorna el ID asignado, o -1 si falló o era duplicado.
     """
+    if _is_duplicate_signal(trade.symbol, trade.direction, trade.entry_price):
+        logger.debug(f"Señal duplicada omitida: {trade.symbol} {trade.direction} ya guardada recientemente.")
+        return -1
     try:
         signal_dict = {
             "symbol":          trade.symbol,
@@ -66,7 +86,13 @@ def resolve_open_signals() -> int:
         sig_id, symbol, ts_unix, direction, entry, sl, tp = row
 
         try:
-            sig_ts = pd.Timestamp(ts_unix, unit="s", tz="UTC")
+            # PostgreSQL devuelve datetime objects; SQLite devuelve enteros Unix
+            if isinstance(ts_unix, (int, float)):
+                sig_ts = pd.Timestamp(ts_unix, unit="s", tz="UTC")
+            else:
+                sig_ts = pd.Timestamp(ts_unix)
+                if sig_ts.tz is None:
+                    sig_ts = sig_ts.tz_localize("UTC")
             outcome, pnl_pct = _check_outcome(symbol, sig_ts, direction, entry, sl, tp)
 
             if outcome is not None:

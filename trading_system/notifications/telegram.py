@@ -35,6 +35,7 @@ def _send(text: str, parse_mode: str = "HTML", retries: int = 3) -> bool:
         try:
             resp = requests.post(url, json=payload, timeout=10)
             if resp.status_code == 200:
+                logger.debug("Telegram: mensaje enviado correctamente.")
                 return True
             logger.warning(
                 f"Telegram API respondió {resp.status_code}: {resp.text[:200]}"

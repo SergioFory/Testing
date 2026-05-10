@@ -59,6 +59,16 @@ ASSETS = {
         "forward_bars": 24,
         "ml_threshold": 0.55,   # era 0.40 — umbral más selectivo tras regularización
         "use_macro":    False,  # macro 30d añade ruido en 4H crypto: precisión bajó 0.193→0.128
+        # R:R 1.5 (era 2.0): con 85% breakouts dominando el dataset, win rate al
+        # 38% deja al ML aprendiendo sobre fakeouts. TP a 2.25×ATR sube el win
+        # rate esperado a ~45-50%, mejorando el balance de clases del entrenamiento.
+        # Break-even precision: 40% (era 33%, alcanzable con la mejora de win rate).
+        "atr_target_mult": 2.25,
+        "atr_stop_mult":   1.5,
+        # Ventana extendida (era 730d default): con 154 muestras el modelo no
+        # generaliza. 1095d ≈ 3 años, debería rondar 230-250 muestras incluyendo
+        # el bear market 2022 y el rally 2024-25 — más diversidad de regímenes.
+        "train_window_days": 1095,
     },
     "ETHUSDT": {
         "label":        "ETH",

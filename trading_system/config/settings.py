@@ -118,10 +118,10 @@ ASSETS = {
         "ml_threshold": 0.55,
         "train_window_days": 0,
         "safe_haven":   True,           # plata como metal refugio: mismo alineamiento que Gold
-        # R:R 1.5 (era 1.0): con TP=1.5×ATR el break-even era 50% y la tasa base
-        # 47% no lo alcanzaba (EV -0.06R). Con TP=2.25×ATR el break-even baja a 40%;
-        # aunque el win rate cae ~4pp (~43%), el EV sube a ~+0.05R.
-        "atr_target_mult": 2.25,        # R:R 1.5
+        # R:R 1.0: TP=1.5×ATR. Con R:R 1.5 (TP=2.25×ATR) el win rate cayó 47%→37%
+        # (plata revierte antes de alcanzar targets amplios). Break-even a R:R 1.0 = 50%;
+        # el raw_score selecciona el top 5% de setups que pueden superar ese umbral.
+        "atr_target_mult": 1.5,         # R:R 1.0
         "atr_stop_mult":   1.5,
         # AUC 0.489 consistente (anti-predictivo): ML destruye EV positivo a tasa base.
         "use_ml":          False,

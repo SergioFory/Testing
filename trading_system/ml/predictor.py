@@ -59,6 +59,7 @@ def score_setups(
             setup["raw_score"],
             macro_df,
             funding_series,
+            symbol=symbol,
         )
         if not feat_row:
             scores.append(0.5)

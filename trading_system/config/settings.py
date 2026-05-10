@@ -58,6 +58,7 @@ ASSETS = {
         "days_history": 1825,
         "forward_bars": 24,
         "ml_threshold": 0.55,   # era 0.40 — umbral más selectivo tras regularización
+        "use_macro":    False,  # macro 30d añade ruido en 4H crypto: precisión bajó 0.193→0.128
     },
     "ETHUSDT": {
         "label":        "ETH",
@@ -81,6 +82,7 @@ ASSETS = {
         "forward_bars": 20,
         "ml_threshold": 0.58,
         "train_window_days": 0,         # usar todo el histórico disponible
+        "safe_haven":   True,           # correlación NEGATIVA con DXY → usa macro_dxy_alignment
         # TP a 2×ATR en lugar de 3×ATR: el oro se mueve en tendencias lentas.
         # Con 2×ATR el win rate histórico sube ~10pp, mejorando el dataset de entrenamiento.
         "atr_target_mult": 2.0,         # R:R resultante: 1.33
@@ -98,6 +100,7 @@ ASSETS = {
         "forward_bars": 20,
         "ml_threshold": 0.55,
         "train_window_days": 0,
+        "safe_haven":   True,           # plata como metal refugio: mismo alineamiento que Gold
         # Silver es muy volátil intradía: TP a 1.5×ATR (más cercano que oro a 2×ATR).
         # Un win rate del 50% con R:R 1.0 da expectativa positiva si el ML filtra.
         "atr_target_mult": 1.5,         # R:R 1.0

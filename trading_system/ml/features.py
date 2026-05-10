@@ -141,6 +141,7 @@ def build_setup_feature_row(
     raw_score: float,
     macro_df: pd.DataFrame = None,
     funding_series: pd.Series = None,
+    symbol: str = None,
 ) -> dict:
     """
     Construye el vector de features para UN setup específico.
@@ -248,13 +249,28 @@ def build_setup_feature_row(
                     week_mean = float(series.tail(5).mean())
                     features[f"macro_{col}_accel"] = week_mean - features[f"macro_{col}_trend30"]
 
-            # Feature de dirección del DXY relativa a la dirección del setup.
-            # Si operamos LONG en Gold y DXY está cayendo → señal alineada → +1
-            # Si operamos LONG en Gold y DXY está subiendo → señal contraria → -1
-            if "dxy_ret_trend30" in features:
-                dxy_dir = np.sign(features["dxy_ret_trend30"])
-                # Para activos de refugio (Gold, Silver): dirección contraria al DXY
-                features["macro_dxy_alignment"] = float(-dxy_dir if direction == "long" else dxy_dir)
+            # Alineamiento macro según tipo de activo.
+            # Bug fix: la clave correcta es "macro_dxy_ret_trend30", no "dxy_ret_trend30".
+            from config.settings import ASSETS as _assets
+            is_safe_haven = _assets.get(symbol or "", {}).get("safe_haven", False)
+
+            if is_safe_haven:
+                # Gold, Silver: correlación NEGATIVA con DXY.
+                # DXY cayendo + LONG = alineado → +1; DXY subiendo + LONG = contrario → -1
+                if "macro_dxy_ret_trend30" in features:
+                    dxy_dir = np.sign(features["macro_dxy_ret_trend30"])
+                    features["macro_dxy_alignment"] = float(-dxy_dir if direction == "long" else dxy_dir)
+                # Cross-asset: Gold ETF (GLD) como proxy de metales preciosos.
+                # Para Silver: gold subiendo + LONG Silver = metales en tendencia → +1
+                if "macro_gold_etf_ret_trend30" in features:
+                    gold_dir = np.sign(features["macro_gold_etf_ret_trend30"])
+                    features["macro_gold_alignment"] = float(gold_dir if direction == "long" else -gold_dir)
+            else:
+                # Crypto, SP500: correlación POSITIVA con SP500 (risk-on / risk-off).
+                # SP500 subiendo + LONG crypto/equity = alineado → +1
+                if "macro_sp500_ret_trend30" in features:
+                    sp500_dir = np.sign(features["macro_sp500_ret_trend30"])
+                    features["macro_sp500_alignment"] = float(sp500_dir if direction == "long" else -sp500_dir)
 
     return features
 
@@ -265,6 +281,7 @@ def build_training_dataset(
     forward_bars: int = 12,
     macro_df:  pd.DataFrame = None,
     funding_series: pd.Series = None,
+    symbol: str = None,
 ) -> pd.DataFrame:
     """
     Construye el dataset completo de entrenamiento.
@@ -308,6 +325,7 @@ def build_training_dataset(
             setup["raw_score"],
             macro_df,
             funding_series,
+            symbol=symbol,
         )
         if not feat_row:
             continue

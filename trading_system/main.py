@@ -105,10 +105,11 @@ def _load_data(symbol: str):
         data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
         df_4h    = data.get("4h")
         df_daily = data.get("1d")
-        # Crypto también recibe macro: BTC↔SP500 y BTC↔DXY tienen correlación
-        # significativa en horizontes de días-semanas. Las features de tendencia
-        # 30d (no los retornos diarios) son las que aportan señal real.
-        macro_df = fetch_macro(days=crypto_days)
+        # Macro para crypto: solo si el activo lo tiene habilitado.
+        # BTC deshabilitado (use_macro=False): la macro añade ruido en 4H y bajó
+        # la precisión de 0.193 a 0.128. ETH mantiene macro (mejoró 0.269→0.306).
+        use_macro = cfg.get("use_macro", True)
+        macro_df = fetch_macro(days=crypto_days) if use_macro else None
 
     if df_4h is None or df_4h.empty:
         logger.error(f"No se pudieron obtener datos 4H para {symbol}")
@@ -249,6 +250,7 @@ def cmd_train(symbol: str):
         forward_bars   = forward_bars,
         macro_df       = macro_df,
         funding_series = funding_series,
+        symbol         = symbol,
     )
 
     if dataset.empty:
@@ -326,6 +328,7 @@ def cmd_auto_retrain(symbol: str, notify: bool = False) -> bool:
             df_setups=df_setups, df_ohlcv=df_4h,
             forward_bars=forward_bars, macro_df=macro_df,
             funding_series=funding_series,
+            symbol=symbol,
         )
         if dataset.empty or len(dataset) < ML_PARAMS.get("min_train_samples", 50):
             logger.warning(f"[{symbol}] Dataset insuficiente para reentrenar.")

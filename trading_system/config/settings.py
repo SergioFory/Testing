@@ -82,7 +82,10 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 1825,
         "forward_bars": 24,
-        "ml_threshold": 0.55,   # era 0.45
+        "ml_threshold": 0.55,
+        # ML precision 31% < break-even 33% para R:R 2.0 → modelo filtra al revés.
+        # Sin ML: tasa base 39% × 2.0 - 61% = +0.17R (positivo).
+        "use_ml":       False,
     },
     "XAUUSD": {
         "label":        "GOLD",
@@ -115,9 +118,10 @@ ASSETS = {
         "ml_threshold": 0.55,
         "train_window_days": 0,
         "safe_haven":   True,           # plata como metal refugio: mismo alineamiento que Gold
-        # Silver es muy volátil intradía: TP a 1.5×ATR (más cercano que oro a 2×ATR).
-        # Un win rate del 50% con R:R 1.0 da expectativa positiva si el ML filtra.
-        "atr_target_mult": 1.5,         # R:R 1.0
+        # R:R 1.5 (era 1.0): con TP=1.5×ATR el break-even era 50% y la tasa base
+        # 47% no lo alcanzaba (EV -0.06R). Con TP=2.25×ATR el break-even baja a 40%;
+        # aunque el win rate cae ~4pp (~43%), el EV sube a ~+0.05R.
+        "atr_target_mult": 2.25,        # R:R 1.5
         "atr_stop_mult":   1.5,
         # AUC 0.489 consistente (anti-predictivo): ML destruye EV positivo a tasa base.
         "use_ml":          False,

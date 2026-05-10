@@ -65,10 +65,11 @@ ASSETS = {
         # Break-even precision: 40% (era 33%, alcanzable con la mejora de win rate).
         "atr_target_mult": 2.25,
         "atr_stop_mult":   1.5,
-        # Ventana extendida (era 730d default): con 154 muestras el modelo no
-        # generaliza. 1095d ≈ 3 años, debería rondar 230-250 muestras incluyendo
-        # el bear market 2022 y el rally 2024-25 — más diversidad de regímenes.
-        "train_window_days": 1095,
+        # Ventana acotada al régimen bull actual (Nov 2024 - presente).
+        # Con 1095d el AUC era 0.474 (anti-predictivo): el modelo aprendía
+        # patrones del bear 2022 que no transfieren. 548d ≈ 18 meses cubre
+        # solo el bull post-Trump, régimen homogéneo. Esperamos ~110 muestras.
+        "train_window_days": 548,
     },
     "ETHUSDT": {
         "label":        "ETH",

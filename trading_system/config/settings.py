@@ -79,6 +79,12 @@ ASSETS = {
         "days_history": 1825,
         "forward_bars": 24,
         "ml_threshold": 0.55,   # era 0.45
+        # Mismo tratamiento que BTC: a -0.073R de break-even con R:R 2.0.
+        # TP a 2.25×ATR debería subir win rate ~39%→47-50%; ventana 1095d
+        # añade ~70 muestras (148→~220) con bear 2022 + rally 2024-25.
+        "atr_target_mult": 2.25,
+        "atr_stop_mult":   1.5,
+        "train_window_days": 1095,
     },
     "XAUUSD": {
         "label":        "GOLD",

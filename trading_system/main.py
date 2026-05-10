@@ -142,9 +142,14 @@ def cmd_signal(symbol: str, notify: bool = False):
     df_scored = score_setups(df_setups, df_4h, symbol, macro_df)
 
     # Mejor setup actual
-    best = get_best_setup(df_scored, n_last_bars=6)
+    # Para activos diarios (Gold, Silver, SP500) buscamos en un radio de 3 daily bars (72h).
+    # Para crypto 4H buscamos en 6 × 4H bars = 24h.
+    source = ASSETS.get(symbol, {}).get("source", "binance")
+    n_bars = 18 if source != "binance" else 6  # 72h para diarios, 24h para 4H
+    best = get_best_setup(df_scored, n_last_bars=n_bars)
     if best is None:
-        logger.info(f"[{symbol}] Sin setup de alta confianza en las últimas 6 barras (24h).")
+        window_desc = "3 días" if source != "binance" else "6 barras 4H (24h)"
+        logger.info(f"[{symbol}] Sin setup de alta confianza en los últimos {window_desc}.")
         return
 
     ml_score = float(best.get("ml_score", best.get("raw_score", 0)))

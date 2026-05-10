@@ -105,7 +105,10 @@ def _load_data(symbol: str):
         data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
         df_4h    = data.get("4h")
         df_daily = data.get("1d")
-        macro_df = None
+        # Crypto también recibe macro: BTC↔SP500 y BTC↔DXY tienen correlación
+        # significativa en horizontes de días-semanas. Las features de tendencia
+        # 30d (no los retornos diarios) son las que aportan señal real.
+        macro_df = fetch_macro(days=crypto_days)
 
     if df_4h is None or df_4h.empty:
         logger.error(f"No se pudieron obtener datos 4H para {symbol}")

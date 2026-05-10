@@ -98,8 +98,9 @@ ASSETS = {
         "forward_bars": 20,
         "ml_threshold": 0.55,
         "train_window_days": 0,
-        # Silver es más volátil que el oro pero mismo principio de tendencia lenta.
-        "atr_target_mult": 2.0,         # R:R 1.33
+        # Silver es muy volátil intradía: TP a 1.5×ATR (más cercano que oro a 2×ATR).
+        # Un win rate del 50% con R:R 1.0 da expectativa positiva si el ML filtra.
+        "atr_target_mult": 1.5,         # R:R 1.0
         "atr_stop_mult":   1.5,
     },
     "SPX500": {

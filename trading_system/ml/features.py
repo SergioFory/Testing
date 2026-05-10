@@ -260,15 +260,17 @@ def build_setup_feature_row(
                 if "macro_dxy_ret_trend30" in features:
                     dxy_dir = np.sign(features["macro_dxy_ret_trend30"])
                     features["macro_dxy_alignment"] = float(-dxy_dir if direction == "long" else dxy_dir)
-                # Cross-asset: Gold ETF (GLD) como proxy de metales preciosos.
-                # Para Silver: gold subiendo + LONG Silver = metales en tendencia → +1
-                if "macro_gold_etf_ret_trend30" in features:
+                # Cross-asset Gold ETF: solo para Gold (XAUUSD).
+                # Para Silver es casi circular (correlación silver↔gold ~0.85) y bajó
+                # la precisión 0.042 al desplazar features útiles del top-20.
+                if symbol and symbol.upper() == "XAUUSD" and "macro_gold_etf_ret_trend30" in features:
                     gold_dir = np.sign(features["macro_gold_etf_ret_trend30"])
                     features["macro_gold_alignment"] = float(gold_dir if direction == "long" else -gold_dir)
             else:
-                # Crypto, SP500: correlación POSITIVA con SP500 (risk-on / risk-off).
-                # SP500 subiendo + LONG crypto/equity = alineado → +1
-                if "macro_sp500_ret_trend30" in features:
+                # Crypto, equity: correlación POSITIVA con SP500 (risk-on / risk-off).
+                # Excluir SPX500 (mismo activo): el alineamiento sería circular y bajó
+                # AUC 0.014 al desplazar una feature útil del top-20.
+                if symbol and symbol.upper() != "SPX500" and "macro_sp500_ret_trend30" in features:
                     sp500_dir = np.sign(features["macro_sp500_ret_trend30"])
                     features["macro_sp500_alignment"] = float(sp500_dir if direction == "long" else -sp500_dir)
 

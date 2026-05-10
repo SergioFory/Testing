@@ -70,6 +70,9 @@ ASSETS = {
         # patrones del bear 2022 que no transfieren. 548d ≈ 18 meses cubre
         # solo el bull post-Trump, régimen homogéneo. Esperamos ~110 muestras.
         "train_window_days": 548,
+        # AUC 0.499 con 548d: esencialmente aleatorio. Sin ML, la tasa base
+        # da EV = +0.15R (win rate 46% × R:R 1.5 - 54%). Se usa raw_score.
+        "use_ml":          False,
     },
     "ETHUSDT": {
         "label":        "ETH",
@@ -116,6 +119,8 @@ ASSETS = {
         # Un win rate del 50% con R:R 1.0 da expectativa positiva si el ML filtra.
         "atr_target_mult": 1.5,         # R:R 1.0
         "atr_stop_mult":   1.5,
+        # AUC 0.489 consistente (anti-predictivo): ML destruye EV positivo a tasa base.
+        "use_ml":          False,
     },
     "SPX500": {
         "label":        "SP500",

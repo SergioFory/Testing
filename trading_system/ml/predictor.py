@@ -34,14 +34,33 @@ def score_setups(
         return df_setups
 
     from config.settings import ASSETS
+    asset_cfg = ASSETS.get(symbol, {})
+
+    # Bypass ML si el activo tiene use_ml=False (AUC demasiado bajo para añadir valor)
+    if not asset_cfg.get("use_ml", True):
+        effective_threshold = threshold if threshold is not None else \
+            asset_cfg.get("ml_threshold", ML_PARAMS["prob_threshold"])
+        logger.info(f"ML deshabilitado para {symbol}. Usando raw_score (umbral {effective_threshold:.2f})")
+        df_setups = df_setups.copy()
+        df_setups["ml_score"]    = df_setups["raw_score"]
+        df_setups["ml_approved"] = df_setups["ml_score"] >= effective_threshold
+        n_approved = df_setups["ml_approved"].sum()
+        scores = df_setups["ml_score"]
+        logger.info(
+            f"raw_score {symbol}: {len(df_setups)} setups → "
+            f"{n_approved} aprobados | "
+            f"scores min={scores.min():.3f} med={scores.median():.3f} max={scores.max():.3f}"
+        )
+        return df_setups
+
     model, feature_cols, medians, adaptive_threshold = load_model(symbol)
 
     effective_threshold = threshold if threshold is not None else \
         adaptive_threshold if adaptive_threshold is not None else \
-        ASSETS.get(symbol, {}).get("ml_threshold", ML_PARAMS["prob_threshold"])
+        asset_cfg.get("ml_threshold", ML_PARAMS["prob_threshold"])
 
     if model is None:
-        logger.warning(f"No hay modelo para {symbol}. Usando raw_score como proxy.")
+        logger.warning(f"No hay modelo entrenado para {symbol}. Usando raw_score como proxy.")
         df_setups = df_setups.copy()
         df_setups["ml_score"]    = df_setups["raw_score"]
         df_setups["ml_approved"] = df_setups["ml_score"] >= effective_threshold

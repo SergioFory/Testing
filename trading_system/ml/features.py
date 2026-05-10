@@ -226,11 +226,35 @@ def build_setup_feature_row(
         setup_date = setup_ts.date()
         macro_dates = [d.date() for d in macro_df.index]
         macro_map = dict(zip(macro_dates, range(len(macro_dates))))
+
+        # Feature instántanea del día del setup
         if setup_date in macro_map:
             idx_m = macro_map[setup_date]
             for col in macro_df.columns:
                 val = macro_df.iloc[idx_m][col]
                 features[f"macro_{col}"] = float(val) if pd.notna(val) else np.nan
+
+        # Features de TENDENCIA macro 30d: mucho más informativas que el valor diario.
+        # Para Gold: dxy_trend negativo (DXY cayendo) → gold sube → señal LONG favorable.
+        # Para SP500: sp500_trend positivo (mercado alcista) → pullbacks más fiables.
+        past_mask = [d <= setup_date for d in macro_dates]
+        past_macro = macro_df[past_mask].tail(30) if any(past_mask) else pd.DataFrame()
+        if not past_macro.empty and len(past_macro) >= 10:
+            for col in past_macro.columns:
+                series = past_macro[col].dropna()
+                if len(series) >= 5:
+                    features[f"macro_{col}_trend30"] = float(series.mean())
+                    # Momentum: compara última semana vs tendencia del mes
+                    week_mean = float(series.tail(5).mean())
+                    features[f"macro_{col}_accel"] = week_mean - features[f"macro_{col}_trend30"]
+
+            # Feature de dirección del DXY relativa a la dirección del setup.
+            # Si operamos LONG en Gold y DXY está cayendo → señal alineada → +1
+            # Si operamos LONG en Gold y DXY está subiendo → señal contraria → -1
+            if "dxy_ret_trend30" in features:
+                dxy_dir = np.sign(features["dxy_ret_trend30"])
+                # Para activos de refugio (Gold, Silver): dirección contraria al DXY
+                features["macro_dxy_alignment"] = float(-dxy_dir if direction == "long" else dxy_dir)
 
     return features
 

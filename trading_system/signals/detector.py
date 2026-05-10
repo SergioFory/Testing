@@ -116,9 +116,11 @@ def detect_all_setups(
     df_setups = df_setups.sort_values("ts").reset_index(drop=True)
 
     # --- Stop Loss y Take Profit basados en ATR ---
-    from config.settings import RISK
-    atr_stop   = RISK["atr_stop_mult"]
-    atr_target = RISK["atr_target_mult"]
+    # Permite override por activo (e.g. Gold usa R:R 1.33 en vez de 2.0 genérico).
+    from config.settings import RISK, ASSETS
+    asset_cfg  = ASSETS.get(symbol.upper(), {})
+    atr_stop   = asset_cfg.get("atr_stop_mult",   RISK["atr_stop_mult"])
+    atr_target = asset_cfg.get("atr_target_mult",  RISK["atr_target_mult"])
 
     df_setups["stop_loss"] = np.where(
         df_setups["direction"] == "long",

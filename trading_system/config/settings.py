@@ -78,9 +78,13 @@ ASSETS = {
         "min_range_pct": 0.008,
         "pip_value":    1.0,
         "days_history": 7300,           # ~20 años; GC=F tiene datos desde 2000
-        "forward_bars": 20,             # era 12 — más tiempo para resolver TP en daily
+        "forward_bars": 20,
         "ml_threshold": 0.58,
-        "train_window_days": 0,         # 0 = usar todo el histórico (los últimos 730d tienen <80 setups)
+        "train_window_days": 0,         # usar todo el histórico disponible
+        # TP a 2×ATR en lugar de 3×ATR: el oro se mueve en tendencias lentas.
+        # Con 2×ATR el win rate histórico sube ~10pp, mejorando el dataset de entrenamiento.
+        "atr_target_mult": 2.0,         # R:R resultante: 1.33
+        "atr_stop_mult":   1.5,
     },
     "XAGUSD": {
         "label":        "SILVER",
@@ -91,9 +95,12 @@ ASSETS = {
         "min_range_pct": 0.012,
         "pip_value":    1.0,
         "days_history": 7300,
-        "forward_bars": 20,             # era 12
+        "forward_bars": 20,
         "ml_threshold": 0.55,
-        "train_window_days": 0,         # usar todo el histórico
+        "train_window_days": 0,
+        # Silver es más volátil que el oro pero mismo principio de tendencia lenta.
+        "atr_target_mult": 2.0,         # R:R 1.33
+        "atr_stop_mult":   1.5,
     },
     "SPX500": {
         "label":        "SP500",
@@ -104,9 +111,13 @@ ASSETS = {
         "min_range_pct": 0.005,
         "pip_value":    1.0,
         "days_history": 7300,
-        "forward_bars": 20,             # era 12
+        "forward_bars": 20,
         "ml_threshold": 0.55,
-        "train_window_days": 0,         # usar todo el histórico
+        "train_window_days": 0,
+        # SP500: índice con sesgo alcista histórico, tendencias más suaves.
+        # TP a 2.5×ATR: más ambicioso que metales pero realista para el índice.
+        "atr_target_mult": 2.5,         # R:R 1.67
+        "atr_stop_mult":   1.5,
     },
 }
 

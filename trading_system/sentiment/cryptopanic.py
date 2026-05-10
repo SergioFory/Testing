@@ -20,7 +20,8 @@ def get_sentiment_summary(symbol: str) -> dict:
     Retorna el resumen de sentimiento para un símbolo.
 
     Para BTC y ETH usa el Fear & Greed Index (contrarian).
-    Para GOLD retorna neutral (el F&G Index es específico de crypto).
+    Para activos no-crypto (GOLD, SILVER, SP500) retorna neutral
+    (el F&G Index es específico de crypto).
 
     Estructura del dict devuelto:
       score             float  [-1, +1] — contrarian score
@@ -34,7 +35,9 @@ def get_sentiment_summary(symbol: str) -> dict:
     """
     sym_upper = symbol.upper().replace("USDT", "").replace("USD", "")
 
-    if sym_upper in ("GOLD", "XAU", "GC"):
+    non_crypto = ("GOLD", "XAU", "GC", "SILVER", "XAG", "SI",
+                  "SP500", "SPX", "SPX500", "GSPC", "SPY")
+    if sym_upper in non_crypto:
         return {
             "score": 0.0, "label": "NEUTRAL", "color": "gray",
             "fg_value": 0, "fg_classification": "N/A",

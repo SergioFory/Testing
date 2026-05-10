@@ -73,11 +73,37 @@ ASSETS = {
         "label":        "GOLD",
         "source":       "yfinance",
         "yf_ticker":    "GC=F",
+        "yf_fallback":  ("GLD", 10.0),  # GLD cotiza ~1/10 del oro → x10
+        "yf_min_price": 500,
         "min_range_pct": 0.008,
         "pip_value":    1.0,
         "days_history": 7300,   # era 2500 (~7 años) → ahora ~20 años; GC=F tiene datos desde 2000
         "forward_bars": 12,
         "ml_threshold": 0.58,   # era 0.52 — Gold tiene modelo más débil
+    },
+    "XAGUSD": {
+        "label":        "SILVER",
+        "source":       "yfinance",
+        "yf_ticker":    "SI=F",         # Silver Futures CME
+        "yf_fallback":  ("SLV", 1.0),   # iShares Silver ETF (precio similar, sin multiplicador)
+        "yf_min_price": 10,
+        "min_range_pct": 0.012,         # más volátil que oro
+        "pip_value":    1.0,
+        "days_history": 7300,
+        "forward_bars": 12,
+        "ml_threshold": 0.55,
+    },
+    "SPX500": {
+        "label":        "SP500",
+        "source":       "yfinance",
+        "yf_ticker":    "^GSPC",        # S&P 500 Index
+        "yf_fallback":  ("SPY", 10.0),  # SPY ≈ S&P 500 / 10
+        "yf_min_price": 1000,
+        "min_range_pct": 0.005,         # índice menos volátil
+        "pip_value":    1.0,
+        "days_history": 7300,
+        "forward_bars": 12,
+        "ml_threshold": 0.55,
     },
 }
 
@@ -152,6 +178,40 @@ ASSET_PARAMS_OVERRIDE = {
             "rsi_extreme_low":  35, # RSI < 35 en diario (menos extremo que 30)
             "rsi_extreme_high": 65, # RSI > 65 en diario
             "volume_confirm":   False,  # No requerir spike de volumen en GC=F
+        },
+    },
+    # Plata: comportamiento técnico similar al oro pero más volátil
+    "XAGUSD": {
+        "BREAKOUT": {
+            "vol_factor":   1.10,
+            "atr_min_move": 0.7,
+        },
+        "PULLBACK": {
+            "min_trend_bars": 5,
+            "rsi_oversold":   50,
+            "rsi_overbought": 50,
+        },
+        "REVERSAL": {
+            "rsi_extreme_low":  35,
+            "rsi_extreme_high": 65,
+            "volume_confirm":   False,
+        },
+    },
+    # S&P 500: índice más estable, ATRs relativos pequeños
+    "SPX500": {
+        "BREAKOUT": {
+            "vol_factor":   1.05,
+            "atr_min_move": 0.5,
+        },
+        "PULLBACK": {
+            "min_trend_bars": 5,
+            "rsi_oversold":   50,
+            "rsi_overbought": 50,
+        },
+        "REVERSAL": {
+            "rsi_extreme_low":  35,
+            "rsi_extreme_high": 65,
+            "volume_confirm":   False,
         },
     },
 }

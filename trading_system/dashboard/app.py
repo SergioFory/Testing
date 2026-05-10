@@ -19,7 +19,7 @@ from config.settings import ASSETS, RISK, ML_PARAMS, SENTIMENT as SENT_CFG, DAYS
 from data.database        import init_db, load_signals
 from data.outcome_tracker import save_signal_from_trade, resolve_open_signals, get_outcome_stats
 from notifications.telegram import send_signal_alert, test_connection as tg_test
-from data.fetchers   import fetch_ohlcv, fetch_multi_timeframe, fetch_gold, fetch_macro, fetch_funding_rates
+from data.fetchers   import fetch_ohlcv, fetch_multi_timeframe, fetch_gold, fetch_yfinance_asset, fetch_macro, fetch_funding_rates
 from signals.detector import detect_all_setups, get_current_setup
 from ml.features      import build_training_dataset, compute_base_features
 from ml.trainer       import train_model, load_model, get_model_importance
@@ -145,7 +145,7 @@ with tab_signal:
         _lookback  = 72 if asset_cfg["source"] != "binance" else 12
 
         with st.spinner("Descargando datos..."):
-            gold_days = asset_cfg.get("days_history", 730)
+            yf_days = asset_cfg.get("days_history", 730)
             if asset_cfg["source"] == "binance":
                 crypto_days = asset_cfg.get("days_history", DAYS_HISTORY)
                 data = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
@@ -153,11 +153,11 @@ with tab_signal:
                 df_daily = data.get("1d",  pd.DataFrame())
                 funding  = fetch_funding_rates(symbol, days=90)
             else:
-                df_daily = fetch_gold(timeframe="1d", days=gold_days)
+                df_daily = fetch_yfinance_asset(symbol, days=yf_days)
                 _df4h    = df_daily.copy() if not df_daily.empty else pd.DataFrame()
                 funding  = pd.Series(dtype=float)
 
-            macro_df = fetch_macro(days=min(gold_days, 730))
+            macro_df = fetch_macro(days=min(yf_days, 730))
 
         if _df4h.empty:
             st.error("No se pudieron obtener datos. Revisa tu conexión o las credenciales.")
@@ -467,8 +467,8 @@ with tab_backtest:
                     df_4h_bt  = bt_data.get("4h", pd.DataFrame())
                     df_1d_bt  = bt_data.get("1d", pd.DataFrame())
                 else:
-                    df_4h_bt  = fetch_gold("4h", backtest_days + 30)
-                    df_1d_bt  = fetch_gold("1d", backtest_days + 30)
+                    df_1d_bt  = fetch_yfinance_asset(symbol, days=backtest_days + 30)
+                    df_4h_bt  = df_1d_bt.copy() if not df_1d_bt.empty else pd.DataFrame()
 
                 bt_macro = fetch_macro(days=backtest_days + 30)
 

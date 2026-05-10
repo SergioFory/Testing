@@ -80,25 +80,26 @@ def _should_retrain(symbol: str) -> bool:
 def _load_data(symbol: str):
     """Descarga o carga datos OHLCV para el símbolo dado."""
     from data.fetchers.binance_fetcher import fetch_multi_timeframe
-    from data.fetchers.gold_fetcher    import fetch_gold, fetch_macro
+    from data.fetchers.gold_fetcher    import fetch_yfinance_asset, fetch_macro
     from data.database                 import init_db, save_ohlcv, load_ohlcv
 
     init_db()
 
-    is_gold = symbol.upper() in ("XAUUSD", "GC=F", "GOLD")
+    cfg    = ASSETS.get(symbol, {})
+    source = cfg.get("source", "binance")
 
     logger.info(f"Cargando datos para {symbol}...")
 
-    if is_gold:
-        # Gold: datos diarios para ambos timeframes.
-        # Usamos 2500 días (~6.8 años) para tener suficientes setups
-        # para entrenamiento ML (GC=F tiene historia desde los años 80).
-        gold_days = ASSETS.get(symbol, {}).get("days_history", 2500)
-        df_daily  = fetch_gold(timeframe="1d", days=gold_days)
-        df_4h     = df_daily.copy() if not df_daily.empty else None
-        macro_df  = fetch_macro(days=min(gold_days, 730))
+    if source == "yfinance":
+        # Activos no-crypto (Gold, Silver, S&P 500): datos diarios para ambos timeframes.
+        # yfinance no tiene 4H confiable; en daily los setups técnicos funcionan mejor
+        # para commodities e índices.
+        yf_days  = cfg.get("days_history", 2500)
+        df_daily = fetch_yfinance_asset(symbol, days=yf_days)
+        df_4h    = df_daily.copy() if not df_daily.empty else None
+        macro_df = fetch_macro(days=min(yf_days, 730))
     else:
-        crypto_days = ASSETS.get(symbol, {}).get("days_history", DAYS_HISTORY)
+        crypto_days = cfg.get("days_history", DAYS_HISTORY)
         data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
         df_4h    = data.get("4h")
         df_daily = data.get("1d")

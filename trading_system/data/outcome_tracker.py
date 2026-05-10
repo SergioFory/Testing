@@ -140,13 +140,13 @@ def _check_outcome(
 
     asset_cfg = ASSETS.get(symbol, {})
     forward_bars = asset_cfg.get("forward_bars", 24)
-    is_gold = asset_cfg.get("source") == "yfinance"
+    source = asset_cfg.get("source", "binance")
 
     # Cargar barras desde la señal hasta ahora
     try:
-        if is_gold:
-            from data.fetchers.gold_fetcher import fetch_gold
-            df = fetch_gold(timeframe="1d", days=60)
+        if source == "yfinance":
+            from data.fetchers.gold_fetcher import fetch_yfinance_asset
+            df = fetch_yfinance_asset(symbol, days=60)
         else:
             from data.fetchers.binance_fetcher import fetch_ohlcv
             df = fetch_ohlcv(symbol, timeframe="4h", days=30)

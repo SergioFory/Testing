@@ -77,33 +77,36 @@ ASSETS = {
         "yf_min_price": 500,
         "min_range_pct": 0.008,
         "pip_value":    1.0,
-        "days_history": 7300,   # era 2500 (~7 años) → ahora ~20 años; GC=F tiene datos desde 2000
-        "forward_bars": 12,
-        "ml_threshold": 0.58,   # era 0.52 — Gold tiene modelo más débil
+        "days_history": 7300,           # ~20 años; GC=F tiene datos desde 2000
+        "forward_bars": 20,             # era 12 — más tiempo para resolver TP en daily
+        "ml_threshold": 0.58,
+        "train_window_days": 0,         # 0 = usar todo el histórico (los últimos 730d tienen <80 setups)
     },
     "XAGUSD": {
         "label":        "SILVER",
         "source":       "yfinance",
-        "yf_ticker":    "SI=F",         # Silver Futures CME
-        "yf_fallback":  ("SLV", 1.0),   # iShares Silver ETF (precio similar, sin multiplicador)
+        "yf_ticker":    "SI=F",
+        "yf_fallback":  ("SLV", 1.0),
         "yf_min_price": 10,
-        "min_range_pct": 0.012,         # más volátil que oro
+        "min_range_pct": 0.012,
         "pip_value":    1.0,
         "days_history": 7300,
-        "forward_bars": 12,
+        "forward_bars": 20,             # era 12
         "ml_threshold": 0.55,
+        "train_window_days": 0,         # usar todo el histórico
     },
     "SPX500": {
         "label":        "SP500",
         "source":       "yfinance",
-        "yf_ticker":    "^GSPC",        # S&P 500 Index
-        "yf_fallback":  ("SPY", 10.0),  # SPY ≈ S&P 500 / 10
+        "yf_ticker":    "^GSPC",
+        "yf_fallback":  ("SPY", 10.0),
         "yf_min_price": 1000,
-        "min_range_pct": 0.005,         # índice menos volátil
+        "min_range_pct": 0.005,
         "pip_value":    1.0,
         "days_history": 7300,
-        "forward_bars": 12,
+        "forward_bars": 20,             # era 12
         "ml_threshold": 0.55,
+        "train_window_days": 0,         # usar todo el histórico
     },
 }
 

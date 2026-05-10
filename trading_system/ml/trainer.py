@@ -71,8 +71,12 @@ def train_model(
         )
         return None, [], {}
 
-    # Filtrar a ventana de entrenamiento reciente (evita regímenes de mercado obsoletos)
-    train_window = p.get("train_window_days", 0)
+    # Filtrar a ventana de entrenamiento reciente (evita regímenes de mercado obsoletos).
+    # Permite override por activo: ASSETS[symbol]["train_window_days"] tiene prioridad
+    # sobre ML_PARAMS["train_window_days"]. 0 = sin filtro (usar todo el histórico).
+    from config.settings import ASSETS
+    asset_window = ASSETS.get(symbol, {}).get("train_window_days")
+    train_window = asset_window if asset_window is not None else p.get("train_window_days", 0)
     if train_window and isinstance(df_train.index, pd.DatetimeIndex):
         cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=train_window)
         if df_train.index.tz is None:

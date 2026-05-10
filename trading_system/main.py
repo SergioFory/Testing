@@ -97,7 +97,9 @@ def _load_data(symbol: str):
         yf_days  = cfg.get("days_history", 2500)
         df_daily = fetch_yfinance_asset(symbol, days=yf_days)
         df_4h    = df_daily.copy() if not df_daily.empty else None
-        macro_df = fetch_macro(days=min(yf_days, 730))
+        # Macro completo: cubre el mismo histórico que los precios para evitar
+        # que las features macro queden 89-91% NaN y se descarten en el entrenamiento.
+        macro_df = fetch_macro(days=yf_days)
     else:
         crypto_days = cfg.get("days_history", DAYS_HISTORY)
         data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)

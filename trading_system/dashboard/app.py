@@ -157,7 +157,7 @@ with tab_signal:
                 _df4h    = df_daily.copy() if not df_daily.empty else pd.DataFrame()
                 funding  = pd.Series(dtype=float)
 
-            macro_df = fetch_macro(days=min(yf_days, 730))
+            macro_df = fetch_macro(days=yf_days if asset_cfg["source"] != "binance" else min(yf_days, 730))
 
         if _df4h.empty:
             st.error("No se pudieron obtener datos. Revisa tu conexión o las credenciales.")

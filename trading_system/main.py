@@ -166,6 +166,18 @@ def cmd_signal(symbol: str, notify: bool = False):
         logger.info(f"[{symbol}] Setup detectado pero no pasa validaciones de riesgo.")
         return
 
+    # Evitar re-emitir la misma señal en cada ciclo. Un setup persistente se
+    # vuelve a detectar con el mismo entry_price; si ya existe una señal
+    # equivalente (pendiente o reciente) se omite por completo: no se imprime,
+    # no se guarda y no se notifica.
+    from data.outcome_tracker import is_duplicate_signal, save_signal_from_trade
+    if is_duplicate_signal(trade.symbol, trade.direction, trade.entry_price):
+        logger.info(
+            f"[{symbol}] Señal {trade.direction.upper()} @ {trade.entry_price:.2f} "
+            "ya registrada — se omite para evitar duplicados."
+        )
+        return
+
     # Sentimiento
     base_sym = symbol.replace("USDT", "")
     sentiment = get_sentiment_summary(base_sym)
@@ -173,10 +185,10 @@ def cmd_signal(symbol: str, notify: bool = False):
     _print_signal(trade, sentiment)
 
     # Persistir señal en la base de datos
-    from data.outcome_tracker import save_signal_from_trade
-    save_signal_from_trade(trade, sentiment)
+    signal_id = save_signal_from_trade(trade, sentiment)
 
-    if notify:
+    # Solo notificar si es una señal nueva (no un duplicado ya registrado)
+    if notify and signal_id > 0:
         send_signal_alert(trade, sentiment)
 
 

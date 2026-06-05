@@ -15,21 +15,46 @@ from data.database import get_engine, save_signal, load_signals
 from sqlalchemy import text
 
 
-def _is_duplicate_signal(symbol: str, direction: str, entry_price: float,
-                          hours: int = 8) -> bool:
-    """True si ya existe una señal similar (mismo símbolo+dirección) en las últimas N horas."""
-    from datetime import datetime, timezone, timedelta
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+def is_duplicate_signal(symbol: str, direction: str, entry_price: float,
+                        hours: int = 48) -> bool:
+    """True si ya existe una señal equivalente para el mismo setup.
+
+    Se considera duplicado cuando hay una señal con el mismo símbolo,
+    dirección y entry_price que:
+      - sigue pendiente (resultado_real IS NULL), o
+      - se creó dentro de la ventana `hours`.
+
+    Esto evita que un setup persistente (mismo nivel de entrada detectado en
+    cada ciclo) se registre una y otra vez mientras la operación está abierta
+    o recién resuelta.
+
+    Nota: la columna `ts` se almacena como entero Unix (BIGINT). El cutoff se
+    convierte a epoch antes de comparar; compararlo contra un `datetime` de
+    Python lanzaría error en PostgreSQL y rompería la deduplicación (era el
+    bug original que permitía señales repetidas).
+    """
+    from datetime import timedelta
+    cutoff_unix = int((datetime.now(timezone.utc) - timedelta(hours=hours)).timestamp())
+    # Tolerancia relativa: mismo nivel de entrada salvo ruido de redondeo float.
+    tol = max(abs(entry_price) * 1e-4, 1e-6)
     engine = get_engine()
     try:
         with engine.connect() as conn:
             row = conn.execute(text(
                 "SELECT COUNT(*) FROM signals "
-                "WHERE symbol=:sym AND direction=:dir AND ts >= :cutoff"
-            ), {"sym": symbol, "dir": direction, "cutoff": cutoff}).scalar()
+                "WHERE symbol=:sym AND direction=:dir "
+                "AND ABS(entry_price - :entry) <= :tol "
+                "AND (resultado_real IS NULL OR ts >= :cutoff)"
+            ), {"sym": symbol, "dir": direction, "entry": entry_price,
+                "tol": tol, "cutoff": cutoff_unix}).scalar()
             return (row or 0) > 0
-    except Exception:
+    except Exception as exc:
+        logger.warning(f"Dedup check falló ({exc}); no se bloquea la señal.")
         return False
+
+
+# Alias retrocompatible (se mantenía con guion bajo internamente)
+_is_duplicate_signal = is_duplicate_signal
 
 
 def save_signal_from_trade(trade, sentiment: dict = None) -> int:
@@ -37,8 +62,8 @@ def save_signal_from_trade(trade, sentiment: dict = None) -> int:
     Persiste una señal generada (TradeSetup) en la tabla signals.
     Retorna el ID asignado, o -1 si falló o era duplicado.
     """
-    if _is_duplicate_signal(trade.symbol, trade.direction, trade.entry_price):
-        logger.debug(f"Señal duplicada omitida: {trade.symbol} {trade.direction} ya guardada recientemente.")
+    if is_duplicate_signal(trade.symbol, trade.direction, trade.entry_price):
+        logger.debug(f"Señal duplicada omitida: {trade.symbol} {trade.direction} ya registrada.")
         return -1
     try:
         signal_dict = {

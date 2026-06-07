@@ -143,6 +143,62 @@ ASSETS = {
         "atr_target_mult": 2.5,         # R:R 1.67
         "atr_stop_mult":   1.5,
     },
+    # -------------------------------------------------------------------------
+    # FOREX (yfinance, datos diarios). Volumen no disponible en tickers "=X":
+    # los detectores se ajustan en ASSET_PARAMS_OVERRIDE (vol_factor=0,
+    # volume_confirm=False). R:R 1.67 (2.5/1.5) para superar el piso de 1.5
+    # que exige build_trade_setup. dxy_corr define la correlación con el dólar:
+    #   -1 → el par sube cuando el DXY cae (EUR/USD, GBP/USD)
+    #   +1 → el par sube cuando el DXY sube (USD/JPY)
+    # -------------------------------------------------------------------------
+    "EURUSD": {
+        "label":        "EURUSD",
+        "source":       "yfinance",
+        "yf_ticker":    "EURUSD=X",
+        "yf_fallback":  ("FXE", 0.01),  # Invesco Euro ETF ≈ 100× EUR/USD → ×0.01
+        "yf_min_price": 0.5,
+        "min_range_pct": 0.004,
+        "pip_value":    1.0,
+        "days_history": 7300,
+        "forward_bars": 20,
+        "ml_threshold": 0.55,
+        "train_window_days": 0,
+        "dxy_corr":     -1,             # EUR/USD ↑ cuando el dólar ↓
+        "atr_target_mult": 2.5,         # R:R 1.67
+        "atr_stop_mult":   1.5,
+    },
+    "GBPUSD": {
+        "label":        "GBPUSD",
+        "source":       "yfinance",
+        "yf_ticker":    "GBPUSD=X",
+        "yf_fallback":  ("FXB", 0.01),  # Invesco British Pound ETF ≈ 100× GBP/USD
+        "yf_min_price": 0.5,
+        "min_range_pct": 0.004,
+        "pip_value":    1.0,
+        "days_history": 7300,
+        "forward_bars": 20,
+        "ml_threshold": 0.55,
+        "train_window_days": 0,
+        "dxy_corr":     -1,             # GBP/USD ↑ cuando el dólar ↓
+        "atr_target_mult": 2.5,         # R:R 1.67
+        "atr_stop_mult":   1.5,
+    },
+    "USDJPY": {
+        "label":        "USDJPY",
+        "source":       "yfinance",
+        "yf_ticker":    "USDJPY=X",
+        "yf_fallback":  ("JPY=X", 1.0), # mismo par, ticker alterno
+        "yf_min_price": 50,
+        "min_range_pct": 0.004,
+        "pip_value":    1.0,
+        "days_history": 7300,
+        "forward_bars": 20,
+        "ml_threshold": 0.55,
+        "train_window_days": 0,
+        "dxy_corr":     1,              # USD/JPY ↑ cuando el dólar ↑
+        "atr_target_mult": 2.5,         # R:R 1.67
+        "atr_stop_mult":   1.5,
+    },
 }
 
 # =============================================================================
@@ -239,6 +295,58 @@ ASSET_PARAMS_OVERRIDE = {
     "SPX500": {
         "BREAKOUT": {
             "vol_factor":   1.05,
+            "atr_min_move": 0.5,
+        },
+        "PULLBACK": {
+            "min_trend_bars": 5,
+            "rsi_oversold":   50,
+            "rsi_overbought": 50,
+        },
+        "REVERSAL": {
+            "rsi_extreme_low":  35,
+            "rsi_extreme_high": 65,
+            "volume_confirm":   False,
+        },
+    },
+    # Forex: yfinance no entrega volumen para tickers "=X" (llega 0).
+    # vol_factor=0 desactiva la confirmación de volumen en breakout y
+    # volume_confirm=False hace lo propio en reversal. Filtros de precio
+    # (ATR, RSI, tendencia) se mantienen activos.
+    "EURUSD": {
+        "BREAKOUT": {
+            "vol_factor":   0.0,
+            "atr_min_move": 0.5,
+        },
+        "PULLBACK": {
+            "min_trend_bars": 5,
+            "rsi_oversold":   50,
+            "rsi_overbought": 50,
+        },
+        "REVERSAL": {
+            "rsi_extreme_low":  35,
+            "rsi_extreme_high": 65,
+            "volume_confirm":   False,
+        },
+    },
+    "GBPUSD": {
+        "BREAKOUT": {
+            "vol_factor":   0.0,
+            "atr_min_move": 0.5,
+        },
+        "PULLBACK": {
+            "min_trend_bars": 5,
+            "rsi_oversold":   50,
+            "rsi_overbought": 50,
+        },
+        "REVERSAL": {
+            "rsi_extreme_low":  35,
+            "rsi_extreme_high": 65,
+            "volume_confirm":   False,
+        },
+    },
+    "USDJPY": {
+        "BREAKOUT": {
+            "vol_factor":   0.0,
             "atr_min_move": 0.5,
         },
         "PULLBACK": {

@@ -102,7 +102,10 @@ def _download_yfinance_daily(candidatos, start, end, min_price: float = 0) -> pd
                 df.index = pd.to_datetime(df.index)
                 if df.index.tz is None:
                     df.index = df.index.tz_localize("UTC")
-                df = df.dropna()
+                # Forex (tickers =X) no reporta volumen → llega 0/NaN. Se rellena
+                # con 0 para no eliminar todas las barras en el dropna siguiente.
+                df["volume"] = df["volume"].fillna(0)
+                df = df.dropna(subset=["open", "high", "low", "close"])
 
                 if df.empty:
                     break

@@ -106,6 +106,11 @@ def resolve_open_signals() -> int:
     if not rows:
         return 0
 
+    # Caché de OHLCV por símbolo: se descarga una sola vez por ciclo aunque
+    # haya varias señales pendientes del mismo activo (antes se re-descargaba
+    # por cada señal, generando llamadas redundantes a las APIs externas).
+    ohlcv_cache: dict = {}
+
     resolved_count = 0
     for row in rows:
         sig_id, symbol, ts_unix, direction, entry, sl, tp = row
@@ -128,7 +133,12 @@ def resolve_open_signals() -> int:
                 logger.info(f"Señal #{sig_id} {symbol} expirada por antigüedad ({age.days}d > 7d)")
                 continue
 
-            outcome, pnl_pct = _check_outcome(symbol, sig_ts, direction, entry, sl, tp)
+            if symbol not in ohlcv_cache:
+                ohlcv_cache[symbol] = _load_outcome_ohlcv(symbol)
+            outcome, pnl_pct = _check_outcome(
+                symbol, sig_ts, direction, entry, sl, tp,
+                df=ohlcv_cache[symbol],
+            )
 
             if outcome is not None:
                 pnl_usd = round(entry * pnl_pct, 2) if pnl_pct is not None else None
@@ -147,6 +157,25 @@ def resolve_open_signals() -> int:
     return resolved_count
 
 
+def _load_outcome_ohlcv(symbol: str) -> pd.DataFrame:
+    """
+    Descarga el OHLCV reciente usado para resolver señales de un símbolo.
+    Se llama UNA sola vez por símbolo en cada ciclo de resolución (ver caché
+    en resolve_open_signals), evitando descargas repetidas por cada señal.
+    """
+    from config.settings import ASSETS
+
+    source = ASSETS.get(symbol, {}).get("source", "binance")
+    try:
+        if source == "yfinance":
+            from data.fetchers.gold_fetcher import fetch_yfinance_asset
+            return fetch_yfinance_asset(symbol, days=60)
+        from data.fetchers.binance_fetcher import fetch_ohlcv
+        return fetch_ohlcv(symbol, timeframe="4h", days=30)
+    except Exception:
+        return pd.DataFrame()
+
+
 def _check_outcome(
     symbol: str,
     signal_ts: pd.Timestamp,
@@ -154,29 +183,24 @@ def _check_outcome(
     entry: float,
     stop_loss: float,
     take_profit: float,
+    df: pd.DataFrame = None,
 ) -> tuple:
     """
-    Descarga OHLCV desde la señal y revisa si se tocó SL o TP.
+    Revisa si una señal tocó SL o TP usando el OHLCV provisto.
+
+    Args:
+        df: OHLCV ya descargado (reutilizable entre señales del mismo símbolo).
+            Si es None, se descarga aquí (modo retrocompatible).
 
     Returns:
         (outcome, pnl_pct) donde outcome ∈ {"win","loss","expired"} o (None, None)
     """
     from config.settings import ASSETS
 
-    asset_cfg = ASSETS.get(symbol, {})
-    forward_bars = asset_cfg.get("forward_bars", 24)
-    source = asset_cfg.get("source", "binance")
+    forward_bars = ASSETS.get(symbol, {}).get("forward_bars", 24)
 
-    # Cargar barras desde la señal hasta ahora
-    try:
-        if source == "yfinance":
-            from data.fetchers.gold_fetcher import fetch_yfinance_asset
-            df = fetch_yfinance_asset(symbol, days=60)
-        else:
-            from data.fetchers.binance_fetcher import fetch_ohlcv
-            df = fetch_ohlcv(symbol, timeframe="4h", days=30)
-    except Exception:
-        return None, None
+    if df is None:
+        df = _load_outcome_ohlcv(symbol)
 
     if df is None or df.empty:
         return None, None

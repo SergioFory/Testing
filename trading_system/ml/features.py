@@ -252,9 +252,19 @@ def build_setup_feature_row(
             # Alineamiento macro según tipo de activo.
             # Bug fix: la clave correcta es "macro_dxy_ret_trend30", no "dxy_ret_trend30".
             from config.settings import ASSETS as _assets
-            is_safe_haven = _assets.get(symbol or "", {}).get("safe_haven", False)
+            _acfg = _assets.get(symbol or "", {})
+            is_safe_haven = _acfg.get("safe_haven", False)
+            dxy_corr = _acfg.get("dxy_corr")   # -1, +1 o None (forex y similares)
 
-            if is_safe_haven:
+            if dxy_corr is not None:
+                # Correlación explícita con el dólar (DXY). dxy_corr define el
+                # signo: +1 el activo sube con el dólar (USD/JPY); -1 sube cuando
+                # el dólar cae (EUR/USD, GBP/USD). alignment > 0 = viento macro a favor.
+                if "macro_dxy_ret_trend30" in features:
+                    dxy_dir = np.sign(features["macro_dxy_ret_trend30"])
+                    base = dxy_corr * dxy_dir
+                    features["macro_dxy_alignment"] = float(base if direction == "long" else -base)
+            elif is_safe_haven:
                 # Gold, Silver: correlación NEGATIVA con DXY.
                 # DXY cayendo + LONG = alineado → +1; DXY subiendo + LONG = contrario → -1
                 if "macro_dxy_ret_trend30" in features:

@@ -149,6 +149,17 @@ _DDL = [
         created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
+
+    # Registro del último reentrenamiento por activo. Vive en la DB (no en un
+    # JSON en disco) para que un reinicio del Worker —p. ej. por OOM en Render—
+    # no borre las fechas y dispare el reentrenamiento simultáneo de todos los
+    # activos a la vez (lo que reproduciría el OOM en un bucle).
+    """
+    CREATE TABLE IF NOT EXISTS retrain_log (
+        symbol      TEXT PRIMARY KEY,
+        last_train  TEXT NOT NULL
+    )
+    """,
 ]
 
 # SQLite doesn't support SERIAL — patch DDL when needed
@@ -330,3 +341,42 @@ def save_backtest_result(result: dict) -> None:
     }
     with get_engine().begin() as conn:
         conn.execute(sql, params)
+
+
+# ---------------------------------------------------------------------------
+# Retrain log (persistente en DB — sobrevive a reinicios del Worker)
+# ---------------------------------------------------------------------------
+
+def get_last_train(symbol: str) -> str | None:
+    """Devuelve el ISO timestamp del último reentrenamiento, o None si nunca."""
+    try:
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                text("SELECT last_train FROM retrain_log WHERE symbol = :sym"),
+                {"sym": symbol},
+            ).scalar()
+            return row
+    except Exception as exc:
+        logger.warning(f"get_last_train falló para {symbol}: {exc}")
+        return None
+
+
+def set_last_train(symbol: str, iso_ts: str) -> None:
+    """Registra (upsert) la fecha del último reentrenamiento del símbolo."""
+    engine  = get_engine()
+    dialect = engine.dialect.name
+    if dialect == "sqlite":
+        sql = text(
+            "INSERT INTO retrain_log (symbol, last_train) VALUES (:sym, :ts) "
+            "ON CONFLICT(symbol) DO UPDATE SET last_train = excluded.last_train"
+        )
+    else:
+        sql = text(
+            "INSERT INTO retrain_log (symbol, last_train) VALUES (:sym, :ts) "
+            "ON CONFLICT (symbol) DO UPDATE SET last_train = EXCLUDED.last_train"
+        )
+    try:
+        with engine.begin() as conn:
+            conn.execute(sql, {"sym": symbol, "ts": iso_ts})
+    except Exception as exc:
+        logger.warning(f"set_last_train falló para {symbol}: {exc}")

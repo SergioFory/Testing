@@ -40,28 +40,33 @@ from config.settings import ASSETS, BACKTEST, RISK, ML_PARAMS, DAYS_HISTORY
 import json
 from datetime import datetime, timedelta, timezone
 
+# Log heredado en disco. Se mantiene solo como fallback de lectura para una
+# transición suave; la fuente de verdad ahora es la tabla retrain_log en la DB,
+# que sobrevive a reinicios del Worker (ver data/database.py).
 _RETRAIN_LOG = Path(__file__).parent / "data" / "retrain_log.json"
 
 
 def _get_last_train_ts(symbol: str) -> datetime | None:
-    """Lee la fecha del último entrenamiento desde el log persistente."""
+    """Lee la fecha del último entrenamiento (DB primero, JSON como fallback)."""
+    from data.database import get_last_train
+    ts_str = get_last_train(symbol)
+    if not ts_str:
+        # Fallback al JSON heredado (deploy en transición que aún lo tenga en disco)
+        try:
+            data = json.loads(_RETRAIN_LOG.read_text()) if _RETRAIN_LOG.exists() else {}
+            ts_str = data.get(symbol)
+        except Exception:
+            ts_str = None
     try:
-        data = json.loads(_RETRAIN_LOG.read_text()) if _RETRAIN_LOG.exists() else {}
-        ts_str = data.get(symbol)
         return datetime.fromisoformat(ts_str) if ts_str else None
     except Exception:
         return None
 
 
 def _set_last_train_ts(symbol: str) -> None:
-    """Guarda la fecha actual como último entrenamiento del símbolo."""
-    try:
-        data = json.loads(_RETRAIN_LOG.read_text()) if _RETRAIN_LOG.exists() else {}
-        data[symbol] = datetime.now(timezone.utc).isoformat()
-        _RETRAIN_LOG.parent.mkdir(parents=True, exist_ok=True)
-        _RETRAIN_LOG.write_text(json.dumps(data, indent=2))
-    except Exception as exc:
-        logger.warning(f"No se pudo guardar retrain log: {exc}")
+    """Guarda la fecha actual como último entrenamiento del símbolo (en la DB)."""
+    from data.database import set_last_train
+    set_last_train(symbol, datetime.now(timezone.utc).isoformat())
 
 
 def _should_retrain(symbol: str) -> bool:
@@ -416,6 +421,7 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
 
     def _run_nightly():
         """Actualiza datos y reentrena si es necesario (se ejecuta 1× al día)."""
+        import gc
         logger.info("Tarea nocturna: actualizando datos y verificando reentrenamiento...")
         portfolio = None
         for symbol in ASSETS:
@@ -424,6 +430,10 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
                 cmd_auto_retrain(symbol, notify=notify)
             except Exception as exc:
                 logger.error(f"Error en tarea nocturna para {symbol}: {exc}")
+            finally:
+                # Liberar memoria entre activos: con 8 modelos en un solo Worker,
+                # acumular el dataset + folds de cada uno provoca el OOM en Render.
+                gc.collect()
 
         # Resumen diario por Telegram
         if notify:
@@ -583,12 +593,11 @@ def main():
 
     elif args.command == "retrain":
         symbols = list(ASSETS.keys()) if args.all else [args.symbol]
+        from data.database import set_last_train
         for sym in symbols:
-            # Forzar fecha a None para que _should_retrain siempre sea True
+            # Forzar reentrenamiento: fecha muy antigua → _should_retrain = True
             try:
-                data = json.loads(_RETRAIN_LOG.read_text()) if _RETRAIN_LOG.exists() else {}
-                data.pop(sym, None)
-                _RETRAIN_LOG.write_text(json.dumps(data, indent=2))
+                set_last_train(sym, "1970-01-01T00:00:00+00:00")
             except Exception:
                 pass
             cmd_auto_retrain(sym, notify=args.notify)

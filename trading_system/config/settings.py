@@ -162,7 +162,7 @@ ASSETS = {
         "days_history": 7300,
         "forward_bars": 20,
         "ml_threshold": 0.55,
-        "train_window_days": 1825,      # 5 años: evita regímenes obsoletos y reduce RAM en el reentreno
+        "train_window_days": 0,         # histórico completo: la ventana de 5 años hundió el AUC en forex (GBP/USD 0.55→0.38). El OOM ya se resolvió con gc.collect()
         "dxy_corr":     -1,             # EUR/USD ↑ cuando el dólar ↓
         "atr_target_mult": 2.5,         # R:R 1.67
         "atr_stop_mult":   1.5,
@@ -178,7 +178,7 @@ ASSETS = {
         "days_history": 7300,
         "forward_bars": 20,
         "ml_threshold": 0.55,
-        "train_window_days": 1825,      # 5 años: evita regímenes obsoletos y reduce RAM en el reentreno
+        "train_window_days": 0,         # histórico completo: la ventana de 5 años hundió el AUC en forex (GBP/USD 0.55→0.38). El OOM ya se resolvió con gc.collect()
         "dxy_corr":     -1,             # GBP/USD ↑ cuando el dólar ↓
         "atr_target_mult": 2.5,         # R:R 1.67
         "atr_stop_mult":   1.5,
@@ -194,7 +194,7 @@ ASSETS = {
         "days_history": 7300,
         "forward_bars": 20,
         "ml_threshold": 0.55,
-        "train_window_days": 1825,      # 5 años: evita regímenes obsoletos y reduce RAM en el reentreno
+        "train_window_days": 0,         # histórico completo: la ventana de 5 años hundió el AUC en forex (GBP/USD 0.55→0.38). El OOM ya se resolvió con gc.collect()
         "dxy_corr":     1,              # USD/JPY ↑ cuando el dólar ↑
         "atr_target_mult": 2.5,         # R:R 1.67
         "atr_stop_mult":   1.5,

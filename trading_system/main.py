@@ -404,6 +404,7 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
     )
 
     def _run_all_signals():
+        import gc
         # Resolver resultados pendientes antes de generar nuevas señales
         try:
             from data.outcome_tracker import resolve_open_signals
@@ -418,6 +419,10 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
                 cmd_signal(symbol, notify=notify)
             except Exception as exc:
                 logger.error(f"Error generando señal para {symbol}: {exc}")
+            finally:
+                # Cada ciclo horario carga datos de los 8 activos; liberar entre
+                # cada uno evita que la RAM crezca de forma sostenida.
+                gc.collect()
 
     def _run_nightly():
         """Actualiza datos y reentrena si es necesario (se ejecuta 1× al día)."""
@@ -592,6 +597,7 @@ def main():
         cmd_train(args.symbol)
 
     elif args.command == "retrain":
+        import gc
         symbols = list(ASSETS.keys()) if args.all else [args.symbol]
         from data.database import set_last_train
         for sym in symbols:
@@ -600,7 +606,13 @@ def main():
                 set_last_train(sym, "1970-01-01T00:00:00+00:00")
             except Exception:
                 pass
-            cmd_auto_retrain(sym, notify=args.notify)
+            try:
+                cmd_auto_retrain(sym, notify=args.notify)
+            finally:
+                # Liberar memoria entre activos: este 'retrain --all' corre en
+                # cada arranque del Worker (ver render.yaml) y reentrena los 8
+                # modelos seguidos — es el pico de RAM que disparaba el OOM.
+                gc.collect()
 
     elif args.command == "update":
         cmd_update()

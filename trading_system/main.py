@@ -105,6 +105,22 @@ def _load_data(symbol: str):
         # Macro completo: cubre el mismo histórico que los precios para evitar
         # que las features macro queden 89-91% NaN y se descarten en el entrenamiento.
         macro_df = fetch_macro(days=yf_days)
+    elif source == "twelvedata":
+        # Pares forex (EUR/USD, GBP/USD, USD/JPY): velas 4H reales vía Twelve Data.
+        # La barra diaria se deriva resampling del 4H (mitad de créditos API).
+        # 5000 barras × 4H ≈ 3.2 años de historia forex (suficiente para ML).
+        from data.fetchers.twelvedata_fetcher import fetch_twelvedata_ohlcv
+        td_days = cfg.get("days_history", 1825)
+        df_4h = fetch_twelvedata_ohlcv(symbol, interval="4h", outputsize=5000)
+        if df_4h is not None and not df_4h.empty:
+            df_daily = (df_4h
+                        .resample("1D")
+                        .agg({"open": "first", "high": "max",
+                              "low": "min", "close": "last", "volume": "sum"})
+                        .dropna())
+        else:
+            df_daily = None
+        macro_df = fetch_macro(days=td_days)
     else:
         crypto_days = cfg.get("days_history", DAYS_HISTORY)
         data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)

@@ -55,7 +55,7 @@ def _bybit_exchange():
 def _gateio_exchange():
     if not HAS_CCXT:
         raise ImportError("pip install ccxt")
-    return ccxt.gateio({"options": {"defaultType": "swap"}, "enableRateLimit": True})
+    return ccxt.gate({"options": {"defaultType": "swap"}, "enableRateLimit": True})
 
 
 def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int) -> pd.DataFrame:

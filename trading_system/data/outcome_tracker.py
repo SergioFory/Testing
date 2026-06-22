@@ -170,6 +170,9 @@ def _load_outcome_ohlcv(symbol: str) -> pd.DataFrame:
         if source == "yfinance":
             from data.fetchers.gold_fetcher import fetch_yfinance_asset
             return fetch_yfinance_asset(symbol, days=60)
+        if source == "twelvedata":
+            from data.fetchers.twelvedata_fetcher import fetch_twelvedata_ohlcv
+            return fetch_twelvedata_ohlcv(symbol, interval="4h", outputsize=500)
         from data.fetchers.binance_fetcher import fetch_ohlcv
         return fetch_ohlcv(symbol, timeframe="4h", days=30)
     except Exception:

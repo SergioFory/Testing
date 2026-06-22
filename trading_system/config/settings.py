@@ -153,48 +153,48 @@ ASSETS = {
     # -------------------------------------------------------------------------
     "EURUSD": {
         "label":        "EURUSD",
-        "source":       "yfinance",
-        "yf_ticker":    "EURUSD=X",
-        "yf_fallback":  ("FXE", 0.01),  # Invesco Euro ETF ≈ 100× EUR/USD → ×0.01
+        "source":       "twelvedata",   # 4H bars ≈ 3.2 años (5000 velas); yfinance solo daba diario
+        "yf_ticker":    "EURUSD=X",     # fallback si Twelve Data falla
+        "yf_fallback":  ("FXE", 0.01),
         "yf_min_price": 0.5,
         "min_range_pct": 0.004,
         "pip_value":    1.0,
-        "days_history": 7300,
-        "forward_bars": 20,
+        "days_history": 1825,           # ~5 años para macro; OHLCV lo define outputsize=5000
+        "forward_bars": 120,            # 120 × 4H = 480h = 20 días (equiv. a 20 barras diarias)
         "ml_threshold": 0.55,
-        "train_window_days": 0,         # histórico completo: la ventana de 5 años hundió el AUC en forex (GBP/USD 0.55→0.38). El OOM ya se resolvió con gc.collect()
+        "train_window_days": 0,
         "dxy_corr":     -1,             # EUR/USD ↑ cuando el dólar ↓
         "atr_target_mult": 2.5,         # R:R 1.67
         "atr_stop_mult":   1.5,
     },
     "GBPUSD": {
         "label":        "GBPUSD",
-        "source":       "yfinance",
+        "source":       "twelvedata",
         "yf_ticker":    "GBPUSD=X",
-        "yf_fallback":  ("FXB", 0.01),  # Invesco British Pound ETF ≈ 100× GBP/USD
+        "yf_fallback":  ("FXB", 0.01),
         "yf_min_price": 0.5,
         "min_range_pct": 0.004,
         "pip_value":    1.0,
-        "days_history": 7300,
-        "forward_bars": 20,
+        "days_history": 1825,
+        "forward_bars": 120,
         "ml_threshold": 0.55,
-        "train_window_days": 0,         # histórico completo: la ventana de 5 años hundió el AUC en forex (GBP/USD 0.55→0.38). El OOM ya se resolvió con gc.collect()
+        "train_window_days": 0,
         "dxy_corr":     -1,             # GBP/USD ↑ cuando el dólar ↓
         "atr_target_mult": 2.5,         # R:R 1.67
         "atr_stop_mult":   1.5,
     },
     "USDJPY": {
         "label":        "USDJPY",
-        "source":       "yfinance",
+        "source":       "twelvedata",
         "yf_ticker":    "USDJPY=X",
-        "yf_fallback":  ("JPY=X", 1.0), # mismo par, ticker alterno
+        "yf_fallback":  ("JPY=X", 1.0),
         "yf_min_price": 50,
         "min_range_pct": 0.004,
         "pip_value":    1.0,
-        "days_history": 7300,
-        "forward_bars": 20,
+        "days_history": 1825,
+        "forward_bars": 120,
         "ml_threshold": 0.55,
-        "train_window_days": 0,         # histórico completo: la ventana de 5 años hundió el AUC en forex (GBP/USD 0.55→0.38). El OOM ya se resolvió con gc.collect()
+        "train_window_days": 0,
         "dxy_corr":     1,              # USD/JPY ↑ cuando el dólar ↑
         "atr_target_mult": 2.5,         # R:R 1.67
         "atr_stop_mult":   1.5,

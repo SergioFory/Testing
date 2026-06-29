@@ -223,9 +223,10 @@ def cmd_signal(symbol: str, notify: bool = False):
     # equivalente (pendiente o reciente) se omite por completo: no se imprime,
     # no se guarda y no se notifica.
     from data.outcome_tracker import is_duplicate_signal, save_signal_from_trade
+    from config.settings import fmt_price
     if is_duplicate_signal(trade.symbol, trade.direction, trade.entry_price):
         logger.info(
-            f"[{symbol}] Señal {trade.direction.upper()} @ {trade.entry_price:.2f} "
+            f"[{symbol}] Señal {trade.direction.upper()} @ {fmt_price(trade.entry_price)} "
             "ya registrada — se omite para evitar duplicados."
         )
         return

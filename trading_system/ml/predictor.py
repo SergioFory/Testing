@@ -118,10 +118,27 @@ def score_setups(
 
 
 def get_best_setup(df_setups: pd.DataFrame,
-                   n_last_bars: int = 3) -> pd.Series | None:
+                   n_last_bars: int = 3,
+                   current_price: float = None,
+                   max_dist_atr: float = None) -> pd.Series | None:
     """
     Retorna el mejor setup reciente aprobado por el ML.
     None si no hay setups válidos.
+
+    Args:
+        n_last_bars:   Ventana de barras recientes a considerar.
+        current_price: Último precio conocido. Si se provee, se aplica el filtro
+                       de frescura: se descartan los setups cuyo precio de entrada
+                       (cierre de la barra del setup) ya esté a más de
+                       max_dist_atr × ATR del precio actual, porque esa operación
+                       ya no es ejecutable (el precio no volverá al nivel de entrada).
+        max_dist_atr:  Múltiplo de ATR de distancia máxima entry↔precio actual.
+
+    El filtro de frescura corrige dos problemas a la vez:
+      1. Señales con entrada inalcanzable (p.ej. SHORT @ 7580 con precio en 7523).
+      2. Sesgo de dirección: un setup obsoleto de alto score (típicamente un
+         short de reversión en un máximo previo) dejaba de tapar a los setups
+         frescos —long o short— cercanos al precio actual.
     """
     if df_setups.empty:
         return None
@@ -129,7 +146,23 @@ def get_best_setup(df_setups: pd.DataFrame,
     recent = df_setups[
         (df_setups["ts"] >= cutoff) &
         (df_setups.get("ml_approved", True) == True)
-    ]
+    ].copy()
     if recent.empty:
         return None
+
+    # --- Filtro de frescura: la entrada debe seguir cerca del precio actual ---
+    if current_price is not None and max_dist_atr is not None and "atr" in recent.columns:
+        atr_safe   = recent["atr"].clip(lower=1e-9)
+        dist_atr   = (recent["close"] - current_price).abs() / atr_safe
+        executable = dist_atr <= max_dist_atr
+        n_stale    = int((~executable).sum())
+        if n_stale:
+            logger.info(
+                f"Frescura: {n_stale}/{len(recent)} setups descartados por entrada "
+                f"lejana al precio actual ({current_price:.4f}, máx {max_dist_atr}×ATR)."
+            )
+        recent = recent[executable]
+        if recent.empty:
+            return None
+
     return recent.loc[recent["ml_score"].idxmax()]

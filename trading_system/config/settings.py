@@ -210,6 +210,17 @@ TIMEFRAME_ENTRY   = "1h"    # Timeframe para afinar entrada (futuro)
 DAYS_HISTORY      = 730     # 2 años de historia para backtest
 
 # =============================================================================
+# FRESCURA DE LA SEÑAL
+# -----------------------------------------------------------------------------
+# El precio de entrada de un setup es el CIERRE de la barra donde se detectó.
+# Si el precio actual ya se alejó más de MAX_ENTRY_DIST_ATR × ATR de ese nivel,
+# la operación no es ejecutable (el precio no regresará al entry) y se descarta.
+# Evita emitir señales obsoletas como "SHORT @ 7580" cuando el precio ya está
+# en 7523 y cayendo. Configurable por activo con la clave "max_entry_dist_atr".
+# =============================================================================
+MAX_ENTRY_DIST_ATR = 0.5
+
+# =============================================================================
 # SETUPS TÉCNICOS — parámetros base (calibrados para 4H crypto)
 # =============================================================================
 BREAKOUT_PARAMS = {

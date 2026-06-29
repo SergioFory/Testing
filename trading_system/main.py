@@ -173,10 +173,22 @@ def cmd_signal(symbol: str, notify: bool = False):
     # Para crypto 4H buscamos en 6 × 4H bars = 24h.
     source = ASSETS.get(symbol, {}).get("source", "binance")
     n_bars = 18 if source != "binance" else 6  # 72h para diarios, 24h para 4H
-    best = get_best_setup(df_scored, n_last_bars=n_bars)
+
+    # Filtro de frescura: descartar setups cuya entrada (cierre de la barra del
+    # setup) ya esté lejos del precio actual — esas operaciones no se ejecutan
+    # porque el precio no regresa al nivel de entrada (bug del "SHORT @ 7580"
+    # cuando el precio ya está en 7523). Configurable por activo.
+    from config.settings import MAX_ENTRY_DIST_ATR
+    current_price = float(df_4h["close"].iloc[-1])
+    max_dist_atr  = ASSETS.get(symbol, {}).get("max_entry_dist_atr", MAX_ENTRY_DIST_ATR)
+    best = get_best_setup(df_scored, n_last_bars=n_bars,
+                          current_price=current_price, max_dist_atr=max_dist_atr)
     if best is None:
         window_desc = "3 días" if source != "binance" else "6 barras 4H (24h)"
-        logger.info(f"[{symbol}] Sin setup de alta confianza en los últimos {window_desc}.")
+        logger.info(
+            f"[{symbol}] Sin setup fresco de alta confianza en los últimos {window_desc} "
+            f"(entrada dentro de {max_dist_atr}×ATR del precio actual {current_price:.4f})."
+        )
         return
 
     ml_score = float(best.get("ml_score", best.get("raw_score", 0)))

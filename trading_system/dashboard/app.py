@@ -15,7 +15,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timezone
 from loguru import logger
 
-from config.settings import ASSETS, RISK, ML_PARAMS, SENTIMENT as SENT_CFG, DAYS_HISTORY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+from config.settings import ASSETS, RISK, ML_PARAMS, SENTIMENT as SENT_CFG, DAYS_HISTORY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, fmt_price
 from data.database        import init_db, load_signals
 from data.outcome_tracker import save_signal_from_trade, resolve_open_signals, get_outcome_stats
 from notifications.telegram import send_signal_alert, test_connection as tg_test
@@ -244,14 +244,14 @@ with tab_signal:
             _dir = last.get("direction", "")
             if _dir == "long":
                 st.success(f"LONG | ML: {last.get('ml_score',0):.2f} | "
-                           f"Entry: ${last.get('entry_price',0):,.2f} | "
-                           f"SL: ${last.get('stop_loss',0):,.2f} | "
-                           f"TP: ${last.get('take_profit',0):,.2f}")
+                           f"Entry: ${fmt_price(last.get('entry_price',0))} | "
+                           f"SL: ${fmt_price(last.get('stop_loss',0))} | "
+                           f"TP: ${fmt_price(last.get('take_profit',0))}")
             elif _dir == "short":
                 st.error(f"SHORT | ML: {last.get('ml_score',0):.2f} | "
-                         f"Entry: ${last.get('entry_price',0):,.2f} | "
-                         f"SL: ${last.get('stop_loss',0):,.2f} | "
-                         f"TP: ${last.get('take_profit',0):,.2f}")
+                         f"Entry: ${fmt_price(last.get('entry_price',0))} | "
+                         f"SL: ${fmt_price(last.get('stop_loss',0))} | "
+                         f"TP: ${fmt_price(last.get('take_profit',0))}")
     else:
         # Análisis ya ejecutado — mostrar resultado (y los botones de acción)
         col_signal, col_risk = st.columns([3, 2])
@@ -288,11 +288,11 @@ with tab_signal:
             if _trade is not None:
                 st.markdown("---")
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Entrada",      f"${_trade.entry_price:,.2f}")
-                c2.metric("Stop Loss",    f"${_trade.stop_loss:,.2f}",
+                c1.metric("Entrada",      f"${fmt_price(_trade.entry_price)}")
+                c2.metric("Stop Loss",    f"${fmt_price(_trade.stop_loss)}",
                           delta=f"-{_trade.stop_distance_pct*100:.1f}%",
                           delta_color="inverse")
-                c3.metric("Take Profit",  f"${_trade.take_profit:,.2f}",
+                c3.metric("Take Profit",  f"${fmt_price(_trade.take_profit)}",
                           delta=f"+{_trade.target_distance_pct*100:.1f}%")
                 c4.metric("R:R",          f"{_trade.rr_ratio:.1f}:1")
 

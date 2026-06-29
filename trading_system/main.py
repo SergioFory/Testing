@@ -515,9 +515,10 @@ def _print_signal(trade, sentiment: dict) -> None:
     table.add_row("Setup Type",   trade.setup_type.replace("_", " ").title())
     table.add_row("Confianza ML", f"{trade.ml_score:.1%}")
     table.add_row("",             "")
-    table.add_row("Entrada",      f"${trade.entry_price:,.2f}")
-    table.add_row("Stop Loss",    f"${trade.stop_loss:,.2f}")
-    table.add_row("Take Profit",  f"${trade.take_profit:,.2f}")
+    from config.settings import fmt_price
+    table.add_row("Entrada",      f"${fmt_price(trade.entry_price)}")
+    table.add_row("Stop Loss",    f"${fmt_price(trade.stop_loss)}")
+    table.add_row("Take Profit",  f"${fmt_price(trade.take_profit)}")
     table.add_row("R:R Ratio",    f"{trade.rr_ratio:.2f}")
     table.add_row("",             "")
     table.add_row("Tamaño ($)",   f"${trade.position_size:,.0f}")

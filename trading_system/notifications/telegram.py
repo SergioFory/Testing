@@ -11,7 +11,7 @@ import time
 import requests
 from loguru import logger
 
-from config.settings import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+from config.settings import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, fmt_price
 
 _BASE_URL = "https://api.telegram.org/bot{token}/{method}"
 
@@ -73,9 +73,9 @@ def send_signal_alert(trade, sentiment: dict = None) -> bool:
         f"<b>Setup:</b>      {setup_label}",
         f"<b>Confianza ML:</b> {trade.ml_score:.1%}",
         "",
-        f"<b>Entrada:</b>    ${trade.entry_price:,.2f}",
-        f"<b>Stop Loss:</b>  ${trade.stop_loss:,.2f}",
-        f"<b>Take Profit:</b> ${trade.take_profit:,.2f}",
+        f"<b>Entrada:</b>    ${fmt_price(trade.entry_price)}",
+        f"<b>Stop Loss:</b>  ${fmt_price(trade.stop_loss)}",
+        f"<b>Take Profit:</b> ${fmt_price(trade.take_profit)}",
         f"<b>R:R Ratio:</b>  {trade.rr_ratio:.2f}",
         "",
         f"<b>Tamaño ($):</b>  ${trade.position_size:,.0f}",

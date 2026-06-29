@@ -220,6 +220,28 @@ DAYS_HISTORY      = 730     # 2 años de historia para backtest
 # =============================================================================
 MAX_ENTRY_DIST_ATR = 0.5
 
+
+# =============================================================================
+# FORMATO DE PRECIOS
+# -----------------------------------------------------------------------------
+# Los decimales se ajustan a la magnitud del precio: forex necesita 4-5 decimales
+# (EUR/USD 1.13869) mientras que BTC/Oro/SP500 con 2 basta. Evita mostrar
+# "Entrada $1.14 | Stop $1.14" donde no se distingue la geometría de la operación.
+# =============================================================================
+def price_decimals(price: float) -> int:
+    """Decimales apropiados según la magnitud del precio."""
+    p = abs(float(price))
+    if p >= 1000:  return 2    # BTC, Oro, SP500
+    if p >= 100:   return 3    # USD/JPY (~161) → muestra pipettes
+    if p >= 10:    return 2    # Plata (~59)
+    if p >= 1:     return 5    # EUR/USD, GBP/USD (~1.14)
+    return 6                   # activos sub-1
+
+
+def fmt_price(price: float) -> str:
+    """Precio con separador de miles y decimales según magnitud."""
+    return f"{price:,.{price_decimals(price)}f}"
+
 # =============================================================================
 # SETUPS TÉCNICOS — parámetros base (calibrados para 4H crypto)
 # =============================================================================

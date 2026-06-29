@@ -199,6 +199,25 @@ def cmd_signal(symbol: str, notify: bool = False):
         logger.info(f"[{symbol}] Setup detectado pero no pasa validaciones de riesgo.")
         return
 
+    # Filtro de eventos macro: no abrir operaciones cerca de NFP/CPI/FOMC, donde
+    # el precio salta de forma aleatoria. Fail-open: si el calendario no carga,
+    # no bloquea nada. Crypto está exento (ASSET_CURRENCIES vacío).
+    from config.settings import EVENT_FILTER
+    if EVENT_FILTER.get("enabled", True):
+        from data.fetchers.econ_calendar import is_event_blackout
+        blackout, motivo = is_event_blackout(
+            symbol,
+            hours_before=EVENT_FILTER.get("hours_before", 2.0),
+            hours_after=EVENT_FILTER.get("hours_after", 1.0),
+            min_impact=EVENT_FILTER.get("min_impact", "High"),
+        )
+        if blackout:
+            logger.info(
+                f"[{symbol}] Señal {trade.direction.upper()} omitida por evento "
+                f"macro inminente: {motivo}"
+            )
+            return
+
     # Evitar re-emitir la misma señal en cada ciclo. Un setup persistente se
     # vuelve a detectar con el mismo entry_price; si ya existe una señal
     # equivalente (pendiente o reciente) se omite por completo: no se imprime,

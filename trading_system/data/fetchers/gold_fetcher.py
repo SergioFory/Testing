@@ -145,6 +145,13 @@ def fetch_macro(days: int = 730) -> pd.DataFrame:
         "QQQ": "nasdaq",
         "GLD": "gold_etf",
         "UUP": "dxy",
+        # --- Cross-asset macro ampliado ---
+        # Drivers fundamentales de forex y oro: rendimientos de bonos, petróleo
+        # y volatilidad. Se integran al ML automáticamente (features.py los toma
+        # como macro_<name>_ret / _trend30 / _accel).
+        "TLT": "bonds",     # Bonos 20Y EE.UU.: proxy de rendimientos largos (inverso al precio)
+        "USO": "oil",       # Petróleo WTI: inflación y riesgo geopolítico
+        "^VIX": "vix",      # Índice de volatilidad: régimen risk-on / risk-off
     }
     end, start = datetime.now(), datetime.now() - timedelta(days=days)
     frames = {}
@@ -162,6 +169,9 @@ def fetch_macro(days: int = 730) -> pd.DataFrame:
                 continue
             frames[f"{name}_ret"]  = close.pct_change()
             frames[f"{name}_ret3"] = close.pct_change(3)
+            # Para el VIX el NIVEL (15 vs 35) es la señal de régimen, no su retorno.
+            if name == "vix":
+                frames["vix_level"] = close
         except Exception as e:
             logger.warning(f"Macro {ticker}: {e}")
 

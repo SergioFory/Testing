@@ -437,6 +437,20 @@ RISK = {
 }
 
 # =============================================================================
+# FILTRO DE EVENTOS ECONÓMICOS
+# -----------------------------------------------------------------------------
+# No abrir operaciones cerca de eventos macro de alto impacto (NFP, CPI, FOMC…),
+# donde el precio salta de forma aleatoria y revienta stops. Filtro fail-open:
+# si el calendario no se puede leer, no bloquea nada. Crypto está exento.
+# =============================================================================
+EVENT_FILTER = {
+    "enabled":      True,
+    "hours_before": 2.0,        # ventana antes del evento
+    "hours_after":  1.0,        # ventana después (whipsaw)
+    "min_impact":   "High",     # solo eventos de alto impacto
+}
+
+# =============================================================================
 # SENTIMENT
 # =============================================================================
 SENTIMENT = {

@@ -170,9 +170,11 @@ def cmd_signal(symbol: str, notify: bool = False):
 
     # Mejor setup actual
     # Para activos diarios (Gold, Silver, SP500) buscamos en un radio de 3 daily bars (72h).
-    # Para crypto 4H buscamos en 6 × 4H bars = 24h.
+    # Para crypto 4H buscamos en 12 × 4H bars = 48h. El filtro de frescura (abajo)
+    # garantiza que la entrada siga cerca del precio actual, así que ampliar la
+    # ventana da más oportunidades sin riesgo de emitir entradas inalcanzables.
     source = ASSETS.get(symbol, {}).get("source", "binance")
-    n_bars = 18 if source != "binance" else 6  # 72h para diarios, 24h para 4H
+    n_bars = 18 if source != "binance" else 12  # 72h para diarios, 48h para 4H
 
     # Filtro de frescura: descartar setups cuya entrada (cierre de la barra del
     # setup) ya esté lejos del precio actual — esas operaciones no se ejecutan
@@ -184,7 +186,7 @@ def cmd_signal(symbol: str, notify: bool = False):
     best = get_best_setup(df_scored, n_last_bars=n_bars,
                           current_price=current_price, max_dist_atr=max_dist_atr)
     if best is None:
-        window_desc = "3 días" if source != "binance" else "6 barras 4H (24h)"
+        window_desc = "3 días" if source != "binance" else "12 barras 4H (48h)"
         logger.info(
             f"[{symbol}] Sin setup fresco de alta confianza en los últimos {window_desc} "
             f"(entrada dentro de {max_dist_atr}×ATR del precio actual {current_price:.4f})."

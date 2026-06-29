@@ -139,12 +139,21 @@ def build_trade_setup(
         return None
 
     reward_usd = pos_size * abs(take_profit - entry) / entry
-    rr_ratio   = reward_usd / (risk_usd + 1e-9)
 
-    # R:R mínimo de 1.5 (si la geometría es rara, descartar)
-    if rr_ratio < 1.5:
+    # R:R desde la GEOMETRÍA de precios (target_dist / stop_dist). Es exacto y
+    # no depende del redondeo del tamaño de posición. Antes se calculaba como
+    # reward_usd / risk_usd, donde el redondeo a centavos de risk_usd (tras el
+    # safety net) empujaba el ratio por debajo de 1.5 y:
+    #   - rechazaba SIEMPRE a Gold (R:R 1.33) y Silver (R:R 1.0) → nunca emitían
+    #   - rechazaba a BTC (R:R 1.5) ~6 de cada 10 ciclos por ruido de redondeo
+    # El piso baja a 1.0 (reward ≥ risk): solo descarta geometría degenerada.
+    # Cada activo define su R:R real en settings (atr_target_mult / atr_stop_mult).
+    stop_dist   = abs(entry - stop_loss)
+    target_dist = abs(take_profit - entry)
+    rr_ratio    = target_dist / (stop_dist + 1e-9)
+    if rr_ratio < 1.0 - 1e-6:
         logger.debug(
-            f"R:R {rr_ratio:.2f} < 1.5. Setup descartado por geometría."
+            f"R:R {rr_ratio:.2f} < 1.0. Setup descartado por geometría degenerada."
         )
         return None
 

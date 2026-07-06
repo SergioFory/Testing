@@ -124,13 +124,25 @@ def resolve_open_signals() -> int:
                 if sig_ts.tz is None:
                     sig_ts = sig_ts.tz_localize("UTC")
 
-            # Timeout absoluto: señales con más de 7 días se fuerzan a expiradas
+            # Timeout absoluto por antigüedad. Debe alinearse con el horizonte
+            # real del activo (forward_bars × duración de barra), no un fijo de 7d:
+            #   - Diarios (Gold/Silver/SP500): 20 barras = 20 días
+            #   - Forex 4H: 120 barras × 4h = 20 días
+            #   - Crypto 4H: 24 barras × 4h = 4 días
+            # Un timeout fijo de 7d expiraba prematuramente las señales de forex y
+            # metales/índices (que necesitan hasta 20 días para resolverse),
+            # subestimando el win rate real en el dashboard.
             from datetime import timedelta
+            from config.settings import ASSETS
+            _cfg       = ASSETS.get(symbol, {})
+            _fwd       = _cfg.get("forward_bars", 24)
+            _bar_hours = 24 if _cfg.get("source") == "yfinance" else 4
+            timeout_days = max(7, int(_fwd * _bar_hours / 24) + 2)  # +2 días de margen
             age = datetime.now(timezone.utc) - sig_ts
-            if age > timedelta(days=7):
+            if age > timedelta(days=timeout_days):
                 _update_signal_result(sig_id, "expired", None, None)
                 resolved_count += 1
-                logger.info(f"Señal #{sig_id} {symbol} expirada por antigüedad ({age.days}d > 7d)")
+                logger.info(f"Señal #{sig_id} {symbol} expirada por antigüedad ({age.days}d > {timeout_days}d)")
                 continue
 
             if symbol not in ohlcv_cache:

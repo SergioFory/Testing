@@ -217,8 +217,13 @@ DAYS_HISTORY      = 730     # 2 años de historia para backtest
 # la operación no es ejecutable (el precio no regresará al entry) y se descarta.
 # Evita emitir señales obsoletas como "SHORT @ 7580" cuando el precio ya está
 # en 7523 y cayendo. Configurable por activo con la clave "max_entry_dist_atr".
+#
+# 1.0×ATR: la entrada debe estar dentro del rango de una barra promedio del
+# precio actual — sigue siendo ejecutable (una vela normal puede alcanzarla)
+# sin bloquear casi todos los setups como hacía 0.5×ATR (descartaba el 100% de
+# los candidatos que no estuvieran en la barra más reciente).
 # =============================================================================
-MAX_ENTRY_DIST_ATR = 0.5
+MAX_ENTRY_DIST_ATR = 1.0
 
 
 # =============================================================================

@@ -134,18 +134,18 @@ with tab_signal:
     # Ejecutar análisis
     # ----------------------------------------------------------------
     with st.spinner("Descargando datos..."):
-        gold_days = asset_cfg.get("days_history", 730)
+        asset_days = asset_cfg.get("days_history", 730)
         if asset_cfg["source"] == "binance":
-            data = fetch_multi_timeframe(symbol, ["4h", "1d"], days=730)
+            data = fetch_multi_timeframe(symbol, ["4h", "1d"], days=asset_days)
             df_4h    = data.get("4h",  pd.DataFrame())
             df_daily = data.get("1d",  pd.DataFrame())
             funding  = fetch_funding_rates(symbol, days=90)
         else:
-            df_daily = fetch_gold(timeframe="1d", days=gold_days)
+            df_daily = fetch_gold(timeframe="1d", days=asset_days)
             df_4h    = df_daily.copy() if not df_daily.empty else pd.DataFrame()
             funding  = pd.Series(dtype=float)
 
-        macro_df = fetch_macro(days=min(gold_days, 730))
+        macro_df = fetch_macro(days=min(asset_days, 730))
 
     if df_4h.empty:
         st.error("No se pudieron obtener datos. Revisa tu conexión o las credenciales.")
@@ -203,8 +203,13 @@ with tab_signal:
     # ----------------------------------------------------------------
     best = None
     if not df_setups.empty:
+        # Ventana adaptativa según timeframe del activo:
+        # Crypto (4H) → últimas 12h = 3 barras
+        # Gold (1D)   → últimos 3 días
+        recent_window = pd.Timedelta(days=3) if asset_cfg["source"] == "yfinance" \
+                        else pd.Timedelta(hours=12)
         recent = df_setups[
-            df_setups["ts"] >= df_setups["ts"].max() - pd.Timedelta(hours=12)
+            df_setups["ts"] >= df_setups["ts"].max() - recent_window
         ]
         # Usar el umbral del slider del sidebar (no el hardcoded de ML_PARAMS)
         if "ml_score" in recent.columns:

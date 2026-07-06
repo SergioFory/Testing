@@ -52,6 +52,7 @@ ASSETS = {
         "exchange":     "binanceusdm",
         "min_range_pct": 0.015,   # 1.5% rango mínimo para contar como "movimiento grande"
         "pip_value":    1.0,
+        "days_history": 1460,     # ~4 años de 4H → ~8760 barras para robusto ML
     },
     "ETHUSDT": {
         "label":        "ETH",
@@ -59,6 +60,7 @@ ASSETS = {
         "exchange":     "binanceusdm",
         "min_range_pct": 0.020,
         "pip_value":    1.0,
+        "days_history": 1460,     # ~4 años
     },
     "XAUUSD": {
         "label":        "GOLD",

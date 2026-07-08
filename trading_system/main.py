@@ -282,6 +282,32 @@ def cmd_backtest(symbol: str, start: str = None, end: str = None,
     logger.info("Resultados guardados en base de datos.")
 
 
+def cmd_validate(symbol: str = None):
+    """
+    Validación rigurosa de expectativa: ¿tienen los setups edge tras costos?
+    Sin look-ahead (entrada a la apertura de la barra siguiente), con comisión
+    y slippage. Prueba la materia prima (los setups), no el ML.
+    Si symbol es None, valida todos los activos.
+    """
+    from backtest.validate import validate_symbol, print_validation_report
+
+    symbols = list(ASSETS.keys()) if not symbol else [symbol]
+    results = []
+    for sym in symbols:
+        try:
+            df_4h, df_daily, macro_df = _load_data(sym)
+            if df_4h is None:
+                logger.warning(f"[{sym}] Sin datos; se omite de la validación.")
+                continue
+            results.append(validate_symbol(sym, df_4h, df_daily))
+        except Exception as exc:
+            logger.error(f"[{sym}] Error en validación: {exc}")
+
+    if results:
+        print_validation_report(results)
+    return results
+
+
 def cmd_train(symbol: str):
     """Entrena el modelo ML para el símbolo."""
     from signals.detector import detect_all_setups
@@ -600,6 +626,11 @@ Ejemplos:
     pb.add_argument("--end",     default=None,   help="Fecha fin   YYYY-MM-DD")
     pb.add_argument("--capital", default=None,   type=float, help="Capital inicial USD")
 
+    # validate — expectativa de los setups tras costos (sin look-ahead)
+    pv = sub.add_parser("validate", help="Validar expectativa de los setups tras costos")
+    pv.add_argument("--symbol", default=None, choices=list(ASSETS.keys()),
+                    help="Un activo; omitir para validar todos")
+
     # train
     pt = sub.add_parser("train", help="Entrenar modelo ML")
     pt.add_argument("--symbol", default="BTCUSDT", choices=list(ASSETS.keys()))
@@ -643,6 +674,9 @@ def main():
 
     elif args.command == "backtest":
         cmd_backtest(args.symbol, args.start, args.end, args.capital)
+
+    elif args.command == "validate":
+        cmd_validate(args.symbol)
 
     elif args.command == "train":
         cmd_train(args.symbol)

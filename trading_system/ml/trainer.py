@@ -111,6 +111,24 @@ def train_model(
     wf_metrics["n_samples"] = len(X)
     wf_metrics["threshold"] = p.get("prob_threshold", 0.5)
 
+    # --- Diagnóstico: ¿el raw_score (fuerza del patrón técnico) predice por sí
+    # solo mejor que el ML? El raw_score no se ajusta a nada, así que su AUC es
+    # fiable sin riesgo de overfitting. Permite decidir con evidencia si conviene
+    # usar use_ml=False (raw_score directo) en lugar del modelo en cada activo:
+    # si AUC_raw >= AUC_ML, el ML no aporta y el raw_score es preferible.
+    if "raw_score" in df_train.columns and y.nunique() >= 2:
+        try:
+            raw_auc = float(roc_auc_score(y, df_train["raw_score"]))
+            wf_metrics["raw_score_auc"] = round(raw_auc, 4)
+            veredicto = "raw_score >= ML → ML no aporta" if raw_auc >= wf_metrics["auc"] \
+                        else "ML supera a raw_score"
+            logger.info(
+                f"Diagnóstico selección → AUC ML (walk-forward): {wf_metrics['auc']:.3f} "
+                f"| AUC raw_score solo: {raw_auc:.3f}  →  {veredicto}"
+            )
+        except Exception as exc:
+            logger.debug(f"Diagnóstico raw_score AUC no disponible: {exc}")
+
     # --- Selección de features para modelo final (correcto: usa todos los datos) ---
     if len(feature_cols) > top_n:
         feature_cols = _select_top_features(X, y, top_n=top_n)

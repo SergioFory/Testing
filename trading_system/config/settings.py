@@ -49,8 +49,19 @@ CRYPTOPANIC_KEY    = ""  # deprecated — mantenido para no romper imports antig
 # ACTIVOS
 # =============================================================================
 ASSETS = {
+    # =========================================================================
+    # ESPECIALIZACIÓN (validación de expectativa, 2026-07-08):
+    #   Solo se operan los activos con E[R] > 0 tras costos. Los demás quedan
+    #   apagados (enabled=False): sin señales, sin reentreno → menos RAM/OOM.
+    #     ✓ BTC  E[R] +0.082 (Top25 +0.266)   ✓ ETH  E[R] +0.159 (Top25 +0.205)
+    #     ~ Oro/Plata: solo BREAKOUT (su única parte con E[R] > 0)
+    #     ✗ SP500, EUR/USD, GBP/USD, USD/JPY: E[R] negativo → apagados
+    #   "enabled": False  → el activo se omite en señales y reentreno.
+    #   "setups": [...]   → restringe los tipos de setup detectados (default: los 3).
+    # =========================================================================
     "BTCUSDT": {
         "label":        "BTC",
+        "enabled":      True,
         "source":       "binance",
         "exchange":     "binanceusdm",
         "min_range_pct": 0.015,
@@ -76,6 +87,7 @@ ASSETS = {
     },
     "ETHUSDT": {
         "label":        "ETH",
+        "enabled":      True,
         "source":       "binance",
         "exchange":     "binanceusdm",
         "min_range_pct": 0.020,
@@ -89,6 +101,14 @@ ASSETS = {
     },
     "XAUUSD": {
         "label":        "GOLD",
+        "enabled":      True,
+        # Solo breakout: la validación mostró breakout E[R] +0.100, pero pullback
+        # (-0.023) y reversal (-0.150) hundían el conjunto a -0.030. Aislar el
+        # breakout deja la única parte con expectativa positiva.
+        "setups":       ["breakout"],
+        # use_ml=False: con solo breakouts quedan ~58 muestras (< min 80), el ML
+        # no puede entrenar; se usa raw_score directo (que fue lo validado).
+        "use_ml":       False,
         "source":       "yfinance",
         "yf_ticker":    "GC=F",
         "yf_fallback":  ("GLD", 10.0),  # GLD cotiza ~1/10 del oro → x10
@@ -97,7 +117,7 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 7300,           # ~20 años; GC=F tiene datos desde 2000
         "forward_bars": 20,
-        "ml_threshold": 0.58,
+        "ml_threshold": 0.55,           # umbral raw_score
         "train_window_days": 0,         # usar todo el histórico disponible
         "safe_haven":   True,           # correlación NEGATIVA con DXY → usa macro_dxy_alignment
         # TP a 2×ATR en lugar de 3×ATR: el oro se mueve en tendencias lentas.
@@ -107,6 +127,10 @@ ASSETS = {
     },
     "XAGUSD": {
         "label":        "SILVER",
+        "enabled":      True,
+        # Solo breakout: validación breakout E[R] +0.081; pullback (-0.107) y
+        # reversal la hundían a -0.053. use_ml ya era False (raw_score).
+        "setups":       ["breakout"],
         "source":       "yfinance",
         "yf_ticker":    "SI=F",
         "yf_fallback":  ("SLV", 1.0),
@@ -128,6 +152,7 @@ ASSETS = {
     },
     "SPX500": {
         "label":        "SP500",
+        "enabled":      False,          # E[R] -0.089 (todos los setups negativos) → apagado
         "source":       "yfinance",
         "yf_ticker":    "^GSPC",
         "yf_fallback":  ("SPY", 10.0),
@@ -153,6 +178,7 @@ ASSETS = {
     # -------------------------------------------------------------------------
     "EURUSD": {
         "label":        "EURUSD",
+        "enabled":      False,          # E[R] -0.450, PF 0.50 → pérdida grave, apagado
         "source":       "twelvedata",   # 4H bars ≈ 3.2 años (5000 velas); yfinance solo daba diario
         "yf_ticker":    "EURUSD=X",     # fallback si Twelve Data falla
         "yf_fallback":  ("FXE", 0.01),
@@ -169,6 +195,7 @@ ASSETS = {
     },
     "GBPUSD": {
         "label":        "GBPUSD",
+        "enabled":      False,          # E[R] -0.480, PF 0.47 → pérdida grave, apagado
         "source":       "twelvedata",
         "yf_ticker":    "GBPUSD=X",
         "yf_fallback":  ("FXB", 0.01),
@@ -185,6 +212,7 @@ ASSETS = {
     },
     "USDJPY": {
         "label":        "USDJPY",
+        "enabled":      False,          # E[R] -0.396, PF 0.53 → pérdida grave, apagado
         "source":       "twelvedata",
         "yf_ticker":    "USDJPY=X",
         "yf_fallback":  ("JPY=X", 1.0),
@@ -200,6 +228,19 @@ ASSETS = {
         "atr_stop_mult":   1.5,
     },
 }
+
+
+def active_assets() -> list:
+    """Símbolos operativos (enabled != False). Los apagados se omiten en
+    generación de señales y reentreno, reduciendo carga de RAM."""
+    return [s for s, cfg in ASSETS.items() if cfg.get("enabled", True)]
+
+
+def allowed_setups(symbol: str):
+    """Tipos de setup permitidos para un activo, o None si todos.
+    Permite restringir p.ej. Oro/Plata a solo 'breakout'."""
+    return ASSETS.get(symbol, {}).get("setups")
+
 
 # =============================================================================
 # TIMEFRAMES

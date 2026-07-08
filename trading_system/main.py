@@ -35,7 +35,7 @@ logger.add(
     level="DEBUG",
 )
 
-from config.settings import ASSETS, BACKTEST, RISK, ML_PARAMS, DAYS_HISTORY
+from config.settings import ASSETS, BACKTEST, RISK, ML_PARAMS, DAYS_HISTORY, active_assets
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -490,14 +490,14 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
         except Exception as exc:
             logger.warning(f"Outcome tracker error: {exc}")
 
-        for symbol in ASSETS:
+        for symbol in active_assets():
             try:
                 cmd_signal(symbol, notify=notify)
             except Exception as exc:
                 logger.error(f"Error generando señal para {symbol}: {exc}")
             finally:
-                # Cada ciclo horario carga datos de los 8 activos; liberar entre
-                # cada uno evita que la RAM crezca de forma sostenida.
+                # Cada ciclo horario carga datos de los activos activos; liberar
+                # entre cada uno evita que la RAM crezca de forma sostenida.
                 gc.collect()
 
     def _run_nightly():
@@ -505,7 +505,7 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
         import gc
         logger.info("Tarea nocturna: actualizando datos y verificando reentrenamiento...")
         portfolio = None
-        for symbol in ASSETS:
+        for symbol in active_assets():
             try:
                 _load_data(symbol)
                 cmd_auto_retrain(symbol, notify=notify)
@@ -683,7 +683,9 @@ def main():
 
     elif args.command == "retrain":
         import gc
-        symbols = list(ASSETS.keys()) if args.all else [args.symbol]
+        # --all reentrena solo los activos operativos (enabled); los apagados
+        # no gastan RAM ni tiempo. Un --symbol explícito se respeta siempre.
+        symbols = active_assets() if args.all else [args.symbol]
         from data.database import set_last_train
         for sym in symbols:
             # Forzar reentrenamiento: fecha muy antigua → _should_retrain = True
@@ -695,8 +697,8 @@ def main():
                 cmd_auto_retrain(sym, notify=args.notify)
             finally:
                 # Liberar memoria entre activos: este 'retrain --all' corre en
-                # cada arranque del Worker (ver render.yaml) y reentrena los 8
-                # modelos seguidos — es el pico de RAM que disparaba el OOM.
+                # cada arranque del Worker (ver render.yaml). Con la
+                # especialización son ~4 modelos, no 8 → mucho menos riesgo de OOM.
                 gc.collect()
 
     elif args.command == "update":

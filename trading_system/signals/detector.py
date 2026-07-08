@@ -115,6 +115,15 @@ def detect_all_setups(
     df_setups = pd.DataFrame(results)
     df_setups = df_setups.sort_values("ts").reset_index(drop=True)
 
+    # --- Restricción de tipos de setup por activo (p.ej. Oro/Plata: solo breakout) ---
+    # Se aplica aquí para que afecte por igual a señales, entrenamiento y validación.
+    from config.settings import allowed_setups
+    _allowed = allowed_setups(symbol.upper())
+    if _allowed:
+        df_setups = df_setups[df_setups["setup_type"].isin(_allowed)].reset_index(drop=True)
+        if df_setups.empty:
+            return pd.DataFrame()
+
     # --- Stop Loss y Take Profit basados en ATR ---
     # Permite override por activo (e.g. Gold usa R:R 1.33 en vez de 2.0 genérico).
     from config.settings import RISK, ASSETS

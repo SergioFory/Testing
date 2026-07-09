@@ -115,14 +115,28 @@ def detect_all_setups(
     df_setups = pd.DataFrame(results)
     df_setups = df_setups.sort_values("ts").reset_index(drop=True)
 
-    # --- Restricción de tipos de setup por activo (p.ej. Oro/Plata: solo breakout) ---
-    # Se aplica aquí para que afecte por igual a señales, entrenamiento y validación.
-    from config.settings import allowed_setups
-    _allowed = allowed_setups(symbol.upper())
+    # --- Filtros por activo: tipo de setup, dirección y tendencia ---
+    # Se aplican aquí para afectar por igual a señales, entrenamiento y validación.
+    #   "setups":          ["breakout", ...]  restringe los tipos de setup
+    #   "directions":      ["long"]           restringe la dirección (p.ej. SP500 long-only)
+    #   "require_uptrend": True               solo longs con close>MA200 (y shorts con close<MA200)
+    from config.settings import ASSETS as _ASSETS
+    _cfg = _ASSETS.get(symbol.upper(), {})
+    _allowed = _cfg.get("setups")
     if _allowed:
-        df_setups = df_setups[df_setups["setup_type"].isin(_allowed)].reset_index(drop=True)
-        if df_setups.empty:
-            return pd.DataFrame()
+        df_setups = df_setups[df_setups["setup_type"].isin(_allowed)]
+    _dirs = _cfg.get("directions")
+    if _dirs:
+        df_setups = df_setups[df_setups["direction"].isin(_dirs)]
+    if _cfg.get("require_uptrend") and not df_setups.empty:
+        _ma200 = df_4h["close"].rolling(200).mean()
+        _ma_at = df_setups["ts"].map(_ma200)
+        _up = (df_setups["close"] > _ma_at).values
+        _keep = np.where(df_setups["direction"].values == "long", _up, ~_up)
+        df_setups = df_setups[_keep & _ma_at.notna().values]
+    df_setups = df_setups.reset_index(drop=True)
+    if df_setups.empty:
+        return pd.DataFrame()
 
     # --- Stop Loss y Take Profit basados en ATR ---
     # Permite override por activo (e.g. Gold usa R:R 1.33 en vez de 2.0 genérico).

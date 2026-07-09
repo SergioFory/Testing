@@ -289,7 +289,8 @@ def cmd_validate(symbol: str = None):
     y slippage. Prueba la materia prima (los setups), no el ML.
     Si symbol es None, valida todos los activos.
     """
-    from backtest.validate import validate_symbol, print_validation_report
+    from backtest.validate import (validate_symbol, print_validation_report,
+                                    validate_variants, print_variants_report)
 
     symbols = list(ASSETS.keys()) if not symbol else [symbol]
     results = []
@@ -300,6 +301,12 @@ def cmd_validate(symbol: str = None):
                 logger.warning(f"[{sym}] Sin datos; se omite de la validación.")
                 continue
             results.append(validate_symbol(sym, df_4h, df_daily))
+            # Con un solo activo, además probar variantes de estrategia (long-only,
+            # tendencia, por tipo) para ver si alguna rescata la expectativa.
+            if symbol:
+                variants = validate_variants(sym, df_4h, df_daily)
+                if variants:
+                    print_variants_report(sym, variants)
         except Exception as exc:
             logger.error(f"[{sym}] Error en validación: {exc}")
 

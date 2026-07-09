@@ -162,6 +162,81 @@ def validate_symbol(symbol: str, df_4h: pd.DataFrame,
     return overall
 
 
+def validate_variants(symbol: str, df_4h: pd.DataFrame,
+                      df_daily: pd.DataFrame = None) -> list:
+    """
+    Prueba variantes candidatas de estrategia para un activo, en una sola corrida.
+    Útil para rescatar activos con E[R] negativo: ¿alguna versión (long-only,
+    con filtro de tendencia, por tipo de setup) tiene expectativa positiva?
+    """
+    cfg        = ASSETS.get(symbol, {})
+    atr_stop   = cfg.get("atr_stop_mult",   RISK["atr_stop_mult"])
+    atr_target = cfg.get("atr_target_mult", RISK["atr_target_mult"])
+    forward    = cfg.get("forward_bars", 24)
+    comm       = BACKTEST["commission"]
+    slip       = BACKTEST["slippage"]
+
+    df = df_4h.copy()
+    df["_ma200"] = df["close"].rolling(200).mean()
+    df_setups = detect_all_setups(df_4h, df_daily, symbol)
+    if df_setups.empty:
+        return []
+
+    idx = df.index
+    rows = []
+    for _, s in df_setups.iterrows():
+        pos = int(idx.searchsorted(s["ts"]))
+        if pos >= len(df):
+            continue
+        r = _simulate_setup(df, pos, s["direction"], float(s.get("atr", 0)),
+                            atr_stop, atr_target, forward, comm, slip)
+        if r is None:
+            continue
+        ma200 = df.iloc[pos]["_ma200"]
+        uptrend = bool(pd.notna(ma200) and df.iloc[pos]["close"] > ma200)
+        rows.append({"R": r, "dir": s["direction"], "type": s["setup_type"],
+                     "uptrend": uptrend})
+    if not rows:
+        return []
+
+    d = pd.DataFrame(rows)
+    long_up = (d["dir"] == "long") & d["uptrend"]
+    variants = {
+        "TODOS (baseline actual)":          d,
+        "Solo LONG":                        d[d["dir"] == "long"],
+        "Solo SHORT":                       d[d["dir"] == "short"],
+        "LONG + tendencia (close>MA200)":   d[long_up],
+        "LONG pullback":                    d[(d["dir"] == "long") & (d["type"] == "pullback")],
+        "LONG pullback + tendencia":        d[long_up & (d["type"] == "pullback")],
+        "LONG breakout + tendencia":        d[long_up & (d["type"] == "breakout")],
+    }
+    out = []
+    for name, sub in variants.items():
+        st = _stats(sub["R"].tolist())
+        st["variant"] = name
+        out.append(st)
+    return out
+
+
+def print_variants_report(symbol: str, variants: list) -> None:
+    """Imprime la comparación de variantes de estrategia para un activo."""
+    logger.info("=" * 78)
+    logger.info(f"VARIANTES DE ESTRATEGIA — {symbol}  (¿alguna con E[R] > 0?)")
+    logger.info("=" * 78)
+    logger.info(f"{'Variante':38} {'N':>5} {'WinRate':>8} {'E[R]':>8} {'PF':>6} {'TotalR':>8}")
+    logger.info("-" * 78)
+    for v in variants:
+        if v.get("n", 0) < 10:
+            logger.info(f"{v['variant']:38} {v.get('n',0):>5}   (muestra insuficiente)")
+            continue
+        mark = "✓" if v["expectancy_R"] > 0 else "✗"
+        logger.info(
+            f"{v['variant']:38} {v['n']:>5} {_fmt_pct(v['win_rate']):>8} "
+            f"{v['expectancy_R']:>8.3f} {v['profit_factor']:>6.2f} {v['total_R']:>8.1f}  {mark}"
+        )
+    logger.info("=" * 78)
+
+
 def _fmt_pct(x: float) -> str:
     return f"{x*100:.1f}%"
 

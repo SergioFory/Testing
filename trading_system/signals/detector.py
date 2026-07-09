@@ -134,6 +134,10 @@ def detect_all_setups(
         _up = (df_setups["close"] > _ma_at).values
         _keep = np.where(df_setups["direction"].values == "long", _up, ~_up)
         df_setups = df_setups[_keep & _ma_at.notna().values]
+    _sessions = _cfg.get("session_hours")   # franjas 4H (UTC) permitidas, p.ej. [12]
+    if _sessions and not df_setups.empty:
+        _slot = (df_setups["ts"].dt.hour // 4) * 4
+        df_setups = df_setups[_slot.isin(_sessions)]
     df_setups = df_setups.reset_index(drop=True)
     if df_setups.empty:
         return pd.DataFrame()

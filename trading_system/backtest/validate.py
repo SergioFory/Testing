@@ -194,47 +194,64 @@ def validate_variants(symbol: str, df_4h: pd.DataFrame,
             continue
         ma200 = df.iloc[pos]["_ma200"]
         uptrend = bool(pd.notna(ma200) and df.iloc[pos]["close"] > ma200)
+        slot = (int(pd.Timestamp(s["ts"]).hour) // 4) * 4   # franja 4H (UTC)
         rows.append({"R": r, "dir": s["direction"], "type": s["setup_type"],
-                     "uptrend": uptrend})
+                     "uptrend": uptrend, "slot": slot})
     if not rows:
         return []
 
     d = pd.DataFrame(rows)
     long_up = (d["dir"] == "long") & d["uptrend"]
-    variants = {
-        "TODOS (baseline actual)":          d,
-        "Solo LONG":                        d[d["dir"] == "long"],
-        "Solo SHORT":                       d[d["dir"] == "short"],
-        "LONG + tendencia (close>MA200)":   d[long_up],
-        "LONG pullback":                    d[(d["dir"] == "long") & (d["type"] == "pullback")],
-        "LONG pullback + tendencia":        d[long_up & (d["type"] == "pullback")],
-        "LONG breakout + tendencia":        d[long_up & (d["type"] == "breakout")],
-    }
-    out = []
-    for name, sub in variants.items():
+    SESS = {0: "Asia 0-4h", 4: "Asia 4-8h", 8: "Londres 8-12h",
+            12: "Solape LN/NY 12-16h", 16: "NY 16-20h", 20: "Noche 20-24h"}
+
+    variants = []
+
+    def add(cat: str, name: str, sub) -> None:
         st = _stats(sub["R"].tolist())
         st["variant"] = name
-        out.append(st)
-    return out
+        st["cat"] = cat
+        variants.append(st)
+
+    add("Baseline", "TODOS", d)
+    # Dirección
+    add("Dirección", "Solo LONG",  d[d["dir"] == "long"])
+    add("Dirección", "Solo SHORT", d[d["dir"] == "short"])
+    # Tipo de setup
+    for t in ["breakout", "pullback", "reversal"]:
+        add("Tipo de setup", t, d[d["type"] == t])
+    # Sesión horaria (clave en forex)
+    for slot in sorted(d["slot"].unique()):
+        add("Sesión (UTC)", SESS.get(slot, f"franja {slot}h"), d[d["slot"] == slot])
+    # Combos prometedores
+    add("Combo", "LONG + tendencia (close>MA200)", d[long_up])
+    add("Combo", "breakout + Solape LN/NY",  d[(d["type"] == "breakout") & (d["slot"] == 12)])
+    add("Combo", "reversal + Solape LN/NY",  d[(d["type"] == "reversal") & (d["slot"] == 12)])
+    add("Combo", "TODOS en Solape LN/NY",    d[d["slot"] == 12])
+    add("Combo", "TODOS fuera de Asia (8-20h)", d[d["slot"].isin([8, 12, 16])])
+    return variants
 
 
 def print_variants_report(symbol: str, variants: list) -> None:
-    """Imprime la comparación de variantes de estrategia para un activo."""
-    logger.info("=" * 78)
-    logger.info(f"VARIANTES DE ESTRATEGIA — {symbol}  (¿alguna con E[R] > 0?)")
-    logger.info("=" * 78)
-    logger.info(f"{'Variante':38} {'N':>5} {'WinRate':>8} {'E[R]':>8} {'PF':>6} {'TotalR':>8}")
-    logger.info("-" * 78)
+    """Imprime la comparación de variantes de estrategia, agrupada por categoría."""
+    logger.info("=" * 82)
+    logger.info(f"VARIANTES DE ESTRATEGIA — {symbol}  (¿alguna con E[R] > 0 y N≥30?)")
+    logger.info("=" * 82)
+    logger.info(f"{'Variante':40} {'N':>5} {'WinRate':>8} {'E[R]':>8} {'PF':>6} {'TotalR':>8}")
+    last_cat = None
     for v in variants:
+        if v.get("cat") != last_cat:
+            logger.info(f"── {v['cat']} " + "─" * (78 - len(v['cat'])))
+            last_cat = v.get("cat")
         if v.get("n", 0) < 10:
-            logger.info(f"{v['variant']:38} {v.get('n',0):>5}   (muestra insuficiente)")
+            logger.info(f"  {v['variant']:38} {v.get('n', 0):>5}   (muestra insuficiente)")
             continue
         mark = "✓" if v["expectancy_R"] > 0 else "✗"
         logger.info(
-            f"{v['variant']:38} {v['n']:>5} {_fmt_pct(v['win_rate']):>8} "
+            f"  {v['variant']:38} {v['n']:>5} {_fmt_pct(v['win_rate']):>8} "
             f"{v['expectancy_R']:>8.3f} {v['profit_factor']:>6.2f} {v['total_R']:>8.1f}  {mark}"
         )
-    logger.info("=" * 78)
+    logger.info("=" * 82)
 
 
 def _fmt_pct(x: float) -> str:

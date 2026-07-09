@@ -117,7 +117,10 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 7300,           # ~20 años; GC=F tiene datos desde 2000
         "forward_bars": 20,
-        "ml_threshold": 0.55,           # umbral raw_score
+        # 0.20 (no 0.55): el raw_score del oro se distribuye bajo (mediana ~0.25) y
+        # el edge validado (+0.100) está en TODOS los breakouts, no en los de mayor
+        # score (Top25 fue peor: +0.022). 0.55 aprobaba 1/58 → nunca generaba señal.
+        "ml_threshold": 0.20,           # umbral raw_score, calibrado a la distribución
         "train_window_days": 0,         # usar todo el histórico disponible
         "safe_haven":   True,           # correlación NEGATIVA con DXY → usa macro_dxy_alignment
         # TP a 2×ATR en lugar de 3×ATR: el oro se mueve en tendencias lentas.
@@ -139,7 +142,9 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 7300,
         "forward_bars": 20,
-        "ml_threshold": 0.55,
+        # 0.25 (no 0.55): mismo motivo que el oro — raw_score bajo (mediana ~0.31),
+        # edge validado (+0.081) en todos los breakouts, Top25 peor (-0.044).
+        "ml_threshold": 0.25,           # umbral raw_score, calibrado a la distribución
         "train_window_days": 0,
         "safe_haven":   True,           # plata como metal refugio: mismo alineamiento que Gold
         # R:R 1.0: TP=1.5×ATR. Con R:R 1.5 (TP=2.25×ATR) el win rate cayó 47%→37%
@@ -170,7 +175,10 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 7300,
         "forward_bars": 20,
-        "ml_threshold": 0.55,                  # umbral raw_score
+        # 0.12 (no 0.55): el raw_score del SP500 se distribuye muy bajo (mediana ~0.10).
+        # 0.55 aprobaba 6/107 → casi nunca señal. 0.12 aprueba ~la mitad superior;
+        # el raw_score SÍ ayuda aquí (Top25 +0.337 > +0.245), así que conserva algo de filtro.
+        "ml_threshold": 0.12,                  # umbral raw_score, calibrado a la distribución
         "train_window_days": 0,
         # TP a 2.5×ATR (R:R 1.67): el R:R con el que se validó el +0.246.
         "atr_target_mult": 2.5,

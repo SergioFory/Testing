@@ -152,7 +152,16 @@ ASSETS = {
     },
     "SPX500": {
         "label":        "SP500",
-        "enabled":      False,          # E[R] -0.089 (todos los setups negativos) → apagado
+        # REACTIVADO con estrategia validada (variantes 2026-07-09):
+        #   Baseline (todo, ambas direcciones): E[R] -0.089 ✗
+        #   Solo SHORT: -0.205 ✗ (apostar contra el drift alcista pierde)
+        #   Solo LONG: +0.082 (N=222) ✓
+        #   LONG sin pullback (breakout+reversal): +0.246 (N=107) ✓✓ ← elegido
+        #   (los pullback largos pierden -0.071; el filtro MA200 bajó el edge)
+        "enabled":      True,
+        "directions":   ["long"],              # solo compras: el índice sube estructuralmente
+        "setups":       ["breakout", "reversal"],  # sin pullback (E[R] negativo)
+        "use_ml":       False,                 # se usó raw_score en la validación; muestra pequeña
         "source":       "yfinance",
         "yf_ticker":    "^GSPC",
         "yf_fallback":  ("SPY", 10.0),
@@ -161,11 +170,10 @@ ASSETS = {
         "pip_value":    1.0,
         "days_history": 7300,
         "forward_bars": 20,
-        "ml_threshold": 0.55,
+        "ml_threshold": 0.55,                  # umbral raw_score
         "train_window_days": 0,
-        # SP500: índice con sesgo alcista histórico, tendencias más suaves.
-        # TP a 2.5×ATR: más ambicioso que metales pero realista para el índice.
-        "atr_target_mult": 2.5,         # R:R 1.67
+        # TP a 2.5×ATR (R:R 1.67): el R:R con el que se validó el +0.246.
+        "atr_target_mult": 2.5,
         "atr_stop_mult":   1.5,
     },
     # -------------------------------------------------------------------------

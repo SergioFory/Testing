@@ -290,7 +290,8 @@ def cmd_validate(symbol: str = None):
     Si symbol es None, valida todos los activos.
     """
     from backtest.validate import (validate_symbol, print_validation_report,
-                                    validate_variants, print_variants_report)
+                                    validate_variants, print_variants_report,
+                                    validate_vol_stops, print_vol_stops_report)
 
     symbols = list(ASSETS.keys()) if not symbol else [symbol]
     results = []
@@ -301,12 +302,15 @@ def cmd_validate(symbol: str = None):
                 logger.warning(f"[{sym}] Sin datos; se omite de la validación.")
                 continue
             results.append(validate_symbol(sym, df_4h, df_daily))
-            # Con un solo activo, además probar variantes de estrategia (long-only,
-            # tendencia, por tipo) para ver si alguna rescata la expectativa.
+            # Con un solo activo, además probar variantes de estrategia (dirección,
+            # tipo, sesión, régimen) y estimadores de volatilidad para el stop.
             if symbol:
                 variants = validate_variants(sym, df_4h, df_daily)
                 if variants:
                     print_variants_report(sym, variants)
+                vol_stops = validate_vol_stops(sym, df_4h, df_daily)
+                if vol_stops:
+                    print_vol_stops_report(sym, vol_stops)
         except Exception as exc:
             logger.error(f"[{sym}] Error en validación: {exc}")
 

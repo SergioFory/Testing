@@ -109,6 +109,134 @@ def _stats(rs: list) -> dict:
     }
 
 
+def _add_regime_context(df_4h: pd.DataFrame) -> pd.DataFrame:
+    """
+    Añade contexto de régimen a cada barra (solo hacia atrás, sin look-ahead):
+      _ma200   : media móvil 200 (tendencia de fondo)
+      _adx     : ADX(14) — fuerza de tendencia
+      _volrank : percentil rolling(100) del ATR% — régimen de volatilidad
+    """
+    import ta
+    df = df_4h.copy()
+    df["_ma200"] = df["close"].rolling(200).mean()
+    df["_adx"] = ta.trend.ADXIndicator(
+        df["high"], df["low"], df["close"], window=14
+    ).adx()
+    _atr = ta.volatility.AverageTrueRange(
+        df["high"], df["low"], df["close"], window=14
+    ).average_true_range()
+    df["_volrank"] = (_atr / df["close"]).rolling(100).rank(pct=True)
+    return df
+
+
+def _atr_series(df: pd.DataFrame, window: int) -> pd.Series:
+    import ta
+    return ta.volatility.AverageTrueRange(
+        df["high"], df["low"], df["close"], window=window
+    ).average_true_range()
+
+
+def validate_vol_stops(symbol: str, df_4h: pd.DataFrame,
+                       df_daily: pd.DataFrame = None) -> list:
+    """
+    ¿Mejora el E[R] usar una estimación de volatilidad distinta para colocar
+    el stop/target? Compara el ATR(14) actual contra alternativas.
+
+    Diseño del experimento (limpio):
+      - Todas las alternativas se NORMALIZAN para que su anchura media de stop
+        iguale a la del ATR(14), usando media expandida (solo pasado, sin
+        look-ahead). Así se aísla el efecto de la ADAPTABILIDAD temporal, no
+        el de poner stops más anchos o estrechos en promedio.
+      - 'HAR' = mezcla de horizontes (rápido+medio+lento), el mismo principio
+        del modelo HAR-RV que la literatura muestra competitivo frente a
+        modelos fundacionales de 200M de parámetros.
+
+    Si ninguna alternativa mejora al ATR(14), un modelo fundacional de
+    volatilidad (TTM, TimesFM) tampoco lo haría: no vale la pena integrarlo.
+    """
+    cfg        = ASSETS.get(symbol, {})
+    atr_stop   = cfg.get("atr_stop_mult",   RISK["atr_stop_mult"])
+    atr_target = cfg.get("atr_target_mult", RISK["atr_target_mult"])
+    forward    = cfg.get("forward_bars", 24)
+    comm       = BACKTEST["commission"]
+    slip       = BACKTEST["slippage"]
+
+    df = df_4h.copy()
+    df_setups = detect_all_setups(df_4h, df_daily, symbol)
+    if df_setups.empty:
+        return []
+
+    base = _atr_series(df, 14)
+    fast = _atr_series(df, 5)
+    slow = _atr_series(df, 50)
+    har  = (fast + base + slow) / 3.0
+
+    def _norm(s: pd.Series) -> pd.Series:
+        """Escala s para que su media expandida iguale la del ATR(14) base."""
+        ratio = (base.expanding(min_periods=50).mean()
+                 / s.expanding(min_periods=50).mean().replace(0, np.nan))
+        return s * ratio
+
+    candidates = {
+        "ATR(14) — actual":        base,
+        "ATR(5) rápido (norm.)":   _norm(fast),
+        "ATR(50) lento (norm.)":   _norm(slow),
+        "HAR-blend 5/14/50 (norm.)": _norm(har),
+    }
+
+    idx = df.index
+    positions = []
+    for _, s in df_setups.iterrows():
+        pos = int(idx.searchsorted(s["ts"]))
+        if pos < len(df):
+            positions.append((pos, s["direction"]))
+
+    out = []
+    for name, vol in candidates.items():
+        rs = []
+        for pos, direction in positions:
+            v = vol.iloc[pos]
+            if pd.isna(v) or v <= 0:
+                continue
+            r = _simulate_setup(df, pos, direction, float(v),
+                                atr_stop, atr_target, forward, comm, slip)
+            if r is not None:
+                rs.append(r)
+        st = _stats(rs)
+        st["variant"] = name
+        out.append(st)
+    return out
+
+
+def print_vol_stops_report(symbol: str, results: list) -> None:
+    """Imprime la comparación de estimadores de volatilidad para el stop/target."""
+    if not results:
+        return
+    logger.info("=" * 82)
+    logger.info(f"STOPS ADAPTATIVOS POR VOLATILIDAD — {symbol}")
+    logger.info("(¿alguna estimación de volatilidad mejora el E[R] del ATR(14) actual?)")
+    logger.info("=" * 82)
+    logger.info(f"{'Estimador de volatilidad':34} {'N':>5} {'WinRate':>8} {'E[R]':>8} {'PF':>6} {'TotalR':>8}")
+    logger.info("-" * 82)
+    baseline = next((r for r in results if r.get("variant", "").startswith("ATR(14)")), None)
+    base_er = baseline.get("expectancy_R", 0.0) if baseline else 0.0
+    for r in results:
+        if r.get("n", 0) < 10:
+            logger.info(f"  {r['variant']:32} {r.get('n', 0):>5}   (muestra insuficiente)")
+            continue
+        delta = r["expectancy_R"] - base_er
+        mark = "—" if r is baseline else ("✓ mejora" if delta > 0 else "✗ peor")
+        logger.info(
+            f"  {r['variant']:32} {r['n']:>5} {_fmt_pct(r['win_rate']):>8} "
+            f"{r['expectancy_R']:>8.3f} {r['profit_factor']:>6.2f} {r['total_R']:>8.1f}  "
+            f"{mark} ({delta:+.3f})"
+        )
+    logger.info("-" * 82)
+    logger.info("Si ninguna alternativa mejora, un modelo fundacional de volatilidad")
+    logger.info("(TTM/TimesFM) tampoco aportaría: la literatura lo sitúa a la par de HAR.")
+    logger.info("=" * 82)
+
+
 def validate_symbol(symbol: str, df_4h: pd.DataFrame,
                     df_daily: pd.DataFrame = None) -> dict:
     """Corre la validación de expectativa para un activo. Retorna dict de métricas."""
@@ -176,8 +304,7 @@ def validate_variants(symbol: str, df_4h: pd.DataFrame,
     comm       = BACKTEST["commission"]
     slip       = BACKTEST["slippage"]
 
-    df = df_4h.copy()
-    df["_ma200"] = df["close"].rolling(200).mean()
+    df = _add_regime_context(df_4h)
     df_setups = detect_all_setups(df_4h, df_daily, symbol)
     if df_setups.empty:
         return []
@@ -192,11 +319,14 @@ def validate_variants(symbol: str, df_4h: pd.DataFrame,
                             atr_stop, atr_target, forward, comm, slip)
         if r is None:
             continue
-        ma200 = df.iloc[pos]["_ma200"]
-        uptrend = bool(pd.notna(ma200) and df.iloc[pos]["close"] > ma200)
+        bar = df.iloc[pos]
+        ma200 = bar["_ma200"]
+        uptrend = bool(pd.notna(ma200) and bar["close"] > ma200)
         slot = (int(pd.Timestamp(s["ts"]).hour) // 4) * 4   # franja 4H (UTC)
         rows.append({"R": r, "dir": s["direction"], "type": s["setup_type"],
-                     "uptrend": uptrend, "slot": slot})
+                     "uptrend": uptrend, "slot": slot,
+                     "adx": float(bar["_adx"]) if pd.notna(bar["_adx"]) else np.nan,
+                     "volrank": float(bar["_volrank"]) if pd.notna(bar["_volrank"]) else np.nan})
     if not rows:
         return []
 
@@ -223,8 +353,26 @@ def validate_variants(symbol: str, df_4h: pd.DataFrame,
     # Sesión horaria (clave en forex)
     for slot in sorted(d["slot"].unique()):
         add("Sesión (UTC)", SESS.get(slot, f"franja {slot}h"), d[d["slot"] == slot])
+    # Régimen de tendencia (ADX). Nota: cripto ya exige ADX>=20 en breakouts,
+    # así que aquí medimos si APRETAR más el filtro añade valor.
+    adx = d["adx"]
+    add("Régimen ADX", "ADX < 20 (rango)",       d[adx < 20])
+    add("Régimen ADX", "ADX 20-25 (débil)",      d[(adx >= 20) & (adx < 25)])
+    add("Régimen ADX", "ADX 25-30 (medio)",      d[(adx >= 25) & (adx < 30)])
+    add("Régimen ADX", "ADX >= 30 (fuerte)",     d[adx >= 30])
+    # Régimen de volatilidad (percentil del ATR). Ya se exige >=0.30 en detector.
+    vr = d["volrank"]
+    add("Régimen volatilidad", "ATR rank 0.30-0.50", d[(vr >= 0.30) & (vr < 0.50)])
+    add("Régimen volatilidad", "ATR rank 0.50-0.70", d[(vr >= 0.50) & (vr < 0.70)])
+    add("Régimen volatilidad", "ATR rank 0.70-0.85", d[(vr >= 0.70) & (vr < 0.85)])
+    add("Régimen volatilidad", "ATR rank >= 0.85",   d[vr >= 0.85])
     # Combos prometedores
     add("Combo", "LONG + tendencia (close>MA200)", d[long_up])
+    add("Combo", "ADX >= 25 (todos)",              d[adx >= 25])
+    add("Combo", "breakout + ADX >= 25",           d[(d["type"] == "breakout") & (adx >= 25)])
+    add("Combo", "breakout + ATR rank >= 0.70",    d[(d["type"] == "breakout") & (vr >= 0.70)])
+    add("Combo", "breakout + ADX>=25 + ATRrank>=0.70",
+        d[(d["type"] == "breakout") & (adx >= 25) & (vr >= 0.70)])
     add("Combo", "breakout + Solape LN/NY",  d[(d["type"] == "breakout") & (d["slot"] == 12)])
     add("Combo", "reversal + Solape LN/NY",  d[(d["type"] == "reversal") & (d["slot"] == 12)])
     add("Combo", "TODOS en Solape LN/NY",    d[d["slot"] == 12])

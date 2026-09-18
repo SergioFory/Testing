@@ -62,6 +62,11 @@ ASSETS = {
     "BTCUSDT": {
         "label":        "BTC",
         "enabled":      True,
+        # Sin reversal: validación 2026-09 lo halló negativo de forma coincidente
+        # en ambos activos cripto (BTC -0.095 n=36 | ETH -0.344 n=32). Mecanismo:
+        # el reversal es contra-tendencia y en cripto la tendencia arrolla.
+        # El pullback se conserva: positivo en ambos (+0.047 / +0.051).
+        "setups":       ["breakout", "pullback"],
         "source":       "binance",
         "exchange":     "binanceusdm",
         "min_range_pct": 0.015,
@@ -88,6 +93,7 @@ ASSETS = {
     "ETHUSDT": {
         "label":        "ETH",
         "enabled":      True,
+        "setups":       ["breakout", "pullback"],   # sin reversal: -0.344 (ver BTC)
         "source":       "binance",
         "exchange":     "binanceusdm",
         "min_range_pct": 0.020,

@@ -136,9 +136,13 @@ ASSETS = {
     },
     "XAGUSD": {
         "label":        "SILVER",
-        "enabled":      True,
-        # Solo breakout: validación breakout E[R] +0.081; pullback (-0.107) y
-        # reversal la hundían a -0.053. use_ml ya era False (raw_score).
+        # APAGADA (2026-09-18). Aunque el conjunto de breakouts da E[R] +0.081,
+        # su Top25 E[R] es NEGATIVO (-0.044): el raw_score selecciona justamente
+        # los setups perdedores, y en vivo get_best_setup opera el de mayor score.
+        # Es decir, lo que realmente se operaría tiene expectativa negativa.
+        # Además aporta solo 48 setups en 20 años (~2.4/año): muestra insuficiente
+        # para sostener un edge. Se reactiva si acumula evidencia favorable.
+        "enabled":      False,
         "setups":       ["breakout"],
         "source":       "yfinance",
         "yf_ticker":    "SI=F",

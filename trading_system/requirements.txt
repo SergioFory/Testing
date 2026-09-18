@@ -1,27 +1,47 @@
-# Core
-pandas>=2.0.0
-numpy>=1.24.0
-python-dotenv>=1.0.0
+# =============================================================================
+# VERSIONES FIJADAS (2026-09-18)
+# -----------------------------------------------------------------------------
+# Antes todo usaba ">=", así que cada rebuild instalaba las últimas versiones.
+# Eso provocó un salto de versión MAYOR silencioso:
+#     yfinance  0.2.x -> 1.7.0     pandas 2.x -> 3.0.6
+#     numpy     1.x   -> 2.4.6     plotly 5.x -> 7.1.0
+# Consecuencia real detectada: el conteo de setups del oro pasó de 58 a 109
+# entre despliegues, con el MISMO número de barras — yfinance 1.x descarga y
+# ajusta GC=F (futuro continuo) de forma distinta a 0.2.x.
+#
+# En un sistema que opera con dinero real y cuyos edges se validan sobre datos
+# concretos, un cambio de librería no debe alterar las señales sin avisar.
+# Estas son las versiones exactas con las que se validó el sistema el 2026-09-18
+# (BTC E[R] +0.151 | ETH +0.237 | SP500 +0.246 | Oro +0.090).
+#
+# Para actualizar: cambiar una versión a la vez y re-correr `validate` en todos
+# los activos para confirmar que los edges no se mueven.
+# =============================================================================
 
-# Data sources
-ccxt>=4.2.0
-yfinance>=0.2.36
-python-binance>=1.0.19
-requests>=2.31.0
+# Core (versiones exactas verificadas con pip freeze en producción)
+pandas==3.0.6
+numpy==2.4.6
+python-dotenv>=1.0.0,<2.0.0
 
-# Technical analysis
-ta>=0.11.0
+# Data sources — yfinance es el más sensible: fija la versión sí o sí
+ccxt==4.5.78
+yfinance==1.7.0
+python-binance>=1.0.19,<2.0.0
+requests>=2.31.0,<3.0.0
+
+# Technical analysis (ATR, ADX, RSI, Bollinger de los detectores)
+ta==0.11.0
 
 # Machine Learning
-lightgbm>=4.3.0
-scikit-learn>=1.4.0
+lightgbm==4.7.0
+scikit-learn==1.9.1
 
 # Backtest: motor propio event-driven (backtest/engine.py) + validador de
 # expectativa (backtest/validate.py). No requiere librerías externas.
 
 # Dashboard
-streamlit>=1.35.0
-plotly>=5.20.0
+streamlit==1.64.0
+plotly==7.1.0
 
 # Retiradas 2026-09 por no tener ningún uso en el código (0 imports):
 #   xgboost, shap  → el ML usa LightGBM
@@ -32,11 +52,11 @@ plotly>=5.20.0
 # ejecución: un paquete que nunca se importa no consume memoria).
 
 # Database
-sqlalchemy>=2.0.0
-psycopg2-binary>=2.9.9
+sqlalchemy==2.0.54
+psycopg2-binary>=2.9.9,<3.0.0
 
-# Utilities
+# Utilities (estables; con tope de versión mayor por seguridad)
 pytz>=2024.1
-schedule>=1.2.1
-loguru>=0.7.2
-rich>=13.7.0
+schedule>=1.2.1,<2.0.0
+loguru>=0.7.2,<1.0.0
+rich>=13.7.0,<15.0.0

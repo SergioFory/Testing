@@ -341,14 +341,21 @@ REVERSAL_PARAMS = {
 ASSET_PARAMS_OVERRIDE = {
     # Crypto: solo breakouts en mercado en tendencia (ADX > 20 = trending)
     # Elimina los fakeouts que dominaban el dataset (249/282 breakouts en BTC)
+    # atr_rank_min 0.50 (era 0.30): validación 2026-09 mostró que la franja
+    # ATR rank 0.30-0.50 destruye valor de forma coincidente en ambos activos
+    # (BTC E[R] -0.234 n=78 | ETH -0.374 n=57). Cortarla ~duplica la expectativa
+    # perdiendo solo ~20% de los setups. NO se aprieta el ADX: su patrón resultó
+    # no-monotónico (ruido) y combinarlo con volatilidad empeoraba BTC.
     "BTCUSDT": {
         "BREAKOUT": {
             "adx_min_trend": 20,
+            "atr_rank_min":  0.50,
         },
     },
     "ETHUSDT": {
         "BREAKOUT": {
             "adx_min_trend": 20,
+            "atr_rank_min":  0.50,
         },
     },
     "XAUUSD": {

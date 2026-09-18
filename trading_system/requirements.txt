@@ -15,19 +15,21 @@ ta>=0.11.0
 # Machine Learning
 lightgbm>=4.3.0
 scikit-learn>=1.4.0
-xgboost>=2.0.0
-shap>=0.44.0
 
-# Hidden Markov Models
-hmmlearn>=0.3.2
-
-# Backtest
-vectorbt>=0.26.2
+# Backtest: motor propio event-driven (backtest/engine.py) + validador de
+# expectativa (backtest/validate.py). No requiere librerías externas.
 
 # Dashboard
 streamlit>=1.35.0
 plotly>=5.20.0
-matplotlib>=3.8.0
+
+# Retiradas 2026-09 por no tener ningún uso en el código (0 imports):
+#   xgboost, shap  → el ML usa LightGBM
+#   hmmlearn       → el régimen se filtra con ADX/percentil de ATR
+#   vectorbt       → arrastra numba/llvmlite; el backtest es propio
+#   matplotlib     → los gráficos del dashboard son Plotly
+# Beneficio: builds más rápidos y despliegues más fiables (no reduce RAM en
+# ejecución: un paquete que nunca se importa no consume memoria).
 
 # Database
 sqlalchemy>=2.0.0

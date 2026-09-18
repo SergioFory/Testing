@@ -59,6 +59,14 @@ def detect_breakouts(df: pd.DataFrame,
     # --- ATR percentil (filtro: no operar en mercado dormido) ---
     df["atr_pct_rank"] = df["atr_pct"].rolling(100).rank(pct=True)
 
+    # --- Filtro de régimen de VOLATILIDAD ---
+    # Validación 2026-09 (validate --symbol): la franja ATR rank 0.30-0.50 tiene
+    # E[R] fuertemente negativo y coincidente en dos activos independientes:
+    # BTC -0.234 (n=78) y ETH -0.374 (n=57). Mecanismo: un breakout necesita
+    # expansión de volatilidad para prosperar; en mercado dormido es un fakeout.
+    # Configurable por activo con "atr_rank_min" (default 0.30 = comportamiento previo).
+    atr_rank_min = p.get("atr_rank_min", 0.30)
+
     # --- ADX (opcional: filtro de tendencia para evitar fakeouts en ranging) ---
     adx_min = p.get("adx_min_trend", 0)
     if adx_min > 0:
@@ -74,7 +82,7 @@ def detect_breakouts(df: pd.DataFrame,
         (df["close"] > df["dc_upper"]) &                # Breakout al alza
         (df["vol_ratio"] >= p["vol_factor"]) &           # Volumen confirmado
         (df["bar_size"]  >= p["atr_min_move"]) &         # Barra grande
-        (df["atr_pct_rank"] >= 0.30) &                   # ATR no en zona muerta
+        (df["atr_pct_rank"] >= atr_rank_min) &                   # ATR no en zona muerta
         adx_filter                                        # Mercado en tendencia
     )
 
@@ -83,7 +91,7 @@ def detect_breakouts(df: pd.DataFrame,
         (df["close"] < df["dc_lower"]) &
         (df["vol_ratio"] >= p["vol_factor"]) &
         (df["bar_size"]  >= p["atr_min_move"]) &
-        (df["atr_pct_rank"] >= 0.30) &
+        (df["atr_pct_rank"] >= atr_rank_min) &
         adx_filter
     )
 

@@ -52,16 +52,16 @@ def _send(text: str, parse_mode: str = "HTML", retries: int = 3) -> bool:
     return False
 
 
-def send_signal_alert(trade, sentiment: dict = None) -> bool:
+def format_signal_alert(trade, sentiment: dict = None) -> str:
     """
-    Envía alerta de señal de trading al canal de Telegram.
+    Texto HTML de la alerta de señal (sin enviarlo). Se separa del envío para
+    poder guardarlo en la BD (signals.alert_text) y reenviarlo idéntico si
+    Telegram falla (Fase 1, notificación fiable).
 
     Args:
         trade:     TradeSetup con toda la info de la operación
-        sentiment: dict con 'label', 'score', 'color', 'n_news' (opcional)
-
-    Returns:
-        True si el mensaje fue enviado con éxito.
+        sentiment: dict con 'label', 'score', 'color', 'n_news' (opcional; con
+                   SENTIMENT['enabled']=False el worker pasa None)
     """
     direction_icon = "🟢" if trade.direction == "long" else "🔴"
     direction_label = "LONG  ▲" if trade.direction == "long" else "SHORT ▼"
@@ -94,7 +94,102 @@ def send_signal_alert(trade, sentiment: dict = None) -> bool:
             f"<b>Noticias:</b>    {n_news} artículos recientes",
         ]
 
-    return _send("\n".join(lines))
+    return "\n".join(lines)
+
+
+def send_signal_alert(trade, sentiment: dict = None) -> bool:
+    """Envía la alerta de señal. True si Telegram confirmó el envío."""
+    return _send(format_signal_alert(trade, sentiment))
+
+
+RESEND_NOTE = "🔁 <i>Reenvío tras fallo de Telegram</i>"
+
+
+def send_text(text: str) -> bool:
+    """Envía un texto HTML ya formateado (p. ej. signals.alert_text)."""
+    return _send(text)
+
+
+def send_signal_resend(text: str) -> bool:
+    """Reenvía una alerta cuyo primer envío falló, con una nota al principio
+    para que el usuario sepa que es la misma señal y no una nueva."""
+    return _send(f"{RESEND_NOTE}\n\n{text}")
+
+
+# IDs de señales demasiado viejas para reenviar ya avisadas en el log (una vez
+# por proceso, para no repetir la misma línea cada hora).
+_stale_logged: set = set()
+
+
+def _fallback_alert_text(row: dict) -> str:
+    """Mensaje mínimo si la fila no guardó alert_text (no debería pasar)."""
+    d = str(row.get("direction") or "")
+    return (
+        f"{'🟢' if d == 'long' else '🔴'} <b>SEÑAL — {html.escape(str(row.get('symbol')))}</b>\n\n"
+        f"<b>Dirección:</b> {html.escape(d.upper())}\n"
+        f"<b>Setup:</b> {html.escape(str(row.get('setup_type') or ''))}\n"
+        f"<b>Entrada:</b> ${fmt_price(float(row['entry_price']))}\n"
+        f"<b>Stop Loss:</b> ${fmt_price(float(row['stop_loss']))}\n"
+        f"<b>Take Profit:</b> ${fmt_price(float(row['take_profit']))}"
+    )
+
+
+def retry_failed_signal_alerts(max_age_hours: float = None, now=None) -> dict:
+    """
+    Reintenta las señales live cuyo envío falló (signals.notified = 0).
+
+      - Menos de `max_age_hours` (NOTIFY_RETRY_MAX_AGE_HOURS, 2 h) desde que se
+        registró: se reenvía el MISMO texto con la nota "Reenvío tras fallo de
+        Telegram" y, si Telegram confirma, se marca notified = 1.
+      - Más antigua: se deja notified = 0 (queda constancia en la BD de que el
+        usuario nunca la recibió) y se registra en el log una vez por proceso.
+
+    Nunca lanza: cualquier error se registra y el ciclo sigue.
+    Devuelve {"resent": n, "failed": n, "stale": n}.
+    """
+    import pandas as pd
+    from config.settings import NOTIFY_RETRY_MAX_AGE_HOURS
+    out = {"resent": 0, "failed": 0, "stale": 0}
+    if max_age_hours is None:
+        max_age_hours = NOTIFY_RETRY_MAX_AGE_HOURS
+    try:
+        from data.database import load_unnotified_signals, mark_signal_notified
+        rows = load_unnotified_signals()
+    except Exception as exc:
+        logger.error(f"Reintento de notificaciones: no se pudieron leer las señales pendientes: {exc}")
+        return out
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    for row in rows:
+        try:
+            ts = row["ts"]
+            sig_ts = (pd.Timestamp(int(ts), unit="s", tz="UTC") if isinstance(ts, (int, float))
+                      else pd.Timestamp(ts))
+            if sig_ts.tzinfo is None:
+                sig_ts = sig_ts.tz_localize("UTC")
+            age_h = (now - sig_ts).total_seconds() / 3600
+            if age_h >= max_age_hours:
+                out["stale"] += 1
+                if row["id"] not in _stale_logged:
+                    _stale_logged.add(row["id"])
+                    logger.error(
+                        f"Señal #{row['id']} {row['symbol']} {str(row['direction']).upper()} NO se pudo "
+                        f"notificar y ya tiene {age_h:.1f} h (> {max_age_hours:g} h): no se reenvía; "
+                        "queda con notified=0 en la BD."
+                    )
+                continue
+            text = row.get("alert_text") or _fallback_alert_text(row)
+            if send_signal_resend(text):
+                mark_signal_notified(row["id"], True)
+                out["resent"] += 1
+                logger.info(f"Señal #{row['id']} {row['symbol']}: reenviada tras fallo de Telegram.")
+            else:
+                out["failed"] += 1
+                logger.warning(f"Señal #{row['id']} {row['symbol']}: el reenvío volvió a fallar; "
+                               "se reintentará en el próximo ciclo.")
+        except Exception as exc:
+            out["failed"] += 1
+            logger.error(f"Reintento de la señal #{row.get('id')}: {exc}")
+    return out
 
 
 def send_no_signal(symbol: str, reason: str = "") -> bool:
@@ -107,9 +202,11 @@ def send_no_signal(symbol: str, reason: str = "") -> bool:
 
 def send_error_alert(symbol: str, error: str) -> bool:
     """Alerta de error en el procesamiento de un símbolo."""
+    # Escapar: un mensaje de excepción con "<" o "&" (p. ej. "<Response [429]>")
+    # hacía que Telegram rechazara el HTML y la alerta de error se perdía.
     msg = (
-        f"⚠️ <b>Error en {symbol}</b>\n"
-        f"<code>{error[:400]}</code>"
+        f"⚠️ <b>Error en {html.escape(str(symbol))}</b>\n"
+        f"<code>{html.escape(str(error)[:400])}</code>"
     )
     return _send(msg)
 

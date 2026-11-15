@@ -59,7 +59,13 @@ def _bybit_exchange():
 def _gateio_exchange():
     if not HAS_CCXT:
         raise ImportError("pip install ccxt")
-    return ccxt.gate({"options": {"defaultType": "swap"}, "enableRateLimit": True})
+    # Fase 1: cargar SOLO los mercados de perpetuos (swap). Por defecto ccxt carga
+    # también spot, futuros y opciones (6.746 mercados) en cada instancia: medido
+    # en el sandbox, 17,6 s y ~70 MB de Python por carga, dos veces por activo y
+    # ciclo. Solo swap: 1.052 mercados, 3,4 s y ~30 MB. Las velas son las mismas.
+    return ccxt.gate({"options": {"defaultType": "swap",
+                                  "fetchMarkets": {"types": ["swap"]}},
+                      "enableRateLimit": True})
 
 
 def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int,

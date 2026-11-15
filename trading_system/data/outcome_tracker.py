@@ -118,7 +118,8 @@ def emitted_setup_keys(symbol: str, since_ts) -> set:
 
 def save_signal_from_trade(trade, sentiment: dict = None, setup_ts=None,
                            data_source: str = None, last_bar_ts=None,
-                           mode: str = None) -> int:
+                           mode: str = None, notified: bool = None,
+                           alert_text: str = None) -> int:
     """
     Persiste una señal generada (TradeSetup) en la tabla signals.
     Retorna el ID asignado, o -1 si falló o era duplicado.
@@ -130,6 +131,10 @@ def save_signal_from_trade(trade, sentiment: dict = None, setup_ts=None,
         mode:        'live' (se notifica) o 'shadow' (solo se registra). Si no
                      se indica, se deduce de la configuración del activo
                      (notify False → 'shadow'), también para el dashboard.
+        notified:    False si se va a enviar a Telegram justo después (Fase 1: se
+                     guarda ANTES de enviar y se marca True al confirmar el envío;
+                     si falla, el ciclo siguiente la reintenta). None = no aplica.
+        alert_text:  texto del mensaje, para poder reenviarlo idéntico.
     """
     if mode is None:
         from config.settings import notify_enabled
@@ -157,6 +162,8 @@ def save_signal_from_trade(trade, sentiment: dict = None, setup_ts=None,
             "data_source":     data_source,
             "last_bar_ts":     last_bar_ts,
             "mode":            mode,
+            "notified":        notified,
+            "alert_text":      alert_text,
         }
         signal_id = save_signal(signal_dict)
         logger.info(f"Señal guardada en DB | {trade.symbol} {trade.direction.upper()} "

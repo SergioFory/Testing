@@ -85,19 +85,58 @@ def _should_retrain(symbol: str) -> bool:
 # Helpers de datos
 # ---------------------------------------------------------------------------
 
-def _load_data(symbol: str, closed_only: bool = True):
+# Copia de las últimas velas cerradas pendiente de guardar en la tabla ohlcv
+# (Fase 1): la tabla es solo una copia —nada la lee para decidir— así que se
+# escribe al FINAL del ciclo, fuera de la ruta crítica, y solo ~50 velas por
+# activo y timeframe (antes ~11.000 filas por activo y hora, también en
+# validate y check-live).
+OHLCV_COPY_BARS = 50
+_ohlcv_pending: dict = {}    # (symbol, timeframe) -> DataFrame (últimas velas)
+
+
+def _queue_ohlcv_copy(symbol: str, timeframe: str, df) -> None:
+    if df is not None and not df.empty:
+        _ohlcv_pending[(symbol, timeframe)] = df.tail(OHLCV_COPY_BARS).copy()
+
+
+def _flush_ohlcv_copies() -> int:
+    """Guarda en la BD las velas encoladas por _load_data. Nunca lanza: un fallo
+    aquí no afecta a ninguna señal. Devuelve el número de filas nuevas."""
+    from data.database import save_ohlcv
+    total = 0
+    while _ohlcv_pending:
+        (symbol, tf), df = _ohlcv_pending.popitem()
+        try:
+            total += max(0, int(save_ohlcv(df, symbol, tf) or 0))
+        except Exception as exc:
+            logger.warning(f"[{symbol}] No se pudo guardar la copia OHLCV {tf} en la BD: {exc}")
+    return total
+
+
+def _load_data(symbol: str, closed_only: bool = True, history: str = "full"):
     """
     Descarga o carga datos OHLCV para el símbolo dado.
 
     Con closed_only=True (por defecto) se descarta la vela EN FORMACIÓN: el vivo
     debe ver lo mismo que el validador, que solo trabaja con velas cerradas
     (Fase 0, F03). La fuente usada queda en df_4h.attrs["source"].
-    """
-    from data.fetchers.binance_fetcher import fetch_multi_timeframe
-    from data.fetchers.gold_fetcher    import fetch_yfinance_asset, fetch_macro
-    from data.database                 import init_db, save_ohlcv, load_ohlcv
-    from data.bars                     import drop_unclosed_bars
 
+    history (Fase 1):
+      "full" → historia completa (validate, check-live, train, limpieza, update).
+      "live" → ciclo vivo (cmd_signal): en cripto solo LIVE_HISTORY_DAYS días de
+               Gate.io (300 de 4H y 900 de diario en vez de ~1.650 y 1.825). Se
+               demostró con el arnés que da setups, raw_score, ATR y aprobaciones
+               idénticos en los últimos 12 meses (ver settings). yfinance y
+               Twelve Data no cambian (una sola petición).
+    """
+    from data.fetchers.binance_fetcher import fetch_multi_timeframe, fetch_ohlcv
+    from data.fetchers.gold_fetcher    import fetch_yfinance_asset, fetch_macro
+    from data.database                 import init_db
+    from data.bars                     import drop_unclosed_bars
+    from config.settings               import LIVE_HISTORY_DAYS
+
+    if history not in ("full", "live"):
+        raise ValueError(f"history debe ser 'full' o 'live', no {history!r}")
     init_db()
 
     cfg    = ASSETS.get(symbol, {})
@@ -137,9 +176,15 @@ def _load_data(symbol: str, closed_only: bool = True):
         macro_df = fetch_macro(days=td_days) if need_macro else None
     else:
         crypto_days = cfg.get("days_history", DAYS_HISTORY)
-        data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
-        df_4h    = data.get("4h")
-        df_daily = data.get("1d")
+        if history == "live":
+            df_4h    = fetch_ohlcv(symbol, "4h", days=LIVE_HISTORY_DAYS["4h"])
+            df_daily = fetch_ohlcv(symbol, "1d", days=LIVE_HISTORY_DAYS["1d"])
+            df_4h    = None if df_4h is None or df_4h.empty else df_4h
+            df_daily = None if df_daily is None or df_daily.empty else df_daily
+        else:
+            data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
+            df_4h    = data.get("4h")
+            df_daily = data.get("1d")
         if closed_only:
             df_4h    = drop_unclosed_bars(df_4h, "4h")
             df_daily = drop_unclosed_bars(df_daily, "1d")
@@ -150,13 +195,12 @@ def _load_data(symbol: str, closed_only: bool = True):
         logger.error(f"No se pudieron obtener datos 4H para {symbol}")
         return None, None, None
 
-    try:
-        save_ohlcv(df_4h, symbol, "4h")
-        if df_daily is not None:
-            save_ohlcv(df_daily, symbol, "1d")
-    except Exception as exc:
-        # La tabla ohlcv no se usa para decidir: un fallo aquí no debe frenar la señal.
-        logger.warning(f"[{symbol}] No se pudo guardar OHLCV en la BD: {exc}")
+    # Copia en la BD: solo se encola aquí; se escribe al final del ciclo
+    # (_flush_ohlcv_copies). En yfinance df_4h es el mismo diario: no se guarda
+    # como "4h" (antes se duplicaba con una etiqueta falsa).
+    if source != "yfinance":
+        _queue_ohlcv_copy(symbol, "4h", df_4h)
+    _queue_ohlcv_copy(symbol, "1d", df_daily)
 
     return df_4h, df_daily, macro_df
 
@@ -199,8 +243,7 @@ def cmd_signal(symbol: str, notify: bool = False):
     from signals.detector          import detect_all_setups
     from ml.predictor              import score_setups, get_best_setup
     from risk.position_sizer       import build_trade_setup, PortfolioRiskManager
-    from sentiment.cryptopanic     import get_sentiment_summary
-    from notifications.telegram    import send_signal_alert
+    from notifications.telegram    import format_signal_alert, send_text
     from data.bars                 import last_bar_age_hours
     from config.settings           import (MAX_ENTRY_DIST_ATR, MAX_SETUP_AGE_BARS,
                                            MAX_DATA_STALENESS_HOURS, notify_enabled, fmt_price)
@@ -211,7 +254,7 @@ def cmd_signal(symbol: str, notify: bool = False):
     # Un activo en modo sombra no envía nada por Telegram, tampoco avisos de datos.
     notify_asset = notify and notify_enabled(symbol)
 
-    df_4h, df_daily, macro_df = _load_data(symbol)
+    df_4h, df_daily, macro_df = _load_data(symbol, history="live")
     if df_4h is None:
         _report_data_problem(symbol, "la fuente de precios no devolvió datos tras los reintentos.", notify_asset)
         return
@@ -307,24 +350,40 @@ def cmd_signal(symbol: str, notify: bool = False):
 
     mode = "live" if notify_enabled(symbol) else "shadow"
 
-    # Sentimiento
-    base_sym = symbol.replace("USDT", "")
-    sentiment = get_sentiment_summary(base_sym)
+    # Sentimiento: APAGADO (Fase 1, SENTIMENT['enabled']=False; el veto contrarian
+    # se descartó con datos). Solo se consulta si alguien lo reactiva.
+    from config.settings import SENTIMENT
+    sentiment = None
+    if SENTIMENT.get("enabled", False):
+        from sentiment.cryptopanic import get_sentiment_summary
+        sentiment = get_sentiment_summary(symbol.replace("USDT", ""))
 
     _print_signal(trade, sentiment)
 
-    # Persistir señal en la base de datos
+    # Notificación fiable (Fase 1): se guarda ANTES de enviar con notified=0 y el
+    # texto exacto; se marca notified=1 solo cuando Telegram confirma. Si el envío
+    # falla, el ciclo siguiente la reenvía (retry_failed_signal_alerts) mientras
+    # tenga menos de 2 h.
+    will_notify = bool(notify) and mode == "live"
+    alert_text = format_signal_alert(trade, sentiment) if will_notify else None
     signal_id = save_signal_from_trade(trade, sentiment, setup_ts=setup_ts,
                                        data_source=data_source, last_bar_ts=last_bar_ts,
-                                       mode=mode)
+                                       mode=mode,
+                                       notified=False if will_notify else None,
+                                       alert_text=alert_text)
 
     if mode == "shadow":
         logger.info(f"[{symbol}] Modo sombra: señal registrada (ID={signal_id}) sin notificar.")
         return
 
     # Solo notificar si es una señal nueva (no un duplicado ya registrado)
-    if notify and signal_id > 0:
-        send_signal_alert(trade, sentiment)
+    if will_notify and signal_id > 0:
+        from data.database import mark_signal_notified
+        if send_text(alert_text):
+            mark_signal_notified(signal_id, True)
+        else:
+            logger.error(f"[{symbol}] Señal #{signal_id} guardada pero Telegram falló; "
+                         "se reintentará en el próximo ciclo.")
 
 
 def cmd_backtest(symbol: str, start: str = None, end: str = None,
@@ -493,7 +552,8 @@ def cmd_update():
     for symbol, cfg in ASSETS.items():
         try:
             _load_data(symbol)
-            logger.info(f"{symbol}: datos actualizados.")
+            n = _flush_ohlcv_copies()
+            logger.info(f"{symbol}: datos actualizados ({n} velas nuevas en la copia OHLCV).")
         except Exception as e:
             logger.error(f"{symbol}: error al actualizar — {e}")
 
@@ -574,6 +634,12 @@ def cmd_auto_retrain(symbol: str, notify: bool = False) -> bool:
         return False
 
 
+def _nightly_retrain_symbols() -> list:
+    """Activos que la tarea nocturna reentrena: solo los operativos con
+    use_ml=True. Hoy ninguno (el ML no decide nada en ningún activo)."""
+    return [s for s in active_assets() if ASSETS.get(s, {}).get("use_ml", True)]
+
+
 def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
     """
     Modo daemon: genera señales en un intervalo fijo.
@@ -607,6 +673,12 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
         except Exception as exc:
             logger.warning(f"Outcome tracker error: {exc}")
 
+        # Reenviar señales cuyo envío a Telegram falló en un ciclo anterior
+        # (Fase 1, columna notified). Nunca lanza.
+        if notify:
+            from notifications.telegram import retry_failed_signal_alerts
+            retry_failed_signal_alerts()
+
         for symbol in active_assets():
             try:
                 cmd_signal(symbol, notify=notify)
@@ -617,14 +689,24 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
                 # entre cada uno evita que la RAM crezca de forma sostenida.
                 gc.collect()
 
+        # Copia de las últimas velas en la tabla ohlcv: al final, cuando todas
+        # las señales ya se enviaron (fuera de la ruta crítica).
+        _flush_ohlcv_copies()
+
     def _run_nightly():
-        """Actualiza datos y reentrena si es necesario (se ejecuta 1× al día)."""
+        """Reentrena si es necesario y envía el resumen (se ejecuta 1× al día).
+
+        Fase 1: los activos con use_ml=False (hoy TODOS) no se reentrenan ni se
+        descargan: el modelo no se usa para decidir y el reentreno solo gastaba
+        RAM/tiempo y enviaba alertas de "modelo actualizado" engañosas."""
         import gc
-        logger.info("Tarea nocturna: actualizando datos y verificando reentrenamiento...")
+        logger.info("Tarea nocturna: verificando reentrenamiento...")
         portfolio = None
-        for symbol in active_assets():
+        skipped = [s for s in active_assets() if s not in _nightly_retrain_symbols()]
+        if skipped:
+            logger.info(f"Sin reentreno nocturno (use_ml=False): {', '.join(skipped)}.")
+        for symbol in _nightly_retrain_symbols():
             try:
-                _load_data(symbol)
                 cmd_auto_retrain(symbol, notify=notify)
             except Exception as exc:
                 logger.error(f"Error en tarea nocturna para {symbol}: {exc}")
@@ -660,7 +742,7 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
 # Output formateado
 # ---------------------------------------------------------------------------
 
-def _print_signal(trade, sentiment: dict) -> None:
+def _print_signal(trade, sentiment: dict = None) -> None:
     from rich.console import Console
     from rich.table   import Table
     from rich.panel   import Panel
@@ -690,12 +772,13 @@ def _print_signal(trade, sentiment: dict) -> None:
     table.add_row("Riesgo ($)",   f"${trade.risk_usd:,.0f}")
     table.add_row("Potencial ($)",f"${trade.reward_usd:,.0f}")
 
-    sent_color = sentiment.get("color", "gray")
-    sent_label = sentiment.get("label", "NEUTRAL")
-    sent_score = sentiment.get("score", 0)
-    table.add_row("",             "")
-    table.add_row("Sentimiento",  f"[{sent_color}]{sent_label} ({sent_score:+.2f})[/{sent_color}]")
-    table.add_row("Noticias",     f"{sentiment.get('n_news', 0)} artículos recientes")
+    if sentiment:   # None con SENTIMENT['enabled']=False (Fase 1)
+        sent_color = sentiment.get("color", "gray")
+        sent_label = sentiment.get("label", "NEUTRAL")
+        sent_score = sentiment.get("score", 0)
+        table.add_row("",             "")
+        table.add_row("Sentimiento",  f"[{sent_color}]{sent_label} ({sent_score:+.2f})[/{sent_color}]")
+        table.add_row("Noticias",     f"{sentiment.get('n_news', 0)} artículos recientes")
 
     console.print(Panel(
         table,
@@ -793,6 +876,7 @@ def main():
 
     if args.command == "signal":
         cmd_signal(args.symbol, notify=args.notify)
+        _flush_ohlcv_copies()
 
     elif args.command == "backtest":
         cmd_backtest(args.symbol, args.start, args.end, args.capital)
@@ -822,9 +906,9 @@ def main():
             try:
                 cmd_auto_retrain(sym, notify=args.notify)
             finally:
-                # Liberar memoria entre activos: este 'retrain --all' corre en
-                # cada arranque del Worker (ver render.yaml). Con la
-                # especialización son ~4 modelos, no 8 → mucho menos riesgo de OOM.
+                # Liberar memoria entre activos. Desde la Fase 1 'retrain --all'
+                # ya NO corre en el arranque del Worker (ver render.yaml): solo
+                # a mano. Con la especialización son ~4 modelos, no 8.
                 gc.collect()
 
     elif args.command == "update":

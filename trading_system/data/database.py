@@ -175,6 +175,12 @@ _DDL = [
 #   resolved_ts  hora (Unix) de la vela en que se resolvió.
 #   quality_flag marca de calidad para excluir de estadísticas (p. ej. re-emisiones
 #                antiguas detectadas por la limpieza de la Fase 0).
+# Fase 1 (2026-11): notificación fiable.
+#   notified     1 = enviada a Telegram; 0 = el envío falló (se reintenta en los
+#                ciclos siguientes mientras tenga < 2 h); NULL = no aplica (modo
+#                sombra, registrada desde el dashboard o filas anteriores).
+#                INTEGER (no BOOLEAN) para que funcione igual en SQLite y PostgreSQL.
+#   alert_text   texto HTML exacto del mensaje, para reenviarlo idéntico si falla.
 # ---------------------------------------------------------------------------
 _SIGNAL_COLUMNS = [
     ("setup_ts",     "BIGINT"),
@@ -185,6 +191,8 @@ _SIGNAL_COLUMNS = [
     ("pnl_r",        "DOUBLE PRECISION"),
     ("resolved_ts",  "BIGINT"),
     ("quality_flag", "TEXT"),
+    ("notified",     "INTEGER"),
+    ("alert_text",   "TEXT"),
 ]
 _SIGNAL_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_signals_setup ON signals(symbol, direction, setup_ts)",
@@ -331,10 +339,10 @@ def save_signal(signal: dict) -> int:
     init_db()
     cols = ("symbol, ts, setup_type, direction, ml_score, sentiment_score, "
             "entry_price, stop_loss, take_profit, position_size, atr, "
-            "setup_ts, data_source, last_bar_ts, mode")
+            "setup_ts, data_source, last_bar_ts, mode, notified, alert_text")
     vals = (":symbol, :ts, :setup_type, :direction, :ml_score, :sentiment_score, "
             ":entry_price, :stop_loss, :take_profit, :position_size, :atr, "
-            ":setup_ts, :data_source, :last_bar_ts, :mode")
+            ":setup_ts, :data_source, :last_bar_ts, :mode, :notified, :alert_text")
     if dialect == "sqlite":
         sql = text(f"INSERT INTO signals ({cols}) VALUES ({vals})")
         with engine.begin() as conn:
@@ -367,7 +375,10 @@ def _to_unix(value):
 
 
 def _signal_params(signal: dict) -> dict:
+    notified = signal.get("notified")
     return {
+        "notified":        None if notified is None else int(bool(notified)),
+        "alert_text":      signal.get("alert_text"),
         "setup_ts":        _to_unix(signal.get("setup_ts")),
         "data_source":     signal.get("data_source"),
         "last_bar_ts":     _to_unix(signal.get("last_bar_ts")),
@@ -384,6 +395,33 @@ def _signal_params(signal: dict) -> dict:
         "position_size":   signal["position_size"],
         "atr":             signal["atr"],
     }
+
+
+def mark_signal_notified(signal_id: int, notified: bool = True) -> bool:
+    """Marca una señal como enviada (1) o no enviada (0) a Telegram.
+    Devuelve False si la escritura falla (se registra en el log, no lanza)."""
+    try:
+        with get_engine().begin() as conn:
+            conn.execute(text("UPDATE signals SET notified=:n WHERE id=:id"),
+                         {"n": int(bool(notified)), "id": int(signal_id)})
+        return True
+    except Exception as exc:
+        logger.error(f"No se pudo marcar notified={int(bool(notified))} en la señal #{signal_id}: {exc}")
+        return False
+
+
+def load_unnotified_signals() -> list[dict]:
+    """Señales live cuyo envío a Telegram falló (notified = 0), de la más antigua
+    a la más reciente. Las filas con notified NULL (sombra, dashboard, filas
+    anteriores a la Fase 1) no se tocan."""
+    init_db()
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, symbol, ts, direction, setup_type, entry_price, stop_loss, "
+            "take_profit, ml_score, alert_text FROM signals "
+            "WHERE notified = 0 AND (mode IS NULL OR mode = 'live') ORDER BY ts ASC"
+        )).mappings().fetchall()
+    return [dict(r) for r in rows]
 
 
 def load_signals(symbol: str = None, limit: int = 100) -> pd.DataFrame:

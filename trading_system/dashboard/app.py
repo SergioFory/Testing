@@ -15,7 +15,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timezone
 from loguru import logger
 
-from config.settings import ASSETS, RISK, ML_PARAMS, SENTIMENT as SENT_CFG, DAYS_HISTORY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, fmt_price
+from config.settings import ASSETS, RISK, ML_PARAMS, DAYS_HISTORY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, fmt_price
 from data.database        import init_db, load_signals
 from data.outcome_tracker import save_signal_from_trade, resolve_open_signals, get_outcome_stats
 from notifications.telegram import send_signal_alert, test_connection as tg_test
@@ -27,9 +27,10 @@ from ml.predictor     import score_setups, get_best_setup
 from data.bars        import drop_unclosed_bars
 from config.settings  import notify_enabled, MAX_SETUP_AGE_BARS, MAX_ENTRY_DIST_ATR
 from risk.position_sizer import build_trade_setup, PortfolioRiskManager
-from backtest.engine  import run_backtest
-from backtest.metrics import format_metrics_table
-from sentiment.cryptopanic import get_sentiment_summary, should_veto_signal
+# Fase 1: sin pestaña de backtest (backtest/engine.py da 0 operaciones en los
+# diarios y no es el protocolo validado: usar `main.py validate`) y sin
+# sentimiento (SENTIMENT['enabled']=False; el veto contrarian se descartó con
+# datos: en BTC quitaría las mejores señales).
 
 # =============================================================================
 # CONFIGURACIÓN
@@ -89,12 +90,6 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.subheader("Opciones")
-    use_sentiment   = st.checkbox("Filtro de sentimiento", value=True)
-    run_backtest_cb = st.checkbox("Ejecutar backtest", value=False)
-    backtest_days   = st.slider("Días de backtest", 90, 730, 365) if run_backtest_cb else 365
-
-    st.markdown("---")
     _tg_ready = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
     tg_notify = st.checkbox(
         "📲 Notificar por Telegram",
@@ -119,9 +114,8 @@ with st.sidebar:
 # =============================================================================
 # TABS PRINCIPALES
 # =============================================================================
-tab_signal, tab_backtest, tab_model, tab_history = st.tabs([
+tab_signal, tab_model, tab_history = st.tabs([
     "📡 Señal Actual",
-    "📊 Backtest",
     "🧠 Modelo ML",
     "📜 Historial",
 ])
@@ -143,7 +137,7 @@ with tab_signal:
         _trade     = None
         _df4h      = pd.DataFrame()
         _dfsetups  = pd.DataFrame()
-        _sent      = {"score": 0.0, "label": "N/A", "color": "gray", "n_news": 0}
+        _sent      = None   # sentimiento apagado (Fase 1)
         _lookback  = 72 if asset_cfg["source"] != "binance" else 12
 
         with st.spinner("Descargando datos..."):
@@ -198,10 +192,6 @@ with tab_signal:
                 if not _dfsetups.empty:
                     _dfsetups = score_setups(_dfsetups, _df4h, symbol, macro_df, funding)
 
-            if use_sentiment and asset_cfg["source"] == "binance":
-                with st.spinner("Analizando sentimiento..."):
-                    _sent = get_sentiment_summary(asset_cfg["label"])
-
             # Fase 0: misma selección que el worker (main.cmd_signal): ventana
             # anclada a la última vela cerrada, frescura y sin setups ya emitidos.
             best = None
@@ -224,15 +214,7 @@ with tab_signal:
                              "last_bar_ts": _df4h.index[-1]}
 
             if best is not None:
-                _trade = build_trade_setup(
-                    best, capital, float(best["ml_score"]),
-                    sentiment_score=_sent["score"]
-                )
-                if _trade and use_sentiment and asset_cfg["source"] == "binance":
-                    vetoed, veto_reason = should_veto_signal(_trade.direction, _sent["score"])
-                    if vetoed:
-                        st.warning(f"⚠️ Señal vetada por sentimiento: {veto_reason}")
-                        _trade = None
+                _trade = build_trade_setup(best, capital, float(best["ml_score"]))
 
         # Persistir en session_state para que los botones secundarios no borren la señal
         st.session_state["_sig_trade"]    = _trade
@@ -246,7 +228,7 @@ with tab_signal:
     # DISPLAY — siempre lee de session_state (persiste cuando se pulsan botones)
     # =========================================================================
     _trade    = st.session_state.get("_sig_trade")
-    _sent     = st.session_state.get("_sig_sentiment", {"score": 0.0, "label": "N/A", "color": "gray", "n_news": 0})
+    _sent     = st.session_state.get("_sig_sentiment")
     _df4h     = st.session_state.get("_sig_df4h",    pd.DataFrame())
     _dfsetups = st.session_state.get("_sig_dfsetups", pd.DataFrame())
     _lookback = st.session_state.get("_sig_lookback", 12)
@@ -349,31 +331,6 @@ with tab_signal:
                 f"**Target:** {RISK['atr_target_mult']}× ATR"
             )
 
-            if use_sentiment:
-                st.subheader("Sentimiento")
-                fg_val  = _sent.get("fg_value", 0)
-                fg_cls  = _sent.get("fg_classification", "N/A")
-                score   = _sent["score"]
-                label   = _sent["label"]
-                trend7  = _sent.get("trend_7d", 0.0)
-
-                color_icon = {
-                    "green":  "🟢", "red": "🔴",
-                    "gray":   "⚪", "orange": "🟡",
-                }.get(_sent["color"], "⚪")
-
-                if fg_val > 0:
-                    st.markdown(f"{color_icon} **{label}** — Fear & Greed: **{fg_val}/100**")
-                    st.progress(fg_val / 100)
-                    delta_str = f"{trend7:+.0f} pts vs hace 7 días" if trend7 != 0 else "sin cambio en 7 días"
-                    st.caption(
-                        f"Clasificación: *{fg_cls}* | "
-                        f"Score contrarian: {score:+.2f} | {delta_str}"
-                    )
-                else:
-                    st.markdown(f"{color_icon} **{label}** (N/A para este activo)")
-                    st.caption("El Fear & Greed Index es específico de crypto.")
-
         st.markdown("---")
         if not _df4h.empty and len(_df4h) > 50:
             st.subheader(f"📈 {asset_cfg['label']} — Últimas 120 barras 4H")
@@ -464,91 +421,7 @@ with tab_signal:
 
 
 # =============================================================================
-# TAB 2: BACKTEST
-# =============================================================================
-with tab_backtest:
-    st.header("Backtest del Sistema")
-
-    if not run_backtest_cb:
-        st.info("Activa **Ejecutar backtest** en el sidebar para ver los resultados.")
-    else:
-        st.caption(
-            "Simula el sistema completo sobre datos históricos. "
-            "No hay look-ahead bias: el modelo se entrena solo con datos pasados."
-        )
-
-        if st.button("▶️ Ejecutar Backtest", type="primary"):
-            with st.spinner("Ejecutando backtest (puede tardar 2-5 minutos)..."):
-                bt_data = fetch_multi_timeframe(
-                    symbol, ["4h", "1d"],
-                    days=backtest_days + 30
-                ) if asset_cfg["source"] == "binance" else None
-
-                if bt_data:
-                    df_4h_bt  = bt_data.get("4h", pd.DataFrame())
-                    df_1d_bt  = bt_data.get("1d", pd.DataFrame())
-                else:
-                    df_1d_bt  = fetch_yfinance_asset(symbol, days=backtest_days + 30)
-                    df_4h_bt  = df_1d_bt.copy() if not df_1d_bt.empty else pd.DataFrame()
-
-                bt_macro = fetch_macro(days=backtest_days + 30)
-
-                results = run_backtest(
-                    df_4h=df_4h_bt,
-                    df_daily=df_1d_bt,
-                    symbol=symbol,
-                    macro_df=bt_macro,
-                    initial_capital=capital,
-                )
-
-            if not results:
-                st.error("El backtest no produjo resultados.")
-            else:
-                st.success("Backtest completado.")
-                # Métricas en tabla
-                st.subheader("Métricas de Performance")
-                metrics_table = format_metrics_table(results)
-                st.dataframe(metrics_table, use_container_width=True, hide_index=True)
-
-                # Equity curve
-                eq = results.get("equity_curve")
-                if eq is not None and len(eq) > 1:
-                    st.subheader("Equity Curve")
-                    fig_eq = px.line(
-                        x=eq.index, y=eq.values,
-                        labels={"x": "Fecha", "y": "Capital (USD)"},
-                        template="plotly_dark",
-                    )
-                    fig_eq.add_hline(y=capital, line_dash="dash", line_color="gray",
-                                      annotation_text="Capital inicial")
-                    st.plotly_chart(fig_eq, width="stretch")
-
-                # Trades
-                trades_df = results.get("trades_df")
-                if trades_df is not None and not trades_df.empty:
-                    st.subheader(f"Operaciones ({len(trades_df)})")
-                    cols = [c for c in ["entry_ts","direction","setup_type",
-                                         "entry_price","exit_price","pnl_usd",
-                                         "pnl_pct","outcome","rr_ratio","ml_score"]
-                            if c in trades_df.columns]
-                    st.dataframe(
-                        trades_df[cols].sort_values("entry_ts", ascending=False)
-                        .head(100),
-                        use_container_width=True,
-                    )
-
-                # Por setup type
-                by_type = results.get("by_setup_type", {})
-                if by_type:
-                    st.subheader("Rendimiento por tipo de setup")
-                    bt_df = pd.DataFrame(by_type).T.reset_index()
-                    bt_df.columns = ["Setup", "Trades", "Win Rate", "PnL (USD)"]
-                    bt_df["Win Rate"] = bt_df["Win Rate"].apply(lambda x: f"{x*100:.1f}%")
-                    st.dataframe(bt_df, use_container_width=True, hide_index=True)
-
-
-# =============================================================================
-# TAB 3: MODELO ML
+# TAB 2: MODELO ML
 # =============================================================================
 with tab_model:
     st.header("Análisis del Modelo ML")
@@ -599,7 +472,7 @@ with tab_model:
 
 
 # =============================================================================
-# TAB 4: HISTORIAL
+# TAB 3: HISTORIAL
 # =============================================================================
 with tab_history:
     st.header("Historial de Señales")

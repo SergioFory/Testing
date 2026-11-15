@@ -8,7 +8,10 @@ El plan gratuito de CryptoPanic fue discontinuado el 1 de abril de 2026.
 
 API pública mantenida:
   get_sentiment_summary(symbol)  →  dict con score, label, color, fg_value …
-  should_veto_signal(direction, score) → (bool, reason)
+  should_veto_signal(direction, score) → (bool, reason)   [DESCARTADO, sin conectar]
+
+Fase 1 (2026-11): SENTIMENT['enabled']=False — el sentimiento no filtra ni
+puntúa señales (ver config/settings.py, sección SENTIMENT).
 """
 from loguru import logger
 from config.settings import SENTIMENT
@@ -50,6 +53,11 @@ def get_sentiment_summary(symbol: str) -> dict:
 def should_veto_signal(direction: str, sentiment_score: float) -> tuple:
     """
     Decide si el sentimiento veta la señal.
+
+    DESCARTADO (Fase 1, 2026-11) — NO se usa en el worker ni en el dashboard y
+    no debe conectarse: en BTC vetaría las mejores señales (+0,751R las vetadas
+    frente a +0,332R las conservadas; fuera de muestra las vetadas ganaron
+    +1,4 a +1,9R). Se conserva solo como referencia. Ver SENTIMENT en settings.
 
     Lógica contrarian:
       - LONG vetado cuando score < veto_threshold (mercado en euforia extrema)

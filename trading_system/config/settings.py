@@ -329,6 +329,31 @@ DAILY_BAR_CLOSE_UTC = (22, 15)
 # Diarios: 5 días naturales (fines de semana y festivos largos).
 MAX_DATA_STALENESS_HOURS = {"4h": 12, "1d_session": 24 * 5}
 
+# =============================================================================
+# HISTORIA DESCARGADA EN EL CICLO VIVO (Fase 1, 2026-11)
+# -----------------------------------------------------------------------------
+# main._load_data(history="live") pide a Gate.io solo estos días (cripto) en vez
+# de la historia completa (~1.650 días de 4H = 10 páginas + 1.825 de diario por
+# activo y hora). Los indicadores (ATR/ADX/RSI de Wilder, EMAs, ventanas móviles
+# de hasta 100 velas) olvidan el pasado lejano: se comprobó con el arnés (snapshot
+# 2026-11-15) que, para CADA uno de los 2.190 ciclos vivos de los últimos 12
+# meses, los setups de las velas que mira el vivo (breakouts y pullbacks), su
+# raw_score, su ATR y su aprobación son IDÉNTICOS (diferencia exactamente 0) con
+# 300 días de 4H y 900 de diario que con la historia completa: BTC 66 setups (13
+# aprobados), ETH 60 (8 aprobados), 0 discrepancias; tendencia diaria igual en
+# 1.101 de 1.101 comparaciones por activo. Margen (BTC, muestreo): con 120 días
+# de 4H ya es idéntico, con 60 hay diferencias de ~1e-12 y con 30 de ~1e-6; con
+# 120 días de diario la tendencia cambia en 61 de 1.101 comparaciones y con 200
+# en ninguna.
+# validate, check-live, train y la limpieza siguen con la historia
+# completa (history="full"). yfinance (oro, SPX) no cambia: es una sola petición.
+LIVE_HISTORY_DAYS = {"4h": 300, "1d": 900}
+
+# Señales live cuyo envío a Telegram falló (notified = 0): se reintentan en cada
+# ciclo mientras tengan menos de estas horas; las más antiguas se quedan sin
+# notificar y solo se registran en el log (una señal vieja ya no es ejecutable).
+NOTIFY_RETRY_MAX_AGE_HOURS = 2.0
+
 
 # =============================================================================
 # FORMATO DE PRECIOS
@@ -568,13 +593,23 @@ EVENT_FILTER = {
 
 # =============================================================================
 # SENTIMENT
+# -----------------------------------------------------------------------------
+# APAGADO (Fase 1, 2026-11). El sentimiento NO filtra ni puntúa señales:
+#   - Veto contrarian con Fear & Greed (should_veto_signal): DESCARTADO con datos.
+#     En BTC las señales que vetaría rendían +0,751R frente a +0,332R de las que
+#     conservaría (quitaría las mejores) y, fuera de muestra, las vetadas fueron
+#     ganadoras (+1,4 a +1,9R). No se conecta en ningún sitio.
+#   - Sentimiento de titulares: signo opuesto en BTC y ETH (229.000 titulares).
+# Con enabled=False el worker no consulta Fear & Greed, no se guarda
+# sentiment_score y el dashboard no muestra etiqueta "contrarian" ni veto.
+# No reabrir sin evidencia nueva fuera de muestra y neta de costes.
 # =============================================================================
 SENTIMENT = {
-    "min_news_score":   0.0,        # Score mínimo para no vetar una señal
-    "veto_threshold":  -0.4,        # Si sentiment < -0.4 → no operar LONG
-    "boost_threshold":  0.4,        # Si sentiment > 0.4 → boost de confianza
-    "lookback_hours":   24,         # Horas de noticias a considerar
-    "enabled":          True,
+    "min_news_score":   0.0,        # (sin uso) Score mínimo para no vetar una señal
+    "veto_threshold":  -0.4,        # (sin uso) veto descartado, ver arriba
+    "boost_threshold":  0.4,        # (sin uso)
+    "lookback_hours":   24,         # (sin uso)
+    "enabled":          False,
 }
 
 # =============================================================================

@@ -1,11 +1,19 @@
 """
 Descarga datos de mercado: OHLCV, funding rates.
 
-Jerarquía de fuentes (se prueban en orden hasta obtener datos):
-  1. Binance Futures (ccxt)  — bloquea IPs de EE.UU. (HTTP 451)
-  2. Bybit (ccxt)            — CloudFront bloquea IPs AWS US (HTTP 403)
-  3. Gate.io (ccxt)          — futuros perpetuos, sin restricción geográfica conocida
-  4. yfinance                — precios spot (BTC-USD/ETH-USD), último recurso
+OHLCV (Fase 0, 2026-11): ÚNICA fuente = Gate.io perpetuos (ccxt).
+  - Es la fuente con la que se validó el sistema y la única que responde desde
+    Render (Binance y Bybit bloquean la región).
+  - Antes había una cadena Binance → Bybit → Gate.io → yfinance spot. Si fallaba
+    una sola página de Gate.io se descartaba la serie y se caía EN SILENCIO a
+    yfinance spot (2 años, otro volumen), lo que añadía entre un 27 y un 63 % de
+    setups no validados. Ahora cada página se reintenta con espera y, si Gate.io
+    sigue fallando, se devuelve un DataFrame vacío: el ciclo se salta y main.py
+    avisa por Telegram.
+  - La fuente usada queda en df.attrs["source"].
+
+Funding rates: se mantiene la cadena Binance → Bybit → Gate.io (solo se usa en
+el entrenamiento ML, que está apagado).
 """
 import time
 from datetime import datetime, timezone, timedelta
@@ -27,10 +35,6 @@ _BYBIT_SYMBOL = {
 _GATEIO_SYMBOL = {
     "BTCUSDT": "BTC/USDT:USDT",
     "ETHUSDT": "ETH/USDT:USDT",
-}
-_YFINANCE_SYMBOL = {
-    "BTCUSDT": "BTC-USD",
-    "ETHUSDT": "ETH-USD",
 }
 
 
@@ -58,8 +62,15 @@ def _gateio_exchange():
     return ccxt.gate({"options": {"defaultType": "swap"}, "enableRateLimit": True})
 
 
-def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int) -> pd.DataFrame:
-    """Descarga OHLCV de cualquier exchange ccxt."""
+def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int,
+                      page_retries: int = 3) -> pd.DataFrame:
+    """
+    Descarga OHLCV paginado de un exchange ccxt.
+
+    Cada página se reintenta hasta `page_retries` veces con espera exponencial
+    (2 s, 4 s, ...). Si una página sigue fallando se devuelve un DataFrame vacío:
+    una serie con huecos es peor que saltarse el ciclo.
+    """
     since_ms = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     all_candles = []
@@ -67,11 +78,20 @@ def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int) -> pd.Da
     prev_last_ts = None
 
     while True:
-        try:
-            candles = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
-        except Exception as e:
-            logger.error(f"Error descargando {symbol} de {exchange.id}: {e}")
-            time.sleep(2)
+        candles = None
+        for attempt in range(1, page_retries + 1):
+            try:
+                candles = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
+                break
+            except Exception as e:
+                logger.warning(
+                    f"Error descargando {symbol} {timeframe} de {exchange.id} "
+                    f"(página desde {since_ms}, intento {attempt}/{page_retries}): {e}"
+                )
+                if attempt < page_retries:
+                    time.sleep(2 ** attempt)
+        if candles is None:
+            logger.error(f"{exchange.id}: {symbol} {timeframe} sin datos tras {page_retries} intentos.")
             return pd.DataFrame()
 
         if not candles:
@@ -100,103 +120,44 @@ def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int) -> pd.Da
     return df
 
 
-def _fetch_ohlcv_yfinance(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
-    """Fallback final: precios spot via yfinance (BTC-USD / ETH-USD)."""
-    try:
-        import yfinance as yf
-    except ImportError:
-        return pd.DataFrame()
-
-    ticker = _YFINANCE_SYMBOL.get(symbol)
-    if not ticker:
-        return pd.DataFrame()
-
-    # yfinance 1h solo va 730 días atrás; 1d va a max
-    yf_interval = "1h" if timeframe in ("1h", "4h") else "1d"
-    period = f"{min(days, 729)}d" if yf_interval == "1h" else "max"
-
-    try:
-        raw = yf.download(ticker, period=period, interval=yf_interval,
-                          progress=False, auto_adjust=True)
-        if raw is None or raw.empty:
-            return pd.DataFrame()
-
-        df = raw.copy()
-        df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower()
-                      for c in df.columns]
-        df.index = pd.to_datetime(df.index, utc=True)
-        df = df[["open", "high", "low", "close", "volume"]].astype(float)
-
-        if timeframe == "4h" and yf_interval == "1h":
-            df = df.resample("4h").agg({
-                "open": "first", "high": "max", "low": "min",
-                "close": "last", "volume": "sum",
-            }).dropna()
-
-        return df
-    except Exception as e:
-        logger.error(f"yfinance falló para {symbol}: {e}")
-        return pd.DataFrame()
+# Gate.io sirve como máximo ~10.000 velas por serie: limitar los días pedidos.
+_GATEIO_MAX_DAYS = {"1h": 400, "4h": 1650, "1d": 9000}
 
 
 def fetch_ohlcv(symbol: str, timeframe: str = "4h", days: int = 730) -> pd.DataFrame:
     """
-    Descarga OHLCV con fallback automático:
-      Binance → Bybit → Gate.io → yfinance
+    Descarga OHLCV de Gate.io perpetuos (única fuente; ver docstring del módulo).
+
+    Returns:
+        DataFrame OHLCV (índice = hora de APERTURA de la vela, UTC) con
+        df.attrs["source"] = "gateio", o DataFrame vacío si Gate.io falla.
+        Incluye la vela en formación: quien detecte setups debe descartarla
+        con data.bars.drop_unclosed_bars.
     """
     if not HAS_CCXT:
         return pd.DataFrame()
 
-    logger.info(f"Descargando {symbol} {timeframe} ({days} días)...")
-
-    # 1. Binance (sin API keys — OHLCV es público; keys activan endpoints privados que dan 451)
-    try:
-        df = _fetch_ohlcv_from(_binance_exchange(private=False), symbol, timeframe, days)
-        if not df.empty:
-            logger.success(f"{symbol} {timeframe} vía Binance: {len(df)} barras | "
-                           f"{df.index[0].date()} → {df.index[-1].date()}")
-            return df
-    except Exception as e:
-        logger.warning(f"Binance no disponible para {symbol}: {e}")
-
-    # 2. Bybit
-    bybit_sym = _BYBIT_SYMBOL.get(symbol)
-    if bybit_sym:
-        logger.info(f"Intentando Bybit para {symbol}...")
-        try:
-            df = _fetch_ohlcv_from(_bybit_exchange(), bybit_sym, timeframe, days)
-            if not df.empty:
-                logger.success(f"{symbol} {timeframe} vía Bybit: {len(df)} barras | "
-                               f"{df.index[0].date()} → {df.index[-1].date()}")
-                return df
-        except Exception as e:
-            logger.warning(f"Bybit no disponible para {symbol}: {e}")
-
-    # 3. Gate.io (máx 10000 puntos; limitar days según timeframe)
     gateio_sym = _GATEIO_SYMBOL.get(symbol)
-    if gateio_sym:
-        _gateio_max = {"1h": 400, "4h": 1650, "1d": 9000}
-        gateio_days = min(days, _gateio_max.get(timeframe, 1000))
-        logger.info(f"Intentando Gate.io para {symbol}...")
-        try:
-            df = _fetch_ohlcv_from(_gateio_exchange(), gateio_sym, timeframe, gateio_days)
-            if not df.empty:
-                logger.success(f"{symbol} {timeframe} vía Gate.io: {len(df)} barras | "
-                               f"{df.index[0].date()} → {df.index[-1].date()}")
-                return df
-        except Exception as e:
-            logger.warning(f"Gate.io no disponible para {symbol}: {e}")
+    if not gateio_sym:
+        logger.error(f"{symbol} no tiene símbolo de Gate.io configurado.")
+        return pd.DataFrame()
 
-    # 4. yfinance (precios spot, último recurso)
-    logger.info(f"Intentando yfinance (spot) para {symbol}...")
-    df = _fetch_ohlcv_yfinance(symbol, timeframe, days)
-    if not df.empty:
-        logger.success(f"{symbol} {timeframe} vía yfinance: {len(df)} barras | "
-                       f"{df.index[0].date()} → {df.index[-1].date()}")
-        return df
+    gateio_days = min(days, _GATEIO_MAX_DAYS.get(timeframe, 1000))
+    logger.info(f"Descargando {symbol} {timeframe} de Gate.io ({gateio_days} días)...")
+    try:
+        df = _fetch_ohlcv_from(_gateio_exchange(), gateio_sym, timeframe, gateio_days)
+    except Exception as e:
+        logger.error(f"Gate.io no disponible para {symbol}: {e}")
+        return pd.DataFrame()
 
-    logger.warning(f"Sin datos para {symbol} {timeframe} (todas las fuentes fallaron)")
-    return pd.DataFrame()
+    if df.empty:
+        logger.error(f"Sin datos de Gate.io para {symbol} {timeframe}.")
+        return pd.DataFrame()
+
+    df.attrs["source"] = "gateio"
+    logger.success(f"{symbol} {timeframe} vía Gate.io: {len(df)} barras | "
+                   f"{df.index[0].date()} → {df.index[-1].date()}")
+    return df
 
 
 def fetch_funding_rates(symbol: str, days: int = 365) -> pd.Series:

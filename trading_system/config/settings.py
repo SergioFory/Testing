@@ -117,7 +117,9 @@ ASSETS = {
         "use_ml":       False,
         "source":       "yfinance",
         "yf_ticker":    "GC=F",
-        "yf_fallback":  ("GLD", 10.0),  # GLD cotiza ~1/10 del oro → x10
+        # Sin yf_fallback (Fase 0, 2026-11): el respaldo GLD×10 cotiza ~8.6 % por
+        # debajo de GC=F y se activaba EN SILENCIO ante un 429 de Yahoo. Ahora, si
+        # GC=F falla tras los reintentos, el ciclo se salta y se avisa por Telegram.
         "yf_min_price": 500,
         "min_range_pct": 0.008,
         "pip_value":    1.0,
@@ -174,12 +176,18 @@ ASSETS = {
         #   LONG sin pullback (breakout+reversal): +0.246 (N=107) ✓✓ ← elegido
         #   (los pullback largos pierden -0.071; el filtro MA200 bajó el edge)
         "enabled":      True,
+        # MODO SOMBRA (Fase 0, 2026-11): se detecta, se registra en la BD con
+        # mode='shadow' y se resuelve, pero NO se notifica por Telegram. Motivo:
+        # sin edge demostrable con costes de XM (swap) y walk-forward ≈ 0. Volver a
+        # notificar solo si el E[R] neto con el swap real de XM llega a +0.10R en
+        # al menos 2 de 3 épocas y pasa la puerta de validación.
+        "notify":       False,
         "directions":   ["long"],              # solo compras: el índice sube estructuralmente
         "setups":       ["breakout", "reversal"],  # sin pullback (E[R] negativo)
         "use_ml":       False,                 # se usó raw_score en la validación; muestra pequeña
         "source":       "yfinance",
         "yf_ticker":    "^GSPC",
-        "yf_fallback":  ("SPY", 10.0),
+        # Sin yf_fallback (Fase 0): ver nota en XAUUSD.
         "yf_min_price": 1000,
         "min_range_pct": 0.005,
         "pip_value":    1.0,
@@ -256,6 +264,13 @@ ASSETS = {
 }
 
 
+def notify_enabled(symbol: str) -> bool:
+    """True si las señales del activo se notifican por Telegram (modo 'live').
+    Con "notify": False el activo opera en MODO SOMBRA: se registra y se mide,
+    pero no se envía."""
+    return bool(ASSETS.get(symbol, {}).get("notify", True))
+
+
 def active_assets() -> list:
     """Símbolos operativos (enabled != False). Los apagados se omiten en
     generación de señales y reentreno, reduciendo carga de RAM."""
@@ -291,6 +306,28 @@ DAYS_HISTORY      = 730     # 2 años de historia para backtest
 # los candidatos que no estuvieran en la barra más reciente).
 # =============================================================================
 MAX_ENTRY_DIST_ATR = 1.0
+
+
+# =============================================================================
+# VENTANA DE EMISIÓN (Fase 0, 2026-11)
+# -----------------------------------------------------------------------------
+# Solo se emiten setups de las últimas velas CERRADAS: la del setup debe ser la
+# última vela cerrada o, como máximo, MAX_SETUP_AGE_BARS velas anteriores (para
+# no perder un setup si un ciclo falla). Antes la ventana se contaba desde el
+# último setup del histórico, no desde ahora, y un setup de hace semanas seguía
+# "vigente" indefinidamente (re-emisiones). El validador opera cada setup UNA
+# vez, en la vela siguiente: esto alinea el vivo con lo validado.
+MAX_SETUP_AGE_BARS = 1
+
+# Hora UTC a partir de la cual la vela DIARIA de yfinance (GC=F, ^GSPC) se da por
+# cerrada. GC=F liquida a las 17:00 ET (21:00/22:00 UTC según horario de verano)
+# y ^GSPC cierra a las 16:00 ET. 22:15 UTC cubre ambos con margen todo el año.
+DAILY_BAR_CLOSE_UTC = (22, 15)
+
+# Antigüedad máxima aceptable de la última vela cerrada antes de considerar que
+# la fuente está congelada (se salta el ciclo y se avisa). Cripto: 3 velas 4H.
+# Diarios: 5 días naturales (fines de semana y festivos largos).
+MAX_DATA_STALENESS_HOURS = {"4h": 12, "1d_session": 24 * 5}
 
 
 # =============================================================================

@@ -120,35 +120,73 @@ def score_setups(
 def get_best_setup(df_setups: pd.DataFrame,
                    n_last_bars: int = 3,
                    current_price: float = None,
-                   max_dist_atr: float = None) -> pd.Series | None:
+                   max_dist_atr: float = None,
+                   min_setup_ts=None,
+                   max_setup_ts=None,
+                   exclude_keys=None) -> pd.Series | None:
     """
     Retorna el mejor setup reciente aprobado por el ML.
     None si no hay setups válidos.
 
     Args:
-        n_last_bars:   Ventana de barras recientes a considerar.
-        current_price: Último precio conocido. Si se provee, se aplica el filtro
-                       de frescura: se descartan los setups cuyo precio de entrada
-                       (cierre de la barra del setup) ya esté a más de
-                       max_dist_atr × ATR del precio actual, porque esa operación
-                       ya no es ejecutable (el precio no volverá al nivel de entrada).
+        n_last_bars:   (modo heredado) ventana en barras de 4h contada desde el
+                       último setup. Solo se usa si no se pasa min_setup_ts.
+        current_price: Último precio conocido (cierre de la última vela CERRADA).
+                       Si se provee, se aplica el filtro de frescura: se
+                       descartan los setups cuyo precio de entrada (cierre de la
+                       barra del setup) ya esté a más de max_dist_atr × ATR del
+                       precio actual, porque esa operación ya no es ejecutable.
         max_dist_atr:  Múltiplo de ATR de distancia máxima entry↔precio actual.
+        min_setup_ts:  Ventana anclada a AHORA (Fase 0): solo setups con
+                       ts >= min_setup_ts (p. ej. la penúltima vela cerrada).
+        max_setup_ts:  Solo setups con ts <= max_setup_ts (la última vela cerrada).
+        exclude_keys:  Conjunto de (ts, direction) ya emitidos: se saltan para
+                       que nunca se re-emita el mismo setup y para que, si el
+                       mejor ya salió, pueda salir otro aprobado de la ventana.
 
-    El filtro de frescura corrige dos problemas a la vez:
+    Por qué la ventana anclada (Fase 0, 2026-11): en el modo heredado el cutoff
+    era `df_setups["ts"].max() - 4h×n`, es decir, contado desde el ÚLTIMO SETUP
+    del histórico y no desde ahora. Si no aparecía un setup nuevo, el último
+    seguía "vigente" durante semanas y se re-emitía cada vez que el precio volvía
+    cerca de su entrada (8–9 de las 27 señales reales desde el freeze).
+
+    El filtro de frescura corrige además:
       1. Señales con entrada inalcanzable (p.ej. SHORT @ 7580 con precio en 7523).
-      2. Sesgo de dirección: un setup obsoleto de alto score (típicamente un
-         short de reversión en un máximo previo) dejaba de tapar a los setups
-         frescos —long o short— cercanos al precio actual.
+      2. Sesgo de dirección: un setup obsoleto de alto score dejaba de tapar a
+         los setups frescos cercanos al precio actual.
     """
     if df_setups.empty:
         return None
-    cutoff = df_setups["ts"].max() - pd.Timedelta(hours=4 * n_last_bars)
+
+    def _as_ts(value):
+        t = pd.Timestamp(value)
+        tz_series = getattr(df_setups["ts"].dt, "tz", None)
+        if tz_series is not None and t.tzinfo is None:
+            t = t.tz_localize("UTC")
+        return t
+
+    if min_setup_ts is not None:
+        in_window = df_setups["ts"] >= _as_ts(min_setup_ts)
+        if max_setup_ts is not None:
+            in_window &= df_setups["ts"] <= _as_ts(max_setup_ts)
+    else:
+        cutoff = df_setups["ts"].max() - pd.Timedelta(hours=4 * n_last_bars)
+        in_window = df_setups["ts"] >= cutoff
+
     recent = df_setups[
-        (df_setups["ts"] >= cutoff) &
+        in_window &
         (df_setups.get("ml_approved", True) == True)
     ].copy()
     if recent.empty:
         return None
+
+    if exclude_keys:
+        keys = {(_as_ts(t), d) for t, d in exclude_keys}
+        emitted = [(_as_ts(t), d) in keys
+                   for t, d in zip(recent["ts"], recent["direction"])]
+        recent = recent[[not e for e in emitted]]
+        if recent.empty:
+            return None
 
     # --- Filtro de frescura: la entrada debe seguir cerca del precio actual ---
     if current_price is not None and max_dist_atr is not None and "atr" in recent.columns:

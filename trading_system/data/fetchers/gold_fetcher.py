@@ -37,7 +37,7 @@ def fetch_gold(timeframe: str = "1d", days: int = 730) -> pd.DataFrame:
     start = end - timedelta(days=days)
     candidatos = [
         ("GC=F", 1.0,  "Oro cargado desde GC=F (Gold Futures CME)"),
-        ("GLD",  10.0, "Oro cargado desde GLD (SPDR Gold ETF)"),
+        # Sin respaldo GLD×10 (Fase 0): cotiza ~8.6 % por debajo de GC=F.
     ]
     return _download_yfinance_daily(candidatos, start, end, min_price=500)
 
@@ -66,13 +66,30 @@ def fetch_yfinance_asset(symbol: str, days: int = 730) -> pd.DataFrame:
     candidatos = [(primary, 1.0, f"{label} cargado desde {primary}")]
     if fallback:
         fb_ticker, fb_mult = fallback
-        candidatos.append(
-            (fb_ticker, fb_mult, f"{label} cargado desde {fb_ticker} (fallback)")
-        )
+        if fb_mult != 1.0:
+            # Respaldos ESCALADOS (GLD×10, SPY×10...) prohibidos (Fase 0): cotizan
+            # con desfase respecto al subyacente (GLD×10 ≈ −8.6 % frente a GC=F) y
+            # sus niveles no son operables. Mejor saltarse el ciclo y avisar.
+            logger.warning(
+                f"{symbol}: se ignora el respaldo escalado {fb_ticker}×{fb_mult} "
+                "(no se emiten ni resuelven señales con precios sustitutos)."
+            )
+        else:
+            candidatos.append(
+                (fb_ticker, fb_mult, f"{label} cargado desde {fb_ticker} (fallback)")
+            )
 
     end   = datetime.now()
     start = end - timedelta(days=days)
     return _download_yfinance_daily(candidatos, start, end, min_price)
+
+
+# Esperas entre reintentos (s). yfinance 1.7.0 NO lanza excepción ante un 429
+# (límite de peticiones de Yahoo): devuelve una tabla VACÍA. Antes el código hacía
+# `if raw.empty: break` y abandonaba el ticker al primer intento, así que los
+# reintentos solo servían ante excepciones. Ahora una respuesta vacía también se
+# reintenta con espera.
+_YF_RETRY_WAITS = (5, 15, 30)
 
 
 def _download_yfinance_daily(candidatos, start, end, min_price: float = 0) -> pd.DataFrame:
@@ -83,49 +100,61 @@ def _download_yfinance_daily(candidatos, start, end, min_price: float = 0) -> pd
         candidatos: lista de tuplas (ticker, multiplier, descripcion_log)
         start, end: rango de fechas
         min_price:  precio mínimo válido para validar el ticker (0 = sin validación)
+
+    Returns:
+        DataFrame OHLCV con df.attrs["source"] = ticker usado, o vacío si todos
+        los candidatos fallan tras los reintentos.
     """
+    n_attempts = len(_YF_RETRY_WAITS) + 1
     for ticker, multiplier, desc in candidatos:
-        for attempt in range(3):
+        for attempt in range(n_attempts):
+            motivo = None
             try:
                 raw = yf.download(
                     ticker, start=start, end=end,
                     interval="1d",
                     progress=False, auto_adjust=True,
                 )
-                if raw.empty:
-                    break
-                if isinstance(raw.columns, pd.MultiIndex):
-                    raw.columns = raw.columns.get_level_values(0)
-
-                df = raw[["Open", "High", "Low", "Close", "Volume"]].copy()
-                df.columns = ["open", "high", "low", "close", "volume"]
-                df.index = pd.to_datetime(df.index)
-                if df.index.tz is None:
-                    df.index = df.index.tz_localize("UTC")
-                # Forex (tickers =X) no reporta volumen → llega 0/NaN. Se rellena
-                # con 0 para no eliminar todas las barras en el dropna siguiente.
-                df["volume"] = df["volume"].fillna(0)
-                df = df.dropna(subset=["open", "high", "low", "close"])
-
-                if df.empty:
-                    break
-
-                if multiplier != 1.0:
-                    df[["open", "high", "low", "close"]] *= multiplier
-
-                last_close = float(df.iloc[-1]["close"])
-                if min_price and last_close < min_price:
-                    logger.warning(f"{ticker} precio inesperado (${last_close:.2f}), descartado")
-                    break
-
-                logger.success(f"{desc} | ${last_close:,.2f} | {len(df)} barras")
-                return df
-
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
+                if raw is None or raw.empty:
+                    motivo = "respuesta vacía (posible 429 de Yahoo)"
                 else:
-                    logger.warning(f"{ticker}: {e}")
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        raw.columns = raw.columns.get_level_values(0)
+
+                    df = raw[["Open", "High", "Low", "Close", "Volume"]].copy()
+                    df.columns = ["open", "high", "low", "close", "volume"]
+                    df.index = pd.to_datetime(df.index)
+                    if df.index.tz is None:
+                        df.index = df.index.tz_localize("UTC")
+                    # Forex (tickers =X) no reporta volumen → llega 0/NaN. Se rellena
+                    # con 0 para no eliminar todas las barras en el dropna siguiente.
+                    df["volume"] = df["volume"].fillna(0)
+                    df = df.dropna(subset=["open", "high", "low", "close"])
+
+                    if df.empty:
+                        motivo = "sin velas válidas"
+                    else:
+                        if multiplier != 1.0:
+                            df[["open", "high", "low", "close"]] *= multiplier
+
+                        last_close = float(df.iloc[-1]["close"])
+                        if min_price and last_close < min_price:
+                            # Precio imposible: no es un fallo transitorio, no reintentar.
+                            logger.warning(f"{ticker} precio inesperado (${last_close:.2f}), descartado")
+                            break
+
+                        df.attrs["source"] = ticker
+                        logger.success(f"{desc} | ${last_close:,.2f} | {len(df)} barras")
+                        return df
+            except Exception as e:
+                motivo = f"error: {e}"
+
+            if attempt < n_attempts - 1:
+                wait = _YF_RETRY_WAITS[attempt]
+                logger.warning(f"{ticker}: {motivo}. Reintento {attempt + 1}/{n_attempts - 1} en {wait}s.")
+                time.sleep(wait)
+            else:
+                logger.warning(f"{ticker}: {motivo}. Sin más reintentos.")
 
     logger.error("No se pudo obtener datos yfinance para los candidatos")
     return pd.DataFrame()

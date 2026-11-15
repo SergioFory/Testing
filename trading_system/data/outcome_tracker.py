@@ -17,21 +17,13 @@ from sqlalchemy import text
 
 def is_duplicate_signal(symbol: str, direction: str, entry_price: float,
                         hours: int = 48) -> bool:
-    """True si ya existe una señal equivalente para el mismo setup.
+    """(Guardia heredada) True si ya existe una señal con el mismo símbolo,
+    dirección y entry_price que sigue pendiente o se creó dentro de `hours`.
 
-    Se considera duplicado cuando hay una señal con el mismo símbolo,
-    dirección y entry_price que:
-      - sigue pendiente (resultado_real IS NULL), o
-      - se creó dentro de la ventana `hours`.
+    Desde la Fase 0 el antiduplicado principal es is_duplicate_setup (permanente
+    por setup_ts). Esta comprobación se mantiene como segunda barrera.
 
-    Esto evita que un setup persistente (mismo nivel de entrada detectado en
-    cada ciclo) se registre una y otra vez mientras la operación está abierta
-    o recién resuelta.
-
-    Nota: la columna `ts` se almacena como entero Unix (BIGINT). El cutoff se
-    convierte a epoch antes de comparar; compararlo contra un `datetime` de
-    Python lanzaría error en PostgreSQL y rompería la deduplicación (era el
-    bug original que permitía señales repetidas).
+    Nota: la columna `ts` se almacena como entero Unix (BIGINT).
     """
     from datetime import timedelta
     cutoff_unix = int((datetime.now(timezone.utc) - timedelta(hours=hours)).timestamp())
@@ -57,11 +49,64 @@ def is_duplicate_signal(symbol: str, direction: str, entry_price: float,
 _is_duplicate_signal = is_duplicate_signal
 
 
-def save_signal_from_trade(trade, sentiment: dict = None) -> int:
+def _unix(ts) -> int:
+    t = pd.Timestamp(ts)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    return int(t.timestamp())
+
+
+def is_duplicate_setup(symbol: str, direction: str, setup_ts) -> bool:
+    """True si ESTE setup (símbolo, dirección y vela del setup) ya se registró
+    alguna vez, en modo live o shadow. Es permanente: un setup se emite una sola
+    vez, igual que el validador lo opera una sola vez (Fase 0, F01).
+
+    Si la consulta falla se BLOQUEA la señal (fail-closed): es preferible perder
+    una alerta que repetir una."""
+    try:
+        with get_engine().connect() as conn:
+            row = conn.execute(text(
+                "SELECT COUNT(*) FROM signals "
+                "WHERE symbol=:sym AND direction=:dir AND setup_ts=:sts"
+            ), {"sym": symbol, "dir": direction, "sts": _unix(setup_ts)}).scalar()
+            return (row or 0) > 0
+    except Exception as exc:
+        logger.error(f"Dedup por setup falló ({exc}); se bloquea la señal por prudencia.")
+        return True
+
+
+def emitted_setup_keys(symbol: str, since_ts) -> set:
+    """Setups ya registrados para el símbolo con vela de setup >= since_ts,
+    como conjunto de (Timestamp UTC, direction). Se pasa a get_best_setup para
+    saltarlos."""
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(text(
+                "SELECT setup_ts, direction FROM signals "
+                "WHERE symbol=:sym AND setup_ts IS NOT NULL AND setup_ts >= :since"
+            ), {"sym": symbol, "since": _unix(since_ts)}).fetchall()
+        return {(pd.Timestamp(int(r[0]), unit="s", tz="UTC"), r[1]) for r in rows}
+    except Exception as exc:
+        logger.warning(f"No se pudieron leer los setups emitidos de {symbol}: {exc}")
+        return set()
+
+
+def save_signal_from_trade(trade, sentiment: dict = None, setup_ts=None,
+                           data_source: str = None, last_bar_ts=None,
+                           mode: str = "live") -> int:
     """
     Persiste una señal generada (TradeSetup) en la tabla signals.
     Retorna el ID asignado, o -1 si falló o era duplicado.
+
+    Args:
+        setup_ts:    vela del setup (activa el antiduplicado permanente).
+        data_source: fuente de precios usada (gateio, GC=F, ^GSPC...).
+        last_bar_ts: última vela cerrada al emitir.
+        mode:        'live' (se notifica) o 'shadow' (solo se registra).
     """
+    if setup_ts is not None and is_duplicate_setup(trade.symbol, trade.direction, setup_ts):
+        logger.debug(f"Setup ya registrado: {trade.symbol} {trade.direction} @ {setup_ts}.")
+        return -1
     if is_duplicate_signal(trade.symbol, trade.direction, trade.entry_price):
         logger.debug(f"Señal duplicada omitida: {trade.symbol} {trade.direction} ya registrada.")
         return -1
@@ -78,89 +123,162 @@ def save_signal_from_trade(trade, sentiment: dict = None) -> int:
             "take_profit":     trade.take_profit,
             "position_size":   trade.position_size,
             "atr":             trade.atr,
+            "setup_ts":        setup_ts,
+            "data_source":     data_source,
+            "last_bar_ts":     last_bar_ts,
+            "mode":            mode,
         }
         signal_id = save_signal(signal_dict)
-        logger.info(f"Señal guardada en DB | {trade.symbol} {trade.direction.upper()} | ID={signal_id}")
+        logger.info(f"Señal guardada en DB | {trade.symbol} {trade.direction.upper()} "
+                    f"| modo={mode} | ID={signal_id}")
         return signal_id
     except Exception as exc:
         logger.error(f"Error guardando señal: {exc}")
         return -1
 
 
+# ---------------------------------------------------------------------------
+# Resolución de resultados
+# ---------------------------------------------------------------------------
+
+def _is_session_daily(symbol: str) -> bool:
+    from config.settings import ASSETS
+    return ASSETS.get(symbol, {}).get("source") == "yfinance"
+
+
+def horizon_days(symbol: str) -> float:
+    """Horizonte del activo en días NATURALES (forward_bars velas).
+    Diarios: 20 velas bursátiles ≈ 28 días naturales (5 sesiones por semana)."""
+    from config.settings import ASSETS
+    cfg = ASSETS.get(symbol, {})
+    fwd = cfg.get("forward_bars", 24)
+    if _is_session_daily(symbol):
+        return fwd * 7 / 5
+    if cfg.get("source") == "twelvedata":
+        return fwd * 4 / 24 * 7 / 5   # forex 4H: 6 velas por sesión, 5 sesiones
+    return fwd * 4 / 24
+
+
+def safety_net_days(symbol: str) -> float:
+    """Red de seguridad para casos anómalos (huecos de datos). La salida normal
+    es POR NÚMERO DE VELAS dentro de _check_outcome; esta edad solo actúa si,
+    pasado el horizonte con margen, aún no hay velas suficientes.
+    Diarios: 28 + 5 = 33 días. Cripto: 4 + 1 = 5 días."""
+    margin = 5 if _is_session_daily(symbol) else 1
+    return horizon_days(symbol) + margin
+
+
+def _signal_timestamp(ts_value) -> pd.Timestamp:
+    # PostgreSQL devuelve datetime objects; SQLite/BIGINT devuelve enteros Unix
+    if isinstance(ts_value, (int, float)):
+        return pd.Timestamp(int(ts_value), unit="s", tz="UTC")
+    t = pd.Timestamp(ts_value)
+    return t.tz_localize("UTC") if t.tz is None else t
+
+
+def compute_result_fields(direction: str, entry: float, stop_loss: float,
+                          exit_price: float, position_size: float = None) -> dict:
+    """pnl_pct, pnl_r y pnl_usd de una salida a `exit_price`.
+
+    pnl_usd = position_size × pnl_pct (PnL de la POSICIÓN emitida). Antes se
+    calculaba entry × pnl_pct, que es el PnL por UNA unidad del activo (1 BTC,
+    1 onza) e inflaba el "PnL total" del dashboard hasta ~90× en BTC (F05)."""
+    sign = 1.0 if direction == "long" else -1.0
+    pnl_pct = sign * (exit_price - entry) / entry
+    risk = abs(entry - stop_loss)
+    pnl_r = sign * (exit_price - entry) / risk if risk > 0 else None
+    pnl_usd = (round(float(position_size) * pnl_pct, 2)
+               if position_size is not None and not pd.isna(position_size) else None)
+    return {
+        "pnl_pct": round(pnl_pct, 6),
+        "pnl_r":   round(pnl_r, 4) if pnl_r is not None else None,
+        "pnl_usd": pnl_usd,
+    }
+
+
 def resolve_open_signals() -> int:
     """
     Revisa todas las señales abiertas (resultado_real IS NULL) y las resuelve
-    comparando entry/SL/TP contra los precios OHLCV reales desde la señal.
+    con velas CERRADAS posteriores a la señal:
+      1. Primero SL/TP (vela a vela; si una vela toca ambos, cuenta el SL).
+      2. Si pasan forward_bars velas sin tocar ninguno → salida por tiempo
+         ('expired') al cierre de la última vela, CON su PnL y su R.
+      3. Solo si, pasada la red de seguridad, siguen faltando velas (hueco de
+         datos) → 'expired' al último cierre disponible.
+
+    Antes la antigüedad se comprobaba ANTES que el SL/TP y con un plazo de 22
+    días naturales para los diarios (su horizonte son 28–29): las señales de oro
+    y SPX quedaban 'expired' sin PnL y el win rate en vivo del SP500 caía del
+    47 % al 28 % (F04). En cripto el plazo era 7 días para un horizonte de 4.
+
+    Las señales en modo sombra se resuelven igual (para medirlas).
 
     Returns:
         Número de señales resueltas en este ciclo.
     """
+    from data.database import init_db
+    init_db()
     engine = get_engine()
 
     with engine.connect() as conn:
         rows = conn.execute(text(
-            "SELECT id, symbol, ts, direction, entry_price, stop_loss, take_profit "
-            "FROM signals WHERE resultado_real IS NULL ORDER BY ts ASC"
+            "SELECT id, symbol, ts, direction, entry_price, stop_loss, take_profit, "
+            "position_size FROM signals WHERE resultado_real IS NULL ORDER BY ts ASC"
         )).fetchall()
 
     if not rows:
         return 0
 
     # Caché de OHLCV por símbolo: se descarga una sola vez por ciclo aunque
-    # haya varias señales pendientes del mismo activo (antes se re-descargaba
-    # por cada señal, generando llamadas redundantes a las APIs externas).
+    # haya varias señales pendientes del mismo activo.
     ohlcv_cache: dict = {}
+    now = pd.Timestamp.now(tz="UTC")
 
     resolved_count = 0
     for row in rows:
-        sig_id, symbol, ts_unix, direction, entry, sl, tp = row
-
+        sig_id, symbol, ts_value, direction, entry, sl, tp, pos_size = row
         try:
-            # PostgreSQL devuelve datetime objects; SQLite devuelve enteros Unix
-            if isinstance(ts_unix, (int, float)):
-                sig_ts = pd.Timestamp(ts_unix, unit="s", tz="UTC")
-            else:
-                sig_ts = pd.Timestamp(ts_unix)
-                if sig_ts.tz is None:
-                    sig_ts = sig_ts.tz_localize("UTC")
-
-            # Timeout absoluto por antigüedad. Debe alinearse con el horizonte
-            # real del activo (forward_bars × duración de barra), no un fijo de 7d:
-            #   - Diarios (Gold/Silver/SP500): 20 barras = 20 días
-            #   - Forex 4H: 120 barras × 4h = 20 días
-            #   - Crypto 4H: 24 barras × 4h = 4 días
-            # Un timeout fijo de 7d expiraba prematuramente las señales de forex y
-            # metales/índices (que necesitan hasta 20 días para resolverse),
-            # subestimando el win rate real en el dashboard.
-            from datetime import timedelta
-            from config.settings import ASSETS
-            _cfg       = ASSETS.get(symbol, {})
-            _fwd       = _cfg.get("forward_bars", 24)
-            _bar_hours = 24 if _cfg.get("source") == "yfinance" else 4
-            timeout_days = max(7, int(_fwd * _bar_hours / 24) + 2)  # +2 días de margen
-            age = datetime.now(timezone.utc) - sig_ts
-            if age > timedelta(days=timeout_days):
-                _update_signal_result(sig_id, "expired", None, None)
-                resolved_count += 1
-                logger.info(f"Señal #{sig_id} {symbol} expirada por antigüedad ({age.days}d > {timeout_days}d)")
-                continue
+            sig_ts = _signal_timestamp(ts_value)
 
             if symbol not in ohlcv_cache:
                 ohlcv_cache[symbol] = _load_outcome_ohlcv(symbol)
-            outcome, pnl_pct = _check_outcome(
-                symbol, sig_ts, direction, entry, sl, tp,
-                df=ohlcv_cache[symbol],
-            )
+            df = ohlcv_cache[symbol]
+            if df is None or df.empty:
+                logger.warning(f"Señal #{sig_id} {symbol}: sin datos para resolver; se reintenta en el próximo ciclo.")
+                continue
 
-            if outcome is not None:
-                pnl_usd = round(entry * pnl_pct, 2) if pnl_pct is not None else None
-                _update_signal_result(sig_id, outcome, pnl_usd, pnl_pct)
-                resolved_count += 1
-                logger.info(
-                    f"Señal #{sig_id} {symbol} {direction.upper()} → "
-                    f"{outcome.upper()} | PnL={pnl_usd:+.2f} USD" if pnl_usd else
-                    f"Señal #{sig_id} {symbol} → {outcome.upper()}"
-                )
+            res = check_outcome_detail(symbol, sig_ts, direction, entry, sl, tp, df=df)
+
+            age_days = (now - sig_ts).total_seconds() / 86400
+            if res is None and age_days > safety_net_days(symbol):
+                after = df[df.index > sig_ts]
+                if not after.empty and df.index[0] <= sig_ts:
+                    res = {"outcome": "expired", "exit_price": float(after["close"].iloc[-1]),
+                           "exit_ts": after.index[-1]}
+                    logger.warning(
+                        f"Señal #{sig_id} {symbol}: red de seguridad ({age_days:.1f}d > "
+                        f"{safety_net_days(symbol):.0f}d) con solo {len(after)} velas; "
+                        "se cierra al último cierre disponible."
+                    )
+                elif age_days > 2 * safety_net_days(symbol):
+                    _update_signal_result(sig_id, "expired", None, None)
+                    resolved_count += 1
+                    logger.warning(f"Señal #{sig_id} {symbol}: sin velas que cubran la señal; expirada sin PnL.")
+                    continue
+
+            if res is None:
+                continue
+
+            fields = compute_result_fields(direction, entry, sl, res["exit_price"], pos_size)
+            _update_signal_result(
+                sig_id, res["outcome"], fields["pnl_usd"], fields["pnl_pct"],
+                pnl_r=fields["pnl_r"], exit_price=res["exit_price"], resolved_ts=res.get("exit_ts"),
+            )
+            resolved_count += 1
+            logger.info(
+                f"Señal #{sig_id} {symbol} {direction.upper()} → {res['outcome'].upper()} | "
+                f"{fields['pnl_r']:+.2f}R | PnL={fields['pnl_usd'] if fields['pnl_usd'] is not None else 'n/d'} USD"
+            )
         except Exception as exc:
             logger.warning(f"Error resolviendo señal #{sig_id}: {exc}")
 
@@ -169,29 +287,34 @@ def resolve_open_signals() -> int:
     return resolved_count
 
 
-def _load_outcome_ohlcv(symbol: str) -> pd.DataFrame:
+def _load_outcome_ohlcv(symbol: str, days: int = None) -> pd.DataFrame:
     """
-    Descarga el OHLCV reciente usado para resolver señales de un símbolo.
-    Se llama UNA sola vez por símbolo en cada ciclo de resolución (ver caché
-    en resolve_open_signals), evitando descargas repetidas por cada señal.
+    Descarga el OHLCV reciente usado para resolver señales de un símbolo, SOLO
+    con velas cerradas (la vela en formación podría tocar SL y TP más tarde).
+    Usa la misma fuente que la generación de señales (sin precios sustitutos).
     """
     from config.settings import ASSETS
+    from data.bars import drop_unclosed_bars
 
     source = ASSETS.get(symbol, {}).get("source", "binance")
     try:
         if source == "yfinance":
             from data.fetchers.gold_fetcher import fetch_yfinance_asset
-            return fetch_yfinance_asset(symbol, days=60)
+            df = fetch_yfinance_asset(symbol, days=days or 75)
+            return drop_unclosed_bars(df, "1d", session=True)
         if source == "twelvedata":
             from data.fetchers.twelvedata_fetcher import fetch_twelvedata_ohlcv
-            return fetch_twelvedata_ohlcv(symbol, interval="4h", outputsize=500)
+            df = fetch_twelvedata_ohlcv(symbol, interval="4h", outputsize=500)
+            return drop_unclosed_bars(df, "4h")
         from data.fetchers.binance_fetcher import fetch_ohlcv
-        return fetch_ohlcv(symbol, timeframe="4h", days=30)
-    except Exception:
+        df = fetch_ohlcv(symbol, timeframe="4h", days=days or 30)
+        return drop_unclosed_bars(df, "4h")
+    except Exception as exc:
+        logger.warning(f"No se pudo cargar OHLCV de {symbol} para resolver: {exc}")
         return pd.DataFrame()
 
 
-def _check_outcome(
+def check_outcome_detail(
     symbol: str,
     signal_ts: pd.Timestamp,
     direction: str,
@@ -199,16 +322,14 @@ def _check_outcome(
     stop_loss: float,
     take_profit: float,
     df: pd.DataFrame = None,
-) -> tuple:
+) -> dict | None:
     """
-    Revisa si una señal tocó SL o TP usando el OHLCV provisto.
-
-    Args:
-        df: OHLCV ya descargado (reutilizable entre señales del mismo símbolo).
-            Si es None, se descarga aquí (modo retrocompatible).
+    Resultado de una señal con las velas CERRADAS posteriores a signal_ts.
 
     Returns:
-        (outcome, pnl_pct) donde outcome ∈ {"win","loss","expired"} o (None, None)
+        {"outcome": "win"|"loss"|"expired", "exit_price": float, "exit_ts": Timestamp}
+        o None si todavía no se puede resolver (faltan velas o el DataFrame no
+        cubre la fecha de la señal).
     """
     from config.settings import ASSETS
 
@@ -216,50 +337,63 @@ def _check_outcome(
 
     if df is None:
         df = _load_outcome_ohlcv(symbol)
-
     if df is None or df.empty:
-        return None, None
+        return None
 
-    # Filtrar barras posteriores a la señal
+    # El histórico debe empezar ANTES de la señal: si empieza después, las
+    # "primeras velas posteriores" serían otras y el resultado sería falso.
+    if df.index[0] > signal_ts:
+        logger.warning(
+            f"{symbol}: el histórico cargado empieza el {df.index[0]} y la señal es del "
+            f"{signal_ts}; no se puede resolver con estos datos."
+        )
+        return None
+
     future = df[df.index > signal_ts].head(forward_bars)
-    if len(future) < 2:
-        return None, None  # Muy pronto para resolver
+    if future.empty:
+        return None  # Muy pronto para resolver
 
-    for _, bar in future.iterrows():
+    for ts, bar in future.iterrows():
         if direction == "long":
             if bar["low"] <= stop_loss:
-                pnl_pct = (stop_loss - entry) / entry
-                return "loss", round(pnl_pct, 6)
+                return {"outcome": "loss", "exit_price": float(stop_loss), "exit_ts": ts}
             if bar["high"] >= take_profit:
-                pnl_pct = (take_profit - entry) / entry
-                return "win", round(pnl_pct, 6)
+                return {"outcome": "win", "exit_price": float(take_profit), "exit_ts": ts}
         else:  # short
             if bar["high"] >= stop_loss:
-                pnl_pct = (entry - stop_loss) / entry
-                return "loss", round(pnl_pct, 6)
+                return {"outcome": "loss", "exit_price": float(stop_loss), "exit_ts": ts}
             if bar["low"] <= take_profit:
-                pnl_pct = (entry - take_profit) / entry
-                return "win", round(pnl_pct, 6)
+                return {"outcome": "win", "exit_price": float(take_profit), "exit_ts": ts}
 
-    # Se agotaron las barras sin resolución → expirado
+    # Se agotaron las velas del horizonte sin tocar SL ni TP → salida por tiempo
     if len(future) >= forward_bars:
-        last_close = future["close"].iloc[-1]
-        if direction == "long":
-            pnl_pct = (last_close - entry) / entry
-        else:
-            pnl_pct = (entry - last_close) / entry
-        return "expired", round(pnl_pct, 6)
+        return {"outcome": "expired", "exit_price": float(future["close"].iloc[-1]),
+                "exit_ts": future.index[-1]}
 
-    return None, None  # Aún hay barras por venir
+    return None  # Aún hay velas por venir
 
 
-def _update_signal_result(signal_id: int, outcome: str, pnl_usd, pnl_pct) -> None:
+def _check_outcome(symbol, signal_ts, direction, entry, stop_loss, take_profit, df=None) -> tuple:
+    """Compatibilidad: (outcome, pnl_pct) o (None, None)."""
+    res = check_outcome_detail(symbol, signal_ts, direction, entry, stop_loss, take_profit, df=df)
+    if res is None:
+        return None, None
+    sign = 1.0 if direction == "long" else -1.0
+    return res["outcome"], round(sign * (res["exit_price"] - entry) / entry, 6)
+
+
+def _update_signal_result(signal_id: int, outcome: str, pnl_usd, pnl_pct,
+                          pnl_r=None, exit_price=None, resolved_ts=None) -> None:
     engine = get_engine()
+    rts = None
+    if resolved_ts is not None:
+        rts = _unix(resolved_ts)
     with engine.begin() as conn:
         conn.execute(text(
-            "UPDATE signals SET resultado_real=:outcome, pnl_usd=:pnl_usd, pnl_pct=:pnl_pct "
-            "WHERE id=:id"
-        ), {"outcome": outcome, "pnl_usd": pnl_usd, "pnl_pct": pnl_pct, "id": signal_id})
+            "UPDATE signals SET resultado_real=:outcome, pnl_usd=:pnl_usd, pnl_pct=:pnl_pct, "
+            "pnl_r=:pnl_r, exit_price=:exit_price, resolved_ts=:rts WHERE id=:id"
+        ), {"outcome": outcome, "pnl_usd": pnl_usd, "pnl_pct": pnl_pct, "pnl_r": pnl_r,
+            "exit_price": exit_price, "rts": rts, "id": signal_id})
 
 
 def get_outcome_stats(symbol: str = None) -> dict:
@@ -267,6 +401,14 @@ def get_outcome_stats(symbol: str = None) -> dict:
     Estadísticas de señales resueltas para mostrar en el dashboard.
     """
     df = load_signals(symbol=symbol, limit=500)
+    if df.empty:
+        return {}
+    # Fase 0: las estadísticas solo cuentan señales notificadas (modo live) y
+    # sin marca de calidad (las re-emisiones detectadas en la limpieza no cuentan).
+    if "mode" in df.columns:
+        df = df[df["mode"].fillna("live") == "live"]
+    if "quality_flag" in df.columns:
+        df = df[df["quality_flag"].isna()]
     if df.empty:
         return {}
 

@@ -7,6 +7,7 @@ Requiere variables de entorno:
 
 No añade dependencias nuevas: usa requests (ya en requirements.txt).
 """
+import html
 import time
 import requests
 from loguru import logger
@@ -111,6 +112,25 @@ def send_error_alert(symbol: str, error: str) -> bool:
         f"<code>{error[:400]}</code>"
     )
     return _send(msg)
+
+
+def send_data_alert(symbol: str, motivo: str, since=None) -> bool:
+    """Aviso de que un activo se saltó el ciclo por un problema de datos
+    (Fase 0): mejor no emitir que emitir con precios equivocados o viejos."""
+    desde = f"\n<i>Desde: {since:%Y-%m-%d %H:%M} UTC</i>" if since else ""
+    msg = (
+        f"⚠️ <b>{html.escape(symbol)}: ciclo saltado por datos</b>\n"
+        f"{html.escape(motivo)}\n"
+        "No se emiten señales de este activo hasta que la fuente responda bien."
+        f"{desde}"
+    )
+    return _send(msg)
+
+
+def send_data_recovered(symbol: str, since=None) -> bool:
+    """Aviso de que la fuente de datos de un activo volvió a funcionar."""
+    desde = f" (fallaba desde {since:%Y-%m-%d %H:%M} UTC)" if since else ""
+    return _send(f"✅ <b>{html.escape(symbol)}</b>: datos de nuevo disponibles{desde}.")
 
 
 def send_daily_summary(summary: dict) -> bool:

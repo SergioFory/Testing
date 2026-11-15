@@ -7,6 +7,7 @@ Modos de uso:
   python main.py train    --symbol BTCUSDT     # Entrenar modelo
   python main.py update                         # Actualizar todos los datos
   python main.py schedule                       # Modo daemon (señales cada hora)
+  python main.py check-live                     # Regresión "vivo = validador"
 """
 import argparse
 import sys
@@ -39,6 +40,8 @@ from config.settings import ASSETS, BACKTEST, RISK, ML_PARAMS, DAYS_HISTORY, act
 
 import json
 from datetime import datetime, timedelta, timezone
+
+import pandas as pd
 
 # Log heredado en disco. Se mantiene solo como fallback de lectura para una
 # transición suave; la fuente de verdad ahora es la tabla retrain_log en la DB,
@@ -82,37 +85,48 @@ def _should_retrain(symbol: str) -> bool:
 # Helpers de datos
 # ---------------------------------------------------------------------------
 
-def _load_data(symbol: str):
-    """Descarga o carga datos OHLCV para el símbolo dado."""
+def _load_data(symbol: str, closed_only: bool = True):
+    """
+    Descarga o carga datos OHLCV para el símbolo dado.
+
+    Con closed_only=True (por defecto) se descarta la vela EN FORMACIÓN: el vivo
+    debe ver lo mismo que el validador, que solo trabaja con velas cerradas
+    (Fase 0, F03). La fuente usada queda en df_4h.attrs["source"].
+    """
     from data.fetchers.binance_fetcher import fetch_multi_timeframe
     from data.fetchers.gold_fetcher    import fetch_yfinance_asset, fetch_macro
     from data.database                 import init_db, save_ohlcv, load_ohlcv
+    from data.bars                     import drop_unclosed_bars
 
     init_db()
 
     cfg    = ASSETS.get(symbol, {})
     source = cfg.get("source", "binance")
+    # La macro solo alimenta al ML; con use_ml=False no se descarga (21 series de
+    # Yahoo por ciclo que no se usaban y aumentaban el riesgo de 429).
+    need_macro = cfg.get("use_ml", True)
 
     logger.info(f"Cargando datos para {symbol}...")
 
     if source == "yfinance":
         # Activos no-crypto (Gold, Silver, S&P 500): datos diarios para ambos timeframes.
-        # yfinance no tiene 4H confiable; en daily los setups técnicos funcionan mejor
-        # para commodities e índices.
         yf_days  = cfg.get("days_history", 2500)
         df_daily = fetch_yfinance_asset(symbol, days=yf_days)
-        df_4h    = df_daily.copy() if not df_daily.empty else None
-        # Macro completo: cubre el mismo histórico que los precios para evitar
-        # que las features macro queden 89-91% NaN y se descarten en el entrenamiento.
-        macro_df = fetch_macro(days=yf_days)
+        if closed_only:
+            df_daily = drop_unclosed_bars(df_daily, "1d", session=True)
+        df_4h    = df_daily.copy() if df_daily is not None and not df_daily.empty else None
+        if df_4h is not None:
+            df_4h.attrs = dict(df_daily.attrs)
+        macro_df = fetch_macro(days=yf_days) if need_macro else None
     elif source == "twelvedata":
         # Pares forex (EUR/USD, GBP/USD, USD/JPY): velas 4H reales vía Twelve Data.
-        # La barra diaria se deriva resampling del 4H (mitad de créditos API).
-        # 5000 barras × 4H ≈ 3.2 años de historia forex (suficiente para ML).
         from data.fetchers.twelvedata_fetcher import fetch_twelvedata_ohlcv
         td_days = cfg.get("days_history", 1825)
         df_4h = fetch_twelvedata_ohlcv(symbol, interval="4h", outputsize=5000)
+        if closed_only:
+            df_4h = drop_unclosed_bars(df_4h, "4h")
         if df_4h is not None and not df_4h.empty:
+            df_4h.attrs.setdefault("source", "twelvedata")
             df_daily = (df_4h
                         .resample("1D")
                         .agg({"open": "first", "high": "max",
@@ -120,27 +134,60 @@ def _load_data(symbol: str):
                         .dropna())
         else:
             df_daily = None
-        macro_df = fetch_macro(days=td_days)
+        macro_df = fetch_macro(days=td_days) if need_macro else None
     else:
         crypto_days = cfg.get("days_history", DAYS_HISTORY)
         data     = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
         df_4h    = data.get("4h")
         df_daily = data.get("1d")
-        # Macro para crypto: solo si el activo lo tiene habilitado.
-        # BTC deshabilitado (use_macro=False): la macro añade ruido en 4H y bajó
-        # la precisión de 0.193 a 0.128. ETH mantiene macro (mejoró 0.269→0.306).
-        use_macro = cfg.get("use_macro", True)
+        if closed_only:
+            df_4h    = drop_unclosed_bars(df_4h, "4h")
+            df_daily = drop_unclosed_bars(df_daily, "1d")
+        use_macro = cfg.get("use_macro", True) and need_macro
         macro_df = fetch_macro(days=crypto_days) if use_macro else None
 
     if df_4h is None or df_4h.empty:
         logger.error(f"No se pudieron obtener datos 4H para {symbol}")
         return None, None, None
 
-    save_ohlcv(df_4h, symbol, "4h")
-    if df_daily is not None:
-        save_ohlcv(df_daily, symbol, "1d")
+    try:
+        save_ohlcv(df_4h, symbol, "4h")
+        if df_daily is not None:
+            save_ohlcv(df_daily, symbol, "1d")
+    except Exception as exc:
+        # La tabla ohlcv no se usa para decidir: un fallo aquí no debe frenar la señal.
+        logger.warning(f"[{symbol}] No se pudo guardar OHLCV en la BD: {exc}")
 
     return df_4h, df_daily, macro_df
+
+
+# ---------------------------------------------------------------------------
+# Avisos de datos (Fase 0): si un activo se salta un ciclo por fallo de datos se
+# avisa por Telegram, sin inundar: primer fallo, luego como máximo cada 6 h, y un
+# aviso de recuperación cuando vuelve.
+# ---------------------------------------------------------------------------
+_DATA_ALERT_EVERY = timedelta(hours=6)
+_data_alert_state: dict = {}   # symbol -> {"since": dt, "last_alert": dt}
+
+
+def _report_data_problem(symbol: str, motivo: str, notify: bool) -> None:
+    now = datetime.now(timezone.utc)
+    st = _data_alert_state.get(symbol)
+    if st is None:
+        st = {"since": now, "last_alert": None}
+        _data_alert_state[symbol] = st
+    logger.error(f"[{symbol}] Ciclo saltado por datos: {motivo}")
+    if notify and (st["last_alert"] is None or now - st["last_alert"] >= _DATA_ALERT_EVERY):
+        from notifications.telegram import send_data_alert
+        send_data_alert(symbol, motivo, since=st["since"])
+        st["last_alert"] = now
+
+
+def _report_data_ok(symbol: str, notify: bool) -> None:
+    st = _data_alert_state.pop(symbol, None)
+    if st and notify and st.get("last_alert") is not None:
+        from notifications.telegram import send_data_recovered
+        send_data_recovered(symbol, since=st["since"])
 
 
 # ---------------------------------------------------------------------------
@@ -148,16 +195,39 @@ def _load_data(symbol: str):
 # ---------------------------------------------------------------------------
 
 def cmd_signal(symbol: str, notify: bool = False):
-    """Genera la señal actual para el símbolo."""
-    from signals.detector          import detect_all_setups, get_current_setup
+    """Genera la señal actual para el símbolo (solo con velas cerradas)."""
+    from signals.detector          import detect_all_setups
     from ml.predictor              import score_setups, get_best_setup
     from risk.position_sizer       import build_trade_setup, PortfolioRiskManager
     from sentiment.cryptopanic     import get_sentiment_summary
-    from notifications.telegram    import send_signal_alert, send_no_signal
+    from notifications.telegram    import send_signal_alert
+    from data.bars                 import last_bar_age_hours
+    from config.settings           import (MAX_ENTRY_DIST_ATR, MAX_SETUP_AGE_BARS,
+                                           MAX_DATA_STALENESS_HOURS, notify_enabled, fmt_price)
+
+    cfg    = ASSETS.get(symbol, {})
+    source = cfg.get("source", "binance")
+    session_daily = source == "yfinance"
 
     df_4h, df_daily, macro_df = _load_data(symbol)
     if df_4h is None:
+        _report_data_problem(symbol, "la fuente de precios no devolvió datos tras los reintentos.", notify)
         return
+
+    # Fuente congelada: si la última vela cerrada es demasiado vieja, no emitir.
+    stale_key = "1d_session" if session_daily else "4h"
+    age_h = last_bar_age_hours(df_4h, "4h", session=session_daily)
+    if age_h > MAX_DATA_STALENESS_HOURS[stale_key]:
+        _report_data_problem(
+            symbol,
+            f"la última vela cerrada ({df_4h.index[-1]}) tiene {age_h:.0f} h; la fuente parece congelada.",
+            notify,
+        )
+        return
+    _report_data_ok(symbol, notify)
+
+    data_source = df_4h.attrs.get("source", source)
+    last_bar_ts = df_4h.index[-1]
 
     # Detectar setups
     df_setups = detect_all_setups(df_4h, df_daily, symbol)
@@ -168,31 +238,32 @@ def cmd_signal(symbol: str, notify: bool = False):
     # Scoring ML
     df_scored = score_setups(df_setups, df_4h, symbol, macro_df)
 
-    # Mejor setup actual
-    # Para activos diarios (Gold, Silver, SP500) buscamos en un radio de 3 daily bars (72h).
-    # Para crypto 4H buscamos en 12 × 4H bars = 48h. El filtro de frescura (abajo)
-    # garantiza que la entrada siga cerca del precio actual, así que ampliar la
-    # ventana da más oportunidades sin riesgo de emitir entradas inalcanzables.
-    source = ASSETS.get(symbol, {}).get("source", "binance")
-    n_bars = 18 if source != "binance" else 12  # 72h para diarios, 48h para 4H
+    # Ventana ANCLADA A LA ÚLTIMA VELA CERRADA (Fase 0, F01): solo la vela del
+    # setup puede ser la última cerrada o hasta MAX_SETUP_AGE_BARS anteriores.
+    # Se cuenta por posición en el índice (en diarios salta fines de semana).
+    min_pos      = max(0, len(df_4h) - 1 - MAX_SETUP_AGE_BARS)
+    min_setup_ts = df_4h.index[min_pos]
 
-    # Filtro de frescura: descartar setups cuya entrada (cierre de la barra del
-    # setup) ya esté lejos del precio actual — esas operaciones no se ejecutan
-    # porque el precio no regresa al nivel de entrada (bug del "SHORT @ 7580"
-    # cuando el precio ya está en 7523). Configurable por activo.
-    from config.settings import MAX_ENTRY_DIST_ATR
+    # Filtro de frescura: la entrada debe seguir cerca del precio actual (cierre
+    # de la última vela CERRADA, no de la vela en formación).
     current_price = float(df_4h["close"].iloc[-1])
-    max_dist_atr  = ASSETS.get(symbol, {}).get("max_entry_dist_atr", MAX_ENTRY_DIST_ATR)
-    best = get_best_setup(df_scored, n_last_bars=n_bars,
-                          current_price=current_price, max_dist_atr=max_dist_atr)
+    max_dist_atr  = cfg.get("max_entry_dist_atr", MAX_ENTRY_DIST_ATR)
+
+    from data.outcome_tracker import (is_duplicate_signal, is_duplicate_setup,
+                                      emitted_setup_keys, save_signal_from_trade)
+    already = emitted_setup_keys(symbol, min_setup_ts)
+
+    best = get_best_setup(df_scored, current_price=current_price, max_dist_atr=max_dist_atr,
+                          min_setup_ts=min_setup_ts, max_setup_ts=last_bar_ts,
+                          exclude_keys=already)
     if best is None:
-        window_desc = "3 días" if source != "binance" else "12 barras 4H (48h)"
         logger.info(
-            f"[{symbol}] Sin setup fresco de alta confianza en los últimos {window_desc} "
-            f"(entrada dentro de {max_dist_atr}×ATR del precio actual {current_price:.4f})."
+            f"[{symbol}] Sin setup nuevo aprobado en las últimas {MAX_SETUP_AGE_BARS + 1} velas "
+            f"cerradas (desde {min_setup_ts}; última {last_bar_ts}; precio {current_price:.4f})."
         )
         return
 
+    setup_ts = pd.Timestamp(best["ts"])
     ml_score = float(best.get("ml_score", best.get("raw_score", 0)))
     portfolio = PortfolioRiskManager()
     trade = build_trade_setup(best, portfolio.current_capital, ml_score)
@@ -220,18 +291,17 @@ def cmd_signal(symbol: str, notify: bool = False):
             )
             return
 
-    # Evitar re-emitir la misma señal en cada ciclo. Un setup persistente se
-    # vuelve a detectar con el mismo entry_price; si ya existe una señal
-    # equivalente (pendiente o reciente) se omite por completo: no se imprime,
-    # no se guarda y no se notifica.
-    from data.outcome_tracker import is_duplicate_signal, save_signal_from_trade
-    from config.settings import fmt_price
-    if is_duplicate_signal(trade.symbol, trade.direction, trade.entry_price):
+    # Antiduplicado PERMANENTE por setup (símbolo, dirección, vela del setup) y,
+    # como segunda barrera, el heredado por precio.
+    if is_duplicate_setup(trade.symbol, trade.direction, setup_ts) or \
+       is_duplicate_signal(trade.symbol, trade.direction, trade.entry_price):
         logger.info(
             f"[{symbol}] Señal {trade.direction.upper()} @ {fmt_price(trade.entry_price)} "
-            "ya registrada — se omite para evitar duplicados."
+            f"(setup {setup_ts}) ya registrada — se omite."
         )
         return
+
+    mode = "live" if notify_enabled(symbol) else "shadow"
 
     # Sentimiento
     base_sym = symbol.replace("USDT", "")
@@ -240,7 +310,13 @@ def cmd_signal(symbol: str, notify: bool = False):
     _print_signal(trade, sentiment)
 
     # Persistir señal en la base de datos
-    signal_id = save_signal_from_trade(trade, sentiment)
+    signal_id = save_signal_from_trade(trade, sentiment, setup_ts=setup_ts,
+                                       data_source=data_source, last_bar_ts=last_bar_ts,
+                                       mode=mode)
+
+    if mode == "shadow":
+        logger.info(f"[{symbol}] Modo sombra: señal registrada (ID={signal_id}) sin notificar.")
+        return
 
     # Solo notificar si es una señal nueva (no un duplicado ya registrado)
     if notify and signal_id > 0:
@@ -317,6 +393,26 @@ def cmd_validate(symbol: str = None):
     if results:
         print_validation_report(results)
     return results
+
+
+def cmd_check_live(symbol: str = None) -> bool:
+    """Prueba de regresión 'vivo = validador' (ver backtest/live_emulation.py).
+    Retorna True si todos los activos revisados coinciden."""
+    from backtest.live_emulation import compare_with_validator, print_comparison
+
+    symbols = [symbol] if symbol else active_assets()
+    all_ok = True
+    for sym in symbols:
+        df_4h, df_daily, _ = _load_data(sym)
+        if df_4h is None:
+            logger.warning(f"[{sym}] Sin datos; se omite.")
+            all_ok = False
+            continue
+        res = compare_with_validator(sym, df_4h, df_daily)
+        print_comparison(res)
+        all_ok &= res["match"]
+    print("\nResultado global:", "OK" if all_ok else "HAY DIFERENCIAS")
+    return all_ok
 
 
 def cmd_train(symbol: str):
@@ -642,6 +738,11 @@ Ejemplos:
     pv.add_argument("--symbol", default=None, choices=list(ASSETS.keys()),
                     help="Un activo; omitir para validar todos")
 
+    # check-live — regresión "vivo = validador"
+    pcl = sub.add_parser("check-live", help="Comprobar que el vivo emite lo mismo que valida el validador")
+    pcl.add_argument("--symbol", default=None, choices=list(ASSETS.keys()),
+                     help="Un activo; omitir para todos los operativos")
+
     # train
     pt = sub.add_parser("train", help="Entrenar modelo ML")
     pt.add_argument("--symbol", default="BTCUSDT", choices=list(ASSETS.keys()))
@@ -688,6 +789,10 @@ def main():
 
     elif args.command == "validate":
         cmd_validate(args.symbol)
+
+    elif args.command == "check-live":
+        ok = cmd_check_live(args.symbol)
+        sys.exit(0 if ok else 1)
 
     elif args.command == "train":
         cmd_train(args.symbol)

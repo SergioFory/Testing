@@ -162,6 +162,56 @@ _DDL = [
     """,
 ]
 
+# ---------------------------------------------------------------------------
+# Migraciones de columnas (idempotentes). Se aplican tras crear las tablas.
+# Fase 0 (2026-11): trazabilidad de cada señal y resultado en R.
+#   setup_ts     hora (Unix) de la vela del setup → antiduplicado PERMANENTE por
+#                (symbol, direction, setup_ts) en vez de por precio durante 48 h.
+#   data_source  fuente de precios usada (gateio, GC=F, ^GSPC...).
+#   last_bar_ts  hora (Unix) de la última vela cerrada al emitir.
+#   mode         'live' (notificada) o 'shadow' (registrada sin notificar).
+#   exit_price   precio de salida usado para el resultado.
+#   pnl_r        resultado en R (múltiplos del riesgo entrada→stop).
+#   resolved_ts  hora (Unix) de la vela en que se resolvió.
+#   quality_flag marca de calidad para excluir de estadísticas (p. ej. re-emisiones
+#                antiguas detectadas por la limpieza de la Fase 0).
+# ---------------------------------------------------------------------------
+_SIGNAL_COLUMNS = [
+    ("setup_ts",     "BIGINT"),
+    ("data_source",  "TEXT"),
+    ("last_bar_ts",  "BIGINT"),
+    ("mode",         "TEXT"),
+    ("exit_price",   "DOUBLE PRECISION"),
+    ("pnl_r",        "DOUBLE PRECISION"),
+    ("resolved_ts",  "BIGINT"),
+    ("quality_flag", "TEXT"),
+]
+_SIGNAL_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_signals_setup ON signals(symbol, direction, setup_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_signals_open ON signals(resultado_real)",
+]
+
+
+def _existing_columns(conn, table: str, dialect: str) -> set:
+    if dialect == "sqlite":
+        rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+        return {r[1] for r in rows}
+    rows = conn.execute(text(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = :t"
+    ), {"t": table}).fetchall()
+    return {r[0] for r in rows}
+
+
+def _migrate(conn, dialect: str) -> None:
+    have = _existing_columns(conn, "signals", dialect)
+    for col, sqltype in _SIGNAL_COLUMNS:
+        if col not in have:
+            conn.execute(text(_adapt_ddl(f"ALTER TABLE signals ADD COLUMN {col} {sqltype}", dialect)))
+            logger.info(f"Migración: columna signals.{col} añadida.")
+    for stmt in _SIGNAL_INDEXES:
+        conn.execute(text(stmt))
+
+
 # SQLite doesn't support SERIAL — patch DDL when needed
 def _adapt_ddl(sql: str, dialect: str) -> str:
     if dialect == "sqlite":
@@ -173,13 +223,22 @@ def _adapt_ddl(sql: str, dialect: str) -> str:
     return sql
 
 
-def init_db() -> None:
-    """Crea todas las tablas si no existen."""
+_db_ready = False
+
+
+def init_db(force: bool = False) -> None:
+    """Crea todas las tablas si no existen y aplica las migraciones de columnas.
+    Se ejecuta una sola vez por proceso (antes corría en cada carga de datos)."""
+    global _db_ready
+    if _db_ready and not force:
+        return
     engine = get_engine()
     dialect = engine.dialect.name
     with engine.begin() as conn:
         for stmt in _DDL:
             conn.execute(text(_adapt_ddl(stmt, dialect)))
+        _migrate(conn, dialect)
+    _db_ready = True
     logger.info("Base de datos inicializada.")
 
 
@@ -255,34 +314,49 @@ def save_signal(signal: dict) -> int:
     engine  = get_engine()
     dialect = engine.dialect.name
 
+    init_db()
+    cols = ("symbol, ts, setup_type, direction, ml_score, sentiment_score, "
+            "entry_price, stop_loss, take_profit, position_size, atr, "
+            "setup_ts, data_source, last_bar_ts, mode")
+    vals = (":symbol, :ts, :setup_type, :direction, :ml_score, :sentiment_score, "
+            ":entry_price, :stop_loss, :take_profit, :position_size, :atr, "
+            ":setup_ts, :data_source, :last_bar_ts, :mode")
     if dialect == "sqlite":
-        sql = text("""
-            INSERT INTO signals
-                (symbol, ts, setup_type, direction, ml_score, sentiment_score,
-                 entry_price, stop_loss, take_profit, position_size, atr)
-            VALUES (:symbol, :ts, :setup_type, :direction, :ml_score, :sentiment_score,
-                    :entry_price, :stop_loss, :take_profit, :position_size, :atr)
-        """)
+        sql = text(f"INSERT INTO signals ({cols}) VALUES ({vals})")
         with engine.begin() as conn:
             conn.execute(sql, _signal_params(signal))
             row = conn.execute(text("SELECT last_insert_rowid()")).fetchone()
             return row[0] if row else -1
     else:
-        sql = text("""
-            INSERT INTO signals
-                (symbol, ts, setup_type, direction, ml_score, sentiment_score,
-                 entry_price, stop_loss, take_profit, position_size, atr)
-            VALUES (:symbol, :ts, :setup_type, :direction, :ml_score, :sentiment_score,
-                    :entry_price, :stop_loss, :take_profit, :position_size, :atr)
-            RETURNING id
-        """)
+        sql = text(f"INSERT INTO signals ({cols}) VALUES ({vals}) RETURNING id")
         with engine.begin() as conn:
             row = conn.execute(sql, _signal_params(signal)).fetchone()
             return row[0] if row else -1
 
 
+def _to_unix(value):
+    """Timestamp/datetime/epoch → entero Unix (segundos), o None."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (int, float)):
+        return int(value)
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return int(ts.timestamp())
+
+
 def _signal_params(signal: dict) -> dict:
     return {
+        "setup_ts":        _to_unix(signal.get("setup_ts")),
+        "data_source":     signal.get("data_source"),
+        "last_bar_ts":     _to_unix(signal.get("last_bar_ts")),
+        "mode":            signal.get("mode") or "live",
         "symbol":          signal["symbol"],
         "ts":              int(pd.Timestamp(signal["ts"]).timestamp()),
         "setup_type":      signal["setup_type"],
@@ -298,6 +372,7 @@ def _signal_params(signal: dict) -> dict:
 
 
 def load_signals(symbol: str = None, limit: int = 100) -> pd.DataFrame:
+    init_db()
     query  = "SELECT * FROM signals"
     params: dict = {}
     if symbol:

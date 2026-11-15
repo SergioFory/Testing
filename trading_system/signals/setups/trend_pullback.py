@@ -17,6 +17,7 @@ import ta
 from loguru import logger
 
 from config.settings import PULLBACK_PARAMS
+from signals.setups.daily_context import map_daily_context
 
 
 def add_trend_filter(df_daily: pd.DataFrame,
@@ -80,13 +81,10 @@ def detect_pullbacks(df_4h: pd.DataFrame,
     # --- Contexto de tendencia desde daily ---
     if df_daily is not None and not df_daily.empty:
         df_d = add_trend_filter(df_daily, min_trend_bars=p["min_trend_bars"])
-        # Propagar tendencia diaria a 4H (forward fill)
-        trend_daily = df_d["trend"].copy()
-        # Reindex daily trend to 4H timestamps (use date matching)
-        df_dates    = [d.date() for d in df.index]
-        daily_dates = [d.date() for d in trend_daily.index]
-        daily_map   = dict(zip(daily_dates, trend_daily.values))
-        df["trend_context"] = [daily_map.get(d, 0) for d in df_dates]
+        # Sin look-ahead (Fase 1): en 4H cada vela usa la tendencia del diario del
+        # día ANTERIOR (ya cerrado); antes usaba la del mismo día, que cierra a
+        # medianoche. Si la base ya es diaria (oro/SPX) se empareja el mismo día.
+        df["trend_context"] = map_daily_context(df.index, df_d["trend"], 0)
     else:
         # Si no hay daily, calcular tendencia en el mismo timeframe
         ema_f = df["close"].ewm(span=p["ema_fast"]).mean()

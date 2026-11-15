@@ -119,12 +119,11 @@ def detect_reversals(df: pd.DataFrame,
         strong_bear = (ema_f < ema_s) & (
             (ema_s - df_daily["close"]) / ema_s > 0.08
         )
-        daily_dates = [d.date() for d in df_daily.index]
-        sb_map = dict(zip(daily_dates, strong_bull.values))
-        sd_map = dict(zip(daily_dates, strong_bear.values))
-        df_dates = [d.date() for d in df.index]
-        df["strong_bull_daily"] = [sb_map.get(d, False) for d in df_dates]
-        df["strong_bear_daily"] = [sd_map.get(d, False) for d in df_dates]
+        # Sin look-ahead (Fase 1): en 4H cada vela usa el diario del día ANTERIOR
+        # (ya cerrado); si la base ya es diaria (SPX) se empareja el mismo día.
+        from signals.setups.daily_context import map_daily_context
+        df["strong_bull_daily"] = map_daily_context(df.index, strong_bull, False)
+        df["strong_bear_daily"] = map_daily_context(df.index, strong_bear, False)
     else:
         df["strong_bull_daily"] = False
         df["strong_bear_daily"] = False

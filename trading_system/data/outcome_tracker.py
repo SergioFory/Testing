@@ -366,17 +366,18 @@ def check_outcome_detail(
 ) -> dict | None:
     """
     Resultado de una señal con velas CERRADAS, con la MISMA convención que el
-    validador (backtest/validate.py:_simulate_setup):
+    validador (backtest/validate.py:_simulate_setup), Fase 1 punto 1.7:
       - vela del setup = i (la de setup_ts; en señales antiguas sin setup_ts, la
         vela que contiene la hora de la señal: entonces se emitía con la vela
         aún abierta);
-      - la vela i+1 es la de entrada y NO se revisa;
-      - SL/TP se revisan de i+2 a i+1+forward_bars (si una vela toca ambos,
-        cuenta el SL);
-      - salida por tiempo al cierre de la vela i+1+forward_bars.
-    Antes se contaba desde la hora de emisión: en cripto coincidía, pero en los
-    diarios (emitidos tras el cierre) se incluía la vela de entrada y la salida
-    por tiempo caía una vela antes que en el validador.
+      - la vela i+1 es la de ENTRADA (el mensaje llega justo tras el cierre de
+        i) y SÍ se revisa: SL/TP se miran de i+1 a i+forward_bars, forward_bars
+        velas en total (si una vela toca ambos, cuenta el SL);
+      - salida por tiempo al cierre de la vela i+forward_bars (la hora que
+        devuelve time_exit_deadline y que muestra el mensaje).
+    Hasta la Fase 1 la vela de entrada no se revisaba (de i+2 a i+1+forward):
+    un SL tocado en las primeras 4 horas no contaba, aunque en la cuenta real
+    del usuario sí habría saltado.
 
     Returns:
         {"outcome": "win"|"loss"|"expired", "exit_price": float, "exit_ts": Timestamp}
@@ -408,7 +409,7 @@ def check_outcome_detail(
         setup_pos = int(df.index.searchsorted(anchor, side="right")) - 1
     if setup_pos < 0:
         return None
-    future = df.iloc[setup_pos + 2: setup_pos + 2 + forward_bars]
+    future = df.iloc[setup_pos + 1: setup_pos + 1 + forward_bars]
     if future.empty:
         return None  # Muy pronto para resolver
 
@@ -430,6 +431,39 @@ def check_outcome_detail(
                 "exit_ts": _bar_close(symbol, future.index[-1])}
 
     return None  # Aún hay velas por venir
+
+
+def time_exit_deadline(symbol: str, setup_ts) -> pd.Timestamp:
+    """
+    Hora UTC del cierre de la vela i+forward_bars (i = vela del setup): si a esa
+    hora no se ha tocado ni el SL ni el TP, la operación se cierra a mercado.
+    Es la misma vela en la que check_outcome_detail da la salida por tiempo.
+
+      - Cripto 4H: setup_ts es la APERTURA de la vela i, así que la vela
+        i+forward_bars cierra en setup_ts + (forward_bars + 1) × 4h.
+      - Diarios de sesión (oro, SPX; yfinance): forward_bars sesiones bursátiles
+        de lunes a viernes después de la del setup, a la hora de cierre de la vela
+        diaria (DAILY_BAR_CLOSE_UTC, 22:15 UTC). No conoce los festivos: si hay
+        uno en medio, la vela número forward_bars llega un día hábil más tarde y
+        el tracker (que cuenta velas reales) cerrará ese día, no antes.
+      - Forex 4H (Twelve Data, apagado): aproximación continua como en cripto
+        (no descuenta el fin de semana).
+
+    Args:
+        setup_ts: vela del setup (Timestamp, datetime o segundos Unix).
+    """
+    from config.settings import ASSETS, DAILY_BAR_CLOSE_UTC
+
+    fwd = int(ASSETS.get(symbol, {}).get("forward_bars", 24))
+    t = pd.Timestamp(_unix(setup_ts), unit="s", tz="UTC")
+    if _is_session_daily(symbol):
+        h, m = DAILY_BAR_CLOSE_UTC
+        day = t.normalize()
+        # Si la fecha del setup cayera en fin de semana, BDay la lleva primero al
+        # siguiente día hábil (no ocurre con datos de yfinance, que son L-V).
+        target = day + pd.offsets.BDay(fwd)
+        return target + pd.Timedelta(hours=h, minutes=m)
+    return t + pd.Timedelta(hours=4) * (fwd + 1)
 
 
 def _bar_close(symbol: str, bar_open_ts) -> pd.Timestamp:

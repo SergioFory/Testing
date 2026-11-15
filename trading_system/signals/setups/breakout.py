@@ -60,10 +60,14 @@ def detect_breakouts(df: pd.DataFrame,
     df["atr_pct_rank"] = df["atr_pct"].rolling(100).rank(pct=True)
 
     # --- Filtro de régimen de VOLATILIDAD ---
-    # Validación 2026-09 (validate --symbol): la franja ATR rank 0.30-0.50 tiene
-    # E[R] fuertemente negativo y coincidente en dos activos independientes:
-    # BTC -0.234 (n=78) y ETH -0.374 (n=57). Mecanismo: un breakout necesita
-    # expansión de volatilidad para prosperar; en mercado dormido es un fakeout.
+    # Validación 2026-09 (validate --symbol): la franja ATR rank 0.30-0.50 tenía
+    # E[R] negativo y coincidente en dos activos independientes (entonces BTC
+    # -0.234 n=78 y ETH -0.374 n=57). Esas cifras ya no se reproducen (ventana
+    # móvil de Gate.io y convención de salida de la Fase 1); medido de nuevo con
+    # el snapshot 2026-11-15, solo breakouts: BTC -0.190 (n=61), ETH -0.165
+    # (n=46). Mismo signo, menor magnitud (ver config/settings.py). Mecanismo
+    # propuesto: un breakout necesita expansión de volatilidad para prosperar;
+    # en mercado dormido es un fakeout.
     # Configurable por activo con "atr_rank_min" (default 0.30 = comportamiento previo).
     atr_rank_min = p.get("atr_rank_min", 0.30)
 

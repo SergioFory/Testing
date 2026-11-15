@@ -136,25 +136,28 @@ def test_time_exit_after_forward_bars_with_pnl():
     res = check_outcome_detail("BTCUSDT", sig, "long", 100.0, 97.0, 104.5, df=df)
     assert res["outcome"] == "expired"
     # Señal antigua sin setup_ts: vela del setup = la que contiene la señal (pos 0).
-    # Como en el validador: entrada en la 1, se revisan de la 2 a la 25 y se sale
-    # al cierre de la 25 (resolved_ts = cierre de esa vela).
-    assert res["exit_ts"] == df.index[25] + pd.Timedelta(hours=4)
+    # Convención Fase 1 (igual que el validador): entrada en la 1, se revisan de la
+    # 1 a la 24 y se sale al cierre de la 24 (resolved_ts = cierre de esa vela).
+    assert res["exit_ts"] == df.index[24] + pd.Timedelta(hours=4)
     assert res["exit_price"] == pytest.approx(100.0)
 
 
 def test_tracker_matches_validator_convention_daily():
-    """Diario emitido tras el cierre: la vela de entrada (D+1) no se revisa y la
-    salida por tiempo cae en la vela i+1+forward, igual que _simulate_setup."""
+    """Diario emitido tras el cierre (convención Fase 1): la vela de entrada (D+1)
+    SÍ se revisa y la salida por tiempo cae en la vela i+forward, igual que
+    _simulate_setup."""
     from data.outcome_tracker import check_outcome_detail
     df = _bars("2026-09-01", 40, freq="1D", price=4000.0)
     df["close"] = 4000.0 + np.arange(40)
     setup = df.index[5]
-    # La vela de entrada toca el SL: el validador no la mira, el tracker tampoco
-    df.loc[df.index[6], "high"] = 4300.0
     sig = setup + pd.Timedelta(hours=23)
     res = check_outcome_detail("XAUUSD", sig, "short", 4005.0, 4160.0, 3800.0, df=df, setup_ts=setup)
     assert res["outcome"] == "expired"
-    assert res["exit_price"] == pytest.approx(float(df["close"].iloc[5 + 1 + 20]))
+    assert res["exit_price"] == pytest.approx(float(df["close"].iloc[5 + 20]))
+    # La vela de entrada toca el SL: ahora cuenta (en el validador también)
+    df.loc[df.index[6], "high"] = 4300.0
+    res = check_outcome_detail("XAUUSD", sig, "short", 4005.0, 4160.0, 3800.0, df=df, setup_ts=setup)
+    assert res["outcome"] == "loss" and res["exit_price"] == pytest.approx(4160.0)
 
 
 def test_sl_checked_before_tp_and_before_age():

@@ -10,8 +10,9 @@ Rigor (sin look-ahead, realista):
   - Entrada a la APERTURA de la barra siguiente al setup (no al cierre del setup).
   - SL/TP desde ese entry con los multiplicadores ATR del activo.
   - Comisión (ida+vuelta) y slippage en entrada y salida.
-  - Simulación hacia adelante hasta forward_bars; si toca SL y TP en la misma
-    barra, se asume SL primero (conservador).
+  - Simulación hacia adelante de forward_bars velas contando la de entrada
+    (de i+1 a i+forward_bars); si toca SL y TP en la misma barra, se asume SL
+    primero (conservador). Salida por tiempo al cierre de i+forward_bars.
   - Expectativa medida en R (PnL neto / riesgo). E[R] > 0 = edge tras costos.
 
 NO usa el ML: prueba la materia prima (los setups). Compara además el subconjunto
@@ -31,6 +32,16 @@ def _simulate_setup(df: pd.DataFrame, i_setup: int, direction: str, atr: float,
     """
     Simula una operación entrando a la apertura de la barra i_setup+1.
     Retorna el PnL en R (neto de costos) o None si no se puede simular.
+
+    Convención de salida (Fase 1, punto 1.7; IDÉNTICA en el tracker,
+    data/outcome_tracker.check_outcome_detail):
+      - vela del setup = i; entrada a la APERTURA de la vela i+1;
+      - SL/TP se revisan desde la propia vela de ENTRADA (i+1) hasta la
+        i+forward_bars: forward_bars velas en total (si una vela toca ambos,
+        cuenta el SL);
+      - salida por tiempo al CIERRE de la vela i+forward_bars.
+    Antes se empezaba a revisar en i+2 (la vela de entrada se ignoraba aunque
+    tocara el SL) y la salida por tiempo caía en i+1+forward_bars.
     """
     entry_pos = i_setup + 1
     if entry_pos >= len(df) or atr <= 0:
@@ -54,10 +65,12 @@ def _simulate_setup(df: pd.DataFrame, i_setup: int, direction: str, atr: float,
     if risk_per_unit <= 0:
         return None
 
-    # Escaneo hacia adelante desde la barra posterior a la entrada.
+    # Escaneo hacia adelante desde la propia vela de entrada (i+1) hasta la
+    # i+forward_bars, ambas incluidas. La apertura de i+1 es la entrada: todo el
+    # rango de esa vela ocurre después y puede tocar el SL o el TP.
     exit_price = None
-    last_pos = min(entry_pos + forward_bars, len(df) - 1)
-    for j in range(entry_pos + 1, last_pos + 1):
+    last_pos = min(i_setup + forward_bars, len(df) - 1)
+    for j in range(entry_pos, last_pos + 1):
         b = df.iloc[j]
         if direction == "long":
             hit_sl = b["low"]  <= sl

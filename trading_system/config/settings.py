@@ -65,8 +65,11 @@ ASSETS = {
         # Sin reversal: validación 2026-09 lo halló negativo de forma coincidente
         # en ambos activos cripto (BTC -0.095 n=36 | ETH -0.344 n=32). Mecanismo:
         # el reversal es contra-tendencia y en cripto la tendencia arrolla.
-        # El pullback se conserva: positivo en ambos (+0.047 / +0.051).
-        "setups":       ["breakout", "pullback"],
+        # Sin pullback (Fase 1, config honesta): ningún pullback de BTC ni de ETH
+        # llega al umbral 0.55 en la historia actual (máx. raw 0.513 en BTC y
+        # 0.434 en ETH, snapshot 2026-11-15), así que nunca se emitía; quitarlo
+        # no cambia ningún setup aprobado (check-live: BTC 64 / ETH 63).
+        "setups":       ["breakout"],
         "source":       "binance",
         "exchange":     "binanceusdm",
         "min_range_pct": 0.015,
@@ -93,7 +96,7 @@ ASSETS = {
     "ETHUSDT": {
         "label":        "ETH",
         "enabled":      True,
-        "setups":       ["breakout", "pullback"],   # sin reversal: -0.344 (ver BTC)
+        "setups":       ["breakout"],   # sin reversal (-0.344) ni pullback (ver BTC)
         "source":       "binance",
         "exchange":     "binanceusdm",
         "min_range_pct": 0.020,
@@ -413,11 +416,17 @@ REVERSAL_PARAMS = {
 ASSET_PARAMS_OVERRIDE = {
     # Crypto: solo breakouts en mercado en tendencia (ADX > 20 = trending)
     # Elimina los fakeouts que dominaban el dataset (249/282 breakouts en BTC)
-    # atr_rank_min 0.50 (era 0.30): validación 2026-09 mostró que la franja
-    # ATR rank 0.30-0.50 destruye valor de forma coincidente en ambos activos
-    # (BTC E[R] -0.234 n=78 | ETH -0.374 n=57). Cortarla ~duplica la expectativa
-    # perdiendo solo ~20% de los setups. NO se aprieta el ADX: su patrón resultó
-    # no-monotónico (ruido) y combinarlo con volatilidad empeoraba BTC.
+    # atr_rank_min 0.50 (era 0.30): la validación de 2026-09 halló que la franja
+    # ATR rank 0.30-0.50 destruía valor de forma coincidente en ambos activos
+    # (entonces: BTC E[R] -0.234 n=78 | ETH -0.374 n=57). Esas cifras YA NO se
+    # reproducen: Gate.io solo sirve las últimas ~10.000 velas (ventana móvil) y
+    # la convención de salida cambió en la Fase 1. Medido de nuevo (snapshot
+    # 2026-11-15, solo breakouts, convención Fase 1): franja 0.30-0.50
+    # BTC -0.190 (n=61) | ETH -0.165 (n=46); con corte 2026-09-18 BTC -0.203
+    # (n=59) | ETH -0.211 (n=45). El signo sigue siendo negativo en ambos, pero
+    # la magnitud es menor que la citada. Valor 0.50 SIN CAMBIOS (config
+    # congelada). NO se aprieta el ADX: su patrón resultó no-monotónico (ruido)
+    # y combinarlo con volatilidad empeoraba BTC.
     "BTCUSDT": {
         "BREAKOUT": {
             "adx_min_trend": 20,

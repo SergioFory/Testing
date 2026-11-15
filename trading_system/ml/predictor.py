@@ -5,9 +5,11 @@ import pandas as pd
 import numpy as np
 from loguru import logger
 
-from ml.trainer  import load_model
-from ml.features import compute_base_features, build_setup_feature_row
 from config.settings import ML_PARAMS
+
+# ml.trainer / ml.features se importan solo si el activo usa ML: lightgbm y
+# scikit-learn ocupan ~85 MB de RAM y con use_ml=False (todos los activos) no se
+# usan. Importa en Render Starter (512 MB compartidos entre el worker y el Shell).
 
 
 def score_setups(
@@ -53,6 +55,8 @@ def score_setups(
         )
         return df_setups
 
+    from ml.trainer  import load_model
+    from ml.features import compute_base_features, build_setup_feature_row
     model, feature_cols, medians, adaptive_threshold = load_model(symbol)
 
     effective_threshold = threshold if threshold is not None else \

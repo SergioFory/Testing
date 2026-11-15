@@ -24,21 +24,31 @@ import pandas as pd
 from config.settings import MAX_ENTRY_DIST_ATR, MAX_SETUP_AGE_BARS, ASSETS
 
 
+def _scored_setups(symbol: str, df_4h: pd.DataFrame, df_daily: pd.DataFrame = None) -> pd.DataFrame:
+    from signals.detector import detect_all_setups
+    from ml.predictor import score_setups
+    setups = detect_all_setups(df_4h, df_daily, symbol)
+    if setups.empty:
+        return setups
+    return score_setups(setups, df_4h, symbol, None).copy()
+
+
 def emulate_live_signals(symbol: str, df_4h: pd.DataFrame,
-                         df_daily: pd.DataFrame = None) -> pd.DataFrame:
+                         df_daily: pd.DataFrame = None,
+                         scored: pd.DataFrame = None) -> pd.DataFrame:
     """
     Emula el ciclo vivo al cierre de cada vela. Devuelve un DataFrame con una
     fila por señal emitida: emit_ts (vela tras cuyo cierre se emite), setup_ts,
     direction, age_bars (velas entre el setup y la emisión), entry, raw_score.
     """
-    from signals.detector import detect_all_setups
-    from ml.predictor import score_setups, get_best_setup
+    from ml.predictor import get_best_setup
 
-    setups = detect_all_setups(df_4h, df_daily, symbol)
-    if setups.empty:
+    if scored is None:
+        scored = _scored_setups(symbol, df_4h, df_daily)
+    if scored.empty:
         return pd.DataFrame(columns=["emit_ts", "setup_ts", "direction", "age_bars",
                                      "entry", "raw_score"])
-    scored = score_setups(setups, df_4h, symbol, None).copy()
+    scored = scored.copy()
     idx = df_4h.index
     scored["pos"] = idx.searchsorted(scored["ts"])
     closes = df_4h["close"].to_numpy()
@@ -75,18 +85,16 @@ def compare_with_validator(symbol: str, df_4h: pd.DataFrame,
     Compara las señales emuladas con el conjunto de setups aprobados que opera
     el validador. Devuelve métricas y las diferencias.
     """
-    from signals.detector import detect_all_setups
-    from ml.predictor import score_setups
-
-    setups = detect_all_setups(df_4h, df_daily, symbol)
-    if setups.empty:
+    # Una sola detección por activo (antes se hacía dos veces): menos RAM y tiempo,
+    # importante en el Shell de Render, que comparte los 512 MB con el worker.
+    scored = _scored_setups(symbol, df_4h, df_daily)
+    if scored.empty:
         return {"symbol": symbol, "approved": 0, "emitted": 0, "match": True,
                 "missing": [], "extra": [], "repeated": 0, "pct_age_le1": 1.0}
-    scored = score_setups(setups, df_4h, symbol, None)
     approved = {(pd.Timestamp(t), d) for t, d, ok in
                 zip(scored["ts"], scored["direction"], scored["ml_approved"]) if ok}
 
-    em = emulate_live_signals(symbol, df_4h, df_daily)
+    em = emulate_live_signals(symbol, df_4h, df_daily, scored=scored)
     emitted_list = list(zip(em["setup_ts"], em["direction"])) if not em.empty else []
     emitted = set(emitted_list)
     repeated = len(emitted_list) - len(emitted)

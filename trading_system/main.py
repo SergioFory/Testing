@@ -404,6 +404,7 @@ def cmd_check_live(symbol: str = None) -> bool:
     Retorna True si todos los activos revisados coinciden."""
     from backtest.live_emulation import compare_with_validator, print_comparison
 
+    import gc
     symbols = [symbol] if symbol else active_assets()
     all_ok = True
     for sym in symbols:
@@ -414,7 +415,10 @@ def cmd_check_live(symbol: str = None) -> bool:
             continue
         res = compare_with_validator(sym, df_4h, df_daily)
         print_comparison(res)
+        sys.stdout.flush()
         all_ok &= res["match"]
+        del df_4h, df_daily
+        gc.collect()
     print("\nResultado global:", "OK" if all_ok else "HAY DIFERENCIAS")
     return all_ok
 

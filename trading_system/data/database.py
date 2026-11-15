@@ -270,6 +270,15 @@ _SIGNAL_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_signals_open ON signals(resultado_real)",
 ]
 
+# Fase 1 (punto 1.11) — copia propia del histórico en la tabla ohlcv.
+#   source  de dónde salió cada vela: 'gateio' (la fuente del sistema), 'okx'
+#           (perpetuos USDT de OKX, solo para fechas que Gate.io ya no sirve),
+#           o el ticker de yfinance (GC=F, ^GSPC...). NULL = filas guardadas
+#           antes de existir la columna (procedencia sin verificar).
+_OHLCV_COLUMNS = [
+    ("source", "TEXT"),
+]
+
 
 def _existing_columns(conn, table: str, dialect: str) -> set:
     if dialect == "sqlite":
@@ -288,19 +297,20 @@ def _migrate(conn, dialect: str) -> None:
     # y en SQLite se tolera "duplicate column" para que ninguno de los dos falle.
     if dialect != "sqlite":
         conn.execute(text("SELECT pg_advisory_xact_lock(724501)"))
-    have = _existing_columns(conn, "signals", dialect)
-    for col, sqltype in _SIGNAL_COLUMNS:
-        if col in have:
-            continue
-        if dialect == "sqlite":
-            try:
-                conn.execute(text(_adapt_ddl(f"ALTER TABLE signals ADD COLUMN {col} {sqltype}", dialect)))
-            except Exception as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
-        else:
-            conn.execute(text(f"ALTER TABLE signals ADD COLUMN IF NOT EXISTS {col} {sqltype}"))
-        logger.info(f"Migración: columna signals.{col} añadida.")
+    for table, columns in (("signals", _SIGNAL_COLUMNS), ("ohlcv", _OHLCV_COLUMNS)):
+        have = _existing_columns(conn, table, dialect)
+        for col, sqltype in columns:
+            if col in have:
+                continue
+            if dialect == "sqlite":
+                try:
+                    conn.execute(text(_adapt_ddl(f"ALTER TABLE {table} ADD COLUMN {col} {sqltype}", dialect)))
+                except Exception as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+            else:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {sqltype}"))
+            logger.info(f"Migración: columna {table}.{col} añadida.")
     for stmt in _SIGNAL_INDEXES:
         conn.execute(text(stmt))
 
@@ -339,10 +349,15 @@ def init_db(force: bool = False) -> None:
 # OHLCV
 # ---------------------------------------------------------------------------
 
-def save_ohlcv(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
+def save_ohlcv(df: pd.DataFrame, symbol: str, timeframe: str, source: str | None = None) -> int:
+    """Guarda velas en la copia OHLCV (sin sobrescribir las que ya existan).
+    source: fuente de las velas; por defecto df.attrs["source"] (gateio, GC=F...)."""
     if df.empty:
         return 0
 
+    init_db()
+    if source is None:
+        source = (getattr(df, "attrs", None) or {}).get("source")
     engine  = get_engine()
     dialect = engine.dialect.name
     records = []
@@ -356,19 +371,20 @@ def save_ohlcv(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
             "low":       float(row["low"]),
             "close":     float(row["close"]),
             "volume":    float(row["volume"]),
+            "source":    source,
         })
 
     if dialect == "sqlite":
         sql = text("""
             INSERT OR IGNORE INTO ohlcv
-                (symbol, timeframe, ts, open, high, low, close, volume)
-            VALUES (:symbol, :timeframe, :ts, :open, :high, :low, :close, :volume)
+                (symbol, timeframe, ts, open, high, low, close, volume, source)
+            VALUES (:symbol, :timeframe, :ts, :open, :high, :low, :close, :volume, :source)
         """)
     else:
         sql = text("""
             INSERT INTO ohlcv
-                (symbol, timeframe, ts, open, high, low, close, volume)
-            VALUES (:symbol, :timeframe, :ts, :open, :high, :low, :close, :volume)
+                (symbol, timeframe, ts, open, high, low, close, volume, source)
+            VALUES (:symbol, :timeframe, :ts, :open, :high, :low, :close, :volume, :source)
             ON CONFLICT (symbol, timeframe, ts) DO NOTHING
         """)
 
@@ -397,6 +413,37 @@ def load_ohlcv(symbol: str, timeframe: str,
     df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True)
     df.set_index("ts", inplace=True)
     return df
+
+
+def ohlcv_coverage() -> list[dict]:
+    """Cobertura de la copia OHLCV por símbolo, timeframe y fuente:
+    [{symbol, timeframe, source, n, first_ts, last_ts}] (ts en segundos Unix;
+    source None = filas sin fuente registrada). Solo agrega en la BD."""
+    init_db()
+    sql = text("""
+        SELECT symbol, timeframe, source, COUNT(*) AS n, MIN(ts) AS first_ts, MAX(ts) AS last_ts
+        FROM ohlcv GROUP BY symbol, timeframe, source
+        ORDER BY symbol, timeframe, MIN(ts)
+    """)
+    with get_engine().connect() as conn:
+        return [dict(r) for r in conn.execute(sql).mappings().fetchall()]
+
+
+def ohlcv_gaps(symbol: str, timeframe: str, step_seconds: int) -> dict:
+    """Huecos de una serie de paso fijo (cripto 24/7): número de saltos mayores
+    que step_seconds entre velas consecutivas y velas que faltan en total.
+    Se calcula en la BD (LAG, SQLite ≥ 3.25 y PostgreSQL) sin cargar la serie."""
+    init_db()
+    sql = text("""
+        SELECT COUNT(*) AS gaps, COALESCE(SUM(d / :step - 1), 0) AS missing, MAX(d) AS max_gap
+        FROM (SELECT ts - LAG(ts) OVER (ORDER BY ts) AS d
+              FROM ohlcv WHERE symbol = :sym AND timeframe = :tf) t
+        WHERE d > :step
+    """)
+    with get_engine().connect() as conn:
+        row = conn.execute(sql, {"sym": symbol, "tf": timeframe, "step": int(step_seconds)}).mappings().fetchone()
+    return {"gaps": int(row["gaps"] or 0), "missing": int(row["missing"] or 0),
+            "max_gap_s": int(row["max_gap"] or 0)}
 
 
 # ---------------------------------------------------------------------------

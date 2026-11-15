@@ -8,6 +8,7 @@ Modos de uso:
   python main.py update                         # Actualizar todos los datos
   python main.py schedule                       # Modo daemon (señales cada hora)
   python main.py check-live                     # Regresión "vivo = validador"
+  python main.py history-stats                  # Cobertura de la copia OHLCV (backfill_history.py)
 """
 import argparse
 import sys
@@ -944,6 +945,7 @@ Ejemplos:
   python main.py schedule --interval 60 --retrain-hour 03:00
   python main.py telegram                           # test de conexión
   python main.py summary                            # resumen diario (vista previa)
+  python main.py history-stats                      # cobertura de la tabla ohlcv
         """,
     )
     sub = p.add_subparsers(dest="command", required=True)
@@ -1003,6 +1005,10 @@ Ejemplos:
     # summary — resumen nocturno desde la BD (vista previa; --send lo envía)
     psm = sub.add_parser("summary", help="Resumen diario desde la BD con el estado SPRT/CUSUM (vista previa)")
     psm.add_argument("--send", action="store_true", help="Enviarlo además por Telegram")
+
+    # history-stats — cobertura de la copia propia del histórico (Fase 1, 1.11)
+    sub.add_parser("history-stats",
+                   help="Cobertura de la tabla ohlcv por símbolo/timeframe/fuente (ver backfill_history.py)")
 
     return p
 
@@ -1069,6 +1075,10 @@ def main():
         print(_html.unescape(re.sub(r"<[^>]+>", "", build_daily_summary())))
         if args.send:
             print("Enviado." if send_daily_report() else "No se pudo enviar (¿Telegram configurado?).")
+
+    elif args.command == "history-stats":
+        from backfill_history import format_history_stats
+        print(format_history_stats())
 
 
 if __name__ == "__main__":

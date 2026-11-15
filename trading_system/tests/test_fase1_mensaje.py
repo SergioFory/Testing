@@ -117,7 +117,9 @@ def test_message_crypto_full_content():
     assert "R:R a la entrada:</b> 1.50" in msg
     # Riesgo real = risk_usd / capital (el tope del 10 % lo deja en ~0.23 %)
     assert f"${t.risk_usd:,.2f} = {t.risk_usd / 10_000 * 100:.2f} %" in msg
-    assert "tope de tamaño del 10 % del capital" in msg
+    # Revisión de la Fase 1: sin "objetivo 1.00 %"; se compara con el tope de la regla 3.
+    assert "objetivo" not in msg and "1.00 %" not in msg
+    assert "dentro del tope de las reglas: 0.25 %" in msg
     assert "Lotes XM:</b> pendiente de la especificación del contrato" in msg
     assert f"{t.position_qty:.6f}".rstrip("0") + " BTC" in msg
     dl = time_exit_deadline("BTCUSDT", st)

@@ -18,7 +18,14 @@ _BASE_URL = "https://api.telegram.org/bot{token}/{method}"
 
 
 def _send(text: str, parse_mode: str = "HTML", retries: int = 3) -> bool:
-    """Envía un mensaje al chat configurado. Retorna True si tuvo éxito."""
+    """Envía un mensaje al chat configurado. Retorna True si tuvo éxito.
+
+    Reintenta errores de conexión y respuestas de error de la API, pero NO un
+    ReadTimeout: la petición ya llegó y Telegram pudo entregar el mensaje aunque
+    se perdiera la respuesta; reintentar lo duplicaba (3 copias de la misma
+    señal, más una 4.ª del reenvío del ciclo siguiente; revisión de la Fase 1).
+    Se devuelve False (envío incierto) y, si es una señal, el reenvío del ciclo
+    siguiente lleva una nota de que puede ser la misma."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logger.debug("Telegram no configurado (TOKEN o CHAT_ID ausentes). Notificación omitida.")
         return False
@@ -41,6 +48,10 @@ def _send(text: str, parse_mode: str = "HTML", retries: int = 3) -> bool:
             logger.warning(
                 f"Telegram API respondió {resp.status_code}: {resp.text[:200]}"
             )
+        except requests.ReadTimeout as exc:
+            logger.error(f"Telegram: sin respuesta tras enviar ({exc}); puede que el mensaje "
+                         "haya llegado. No se reintenta para no duplicarlo.")
+            return False
         except requests.RequestException as exc:
             logger.warning(f"Error enviando Telegram (intento {attempt}/{retries}): {exc}")
 
@@ -104,7 +115,8 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
       - hora UTC de la vela del setup y cuánto hace que cerró;
       - entrada/SL/TP, precio actual (cierre de la última vela cerrada) y el R:R
         efectivo si se entra a ese precio;
-      - riesgo REAL en % del capital (risk_usd / capital, con el tope de tamaño);
+      - riesgo REAL en % del capital (risk_usd / capital, con el tope de tamaño)
+        frente al tope de la regla 3 (0,25 %); si lo supera, el tamaño que lo respeta;
       - tamaño en unidades del activo y en LOTES de XM (XM_CONTRACTS; pendiente
         mientras no haya especificación del contrato);
       - "Cerrar a mercado si no toca SL/TP antes de: <fecha UTC>" = cierre de la
@@ -125,7 +137,7 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
         now:           reloj inyectable (pruebas); por defecto, ahora UTC.
     """
     import pandas as pd
-    from config.settings import ASSETS, RISK, TRADING_CAPITAL
+    from config.settings import ASSETS, RULES_MAX_RISK_PCT, TRADING_CAPITAL
     from risk.position_sizer import xm_lot_size
 
     cfg = ASSETS.get(trade.symbol, {})
@@ -191,15 +203,21 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
     # Riesgo real y tamaño.
     lines.append("")
     risk_usd = float(trade.risk_usd)
+    rules_cap_line = None
     if capital and capital > 0:
         risk_pct = risk_usd / float(capital)
-        objetivo = float(RISK.get("risk_per_trade", 0.01))
-        nota = ""
-        if risk_pct < objetivo - 1e-6:
-            nota = (f" <i>(objetivo {_e(_fmt_pct(objetivo))}; lo limita el tope de tamaño "
-                    "del 10 % del capital)</i>")
+        # Revisión de la Fase 1: ya no se muestra "objetivo 1.00 %" (contradecía la
+        # regla 3: el riesgo no sube del 0,25 % hasta que el SPRT acepte). Se
+        # compara con ese tope y, si se supera, se dice qué tamaño lo respeta.
+        cap = float(RULES_MAX_RISK_PCT)
         lines.append(f"<b>Capital:</b> ${float(capital):,.0f}")
-        lines.append(f"<b>Riesgo real:</b> ${risk_usd:,.2f} = {_e(_fmt_pct(risk_pct))} del capital{nota}")
+        if risk_pct <= cap + 1e-9:
+            nota = f" <i>(dentro del tope de las reglas: {_e(_fmt_pct(cap))})</i>"
+            lines.append(f"<b>Riesgo real:</b> ${risk_usd:,.2f} = {_e(_fmt_pct(risk_pct))} del capital{nota}")
+        else:
+            lines.append(f"<b>Riesgo real:</b> ${risk_usd:,.2f} = {_e(_fmt_pct(risk_pct))} del capital "
+                         f"⚠️ <i>(más que el tope de las reglas: {_e(_fmt_pct(cap))})</i>")
+            rules_cap_line = cap / risk_pct   # fracción del tamaño que respeta el tope
     else:
         lines.append(f"<b>Riesgo:</b> ${risk_usd:,.2f}")
 
@@ -211,6 +229,11 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
     unit = lots["unit"]
     lines.append(f"<b>Tamaño:</b> {_e(_fmt_qty(qty))} {_e(unit)} "
                  f"(${float(trade.position_size):,.0f} de nominal)")
+    if rules_cap_line is not None:
+        lines.append(f"<b>Para respetar el {_e(_fmt_pct(RULES_MAX_RISK_PCT))}:</b> "
+                     f"{_e(_fmt_qty(qty * rules_cap_line))} {_e(unit)} "
+                     f"(${float(trade.position_size) * rules_cap_line:,.0f} de nominal; "
+                     f"riesgo ${risk_usd * rules_cap_line:,.2f})")
     if lots["status"] == "pending":
         lines.append("<b>Lotes XM:</b> pendiente de la especificación del contrato "
                      f"<i>(opera {_e(_fmt_qty(qty))} {_e(unit)})</i>")
@@ -262,7 +285,8 @@ def send_signal_alert(trade, sentiment: dict = None, **kwargs) -> bool:
     return _send(safe_format_signal_alert(trade, sentiment, **kwargs))
 
 
-RESEND_NOTE = "🔁 <i>Reenvío tras fallo de Telegram</i>"
+RESEND_NOTE = ("🔁 <i>Reenvío tras fallo de Telegram (si ya te había llegado, es la MISMA señal: "
+               "no la abras dos veces)</i>")
 
 
 def send_text(text: str) -> bool:
@@ -298,25 +322,37 @@ def retry_failed_signal_alerts(max_age_hours: float = None, now=None) -> dict:
     """
     Reintenta las señales live cuyo envío falló (signals.notified = 0).
 
-      - Menos de `max_age_hours` (NOTIFY_RETRY_MAX_AGE_HOURS, 2 h) desde que se
-        registró: se reenvía el MISMO texto con la nota "Reenvío tras fallo de
-        Telegram" y, si Telegram confirma, se marca notified = 1.
-      - Más antigua: se deja notified = 0 (queda constancia en la BD de que el
-        usuario nunca la recibió) y se registra en el log una vez por proceso.
+      - Menos de `max_age_hours` (NOTIFY_RETRY_MAX_AGE_HOURS, 2 h) más el margen
+        NOTIFY_RETRY_GRACE_MINUTES (15 min: el ciclo se programa 60 min después
+        de TERMINAR el anterior, así que sin margen solo cabía un reintento)
+        desde que se registró: se reenvía el MISMO texto con la nota "Reenvío
+        tras fallo de Telegram" y, si Telegram confirma, se marca notified = 1.
+      - Más antigua: no se reenvía como señal (el precio ya se movió) y se deja
+        notified = 0 (queda constancia en la BD de que el usuario nunca la
+        recibió). Se registra en el log una vez por proceso y se envía UNA vez un
+        aviso corto "no te llegó la señal #N" en cuanto Telegram funcione (hasta
+        UNDELIVERED_NOTICE_MAX_AGE_HOURS; se apunta en kv para no repetirlo). El
+        resumen nocturno también las lista.
+
+    Los fallos se anotan en la salud del ciclo (monitoring.cycle_health): ese
+    ciclo no hace latido y el servicio externo avisa (revisión de la Fase 1).
 
     Nunca lanza: cualquier error se registra y el ciclo sigue.
-    Devuelve {"resent": n, "failed": n, "stale": n}.
+    Devuelve {"resent": n, "failed": n, "stale": n, "noticed": n}.
     """
     import pandas as pd
-    from config.settings import NOTIFY_RETRY_MAX_AGE_HOURS
-    out = {"resent": 0, "failed": 0, "stale": 0}
+    from config.settings import (NOTIFY_RETRY_MAX_AGE_HOURS, NOTIFY_RETRY_GRACE_MINUTES,
+                                 UNDELIVERED_NOTICE_MAX_AGE_HOURS)
+    out = {"resent": 0, "failed": 0, "stale": 0, "noticed": 0}
     if max_age_hours is None:
         max_age_hours = NOTIFY_RETRY_MAX_AGE_HOURS
+    limit_h = float(max_age_hours) + float(NOTIFY_RETRY_GRACE_MINUTES) / 60.0
     try:
         from data.database import load_unnotified_signals, mark_signal_notified
         rows = load_unnotified_signals()
     except Exception as exc:
         logger.error(f"Reintento de notificaciones: no se pudieron leer las señales pendientes: {exc}")
+        _mark_cycle("bd", f"leer señales sin notificar: {exc}")
         return out
     now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
     for row in rows:
@@ -327,29 +363,84 @@ def retry_failed_signal_alerts(max_age_hours: float = None, now=None) -> dict:
             if sig_ts.tzinfo is None:
                 sig_ts = sig_ts.tz_localize("UTC")
             age_h = (now - sig_ts).total_seconds() / 3600
-            if age_h >= max_age_hours:
+            if age_h >= limit_h:
                 out["stale"] += 1
                 if row["id"] not in _stale_logged:
                     _stale_logged.add(row["id"])
                     logger.error(
                         f"Señal #{row['id']} {row['symbol']} {str(row['direction']).upper()} NO se pudo "
-                        f"notificar y ya tiene {age_h:.1f} h (> {max_age_hours:g} h): no se reenvía; "
+                        f"notificar y ya tiene {age_h:.1f} h (> {limit_h:g} h): no se reenvía; "
                         "queda con notified=0 en la BD."
                     )
+                if age_h < float(UNDELIVERED_NOTICE_MAX_AGE_HOURS):
+                    out["noticed"] += int(_notice_undelivered(row, sig_ts, age_h))
                 continue
             text = row.get("alert_text") or _fallback_alert_text(row)
             if send_signal_resend(text):
-                mark_signal_notified(row["id"], True)
+                if not mark_signal_notified(row["id"], True):
+                    _mark_cycle("bd", f"marcar notificada la señal #{row['id']}")
                 out["resent"] += 1
                 logger.info(f"Señal #{row['id']} {row['symbol']}: reenviada tras fallo de Telegram.")
             else:
                 out["failed"] += 1
+                _mark_cycle("telegram", f"reenvío de la señal #{row['id']}")
+                quedan = limit_h - age_h
+                cuando = ("se reintentará en el próximo ciclo" if quedan > 0.75
+                          else "probablemente ya no se reintente (límite de antigüedad)")
                 logger.warning(f"Señal #{row['id']} {row['symbol']}: el reenvío volvió a fallar; "
-                               "se reintentará en el próximo ciclo.")
+                               f"{cuando}.")
         except Exception as exc:
             out["failed"] += 1
+            _mark_cycle("telegram", f"reintento de la señal #{row.get('id')}: {exc}")
             logger.error(f"Reintento de la señal #{row.get('id')}: {exc}")
     return out
+
+
+KV_UNDELIVERED_NOTICE = "aviso_no_entregada:"   # kv: + id de la señal → Unix del aviso
+
+
+def _notice_undelivered(row: dict, sig_ts, age_h: float) -> bool:
+    """Avisa UNA vez de que una señal nunca llegó (si no se avisó ya). True si
+    el aviso se envió ahora. Si no se puede enviar o guardar, se anota en la
+    salud del ciclo (sin latido) y se reintenta en el ciclo siguiente."""
+    import time as _time
+    from data.database import kv_get, kv_set
+    key = f"{KV_UNDELIVERED_NOTICE}{int(row['id'])}"
+    try:
+        if kv_get(key):
+            return False
+    except Exception as exc:
+        _mark_cycle("bd", f"leer aviso de la señal #{row['id']}: {exc}")
+        return False
+    estado = ("ya está cerrada" if row.get("resultado_real")
+              else "sigue abierta según el sistema, pero el precio ya se habrá movido")
+    msg = (
+        f"⚠️ <b>No te llegó la señal #{int(row['id'])}</b> — {_e(row.get('symbol'))} "
+        f"{_e(str(row.get('direction') or '').upper())}\n"
+        f"Se emitió el {sig_ts:%Y-%m-%d %H:%M} UTC (hace {_e(_fmt_duration(age_h))}) y Telegram "
+        f"no la pudo entregar; ya no se reenvía como señal ({_e(estado)}).\n"
+        f"Entrada {_e(fmt_price(float(row['entry_price'])))} · SL {_e(fmt_price(float(row['stop_loss'])))} · "
+        f"TP {_e(fmt_price(float(row['take_profit'])))}.\n"
+        "<i>No entres ahora con estos niveles sin mirar el precio actual.</i>"
+    )
+    if not _send(msg):
+        _mark_cycle("telegram", f"aviso de señal no entregada #{row['id']}")
+        return False
+    try:
+        kv_set(key, int(_time.time()))
+    except Exception as exc:
+        logger.warning(f"Aviso de la señal #{row['id']} enviado pero no anotado ({exc}); "
+                       "puede repetirse.")
+    logger.info(f"Señal #{row['id']}: avisado de que no llegó por Telegram.")
+    return True
+
+
+def _mark_cycle(kind: str, detail: str) -> None:
+    try:
+        from monitoring.cycle_health import mark
+        mark(kind, detail)
+    except Exception:
+        pass
 
 
 def send_no_signal(symbol: str, reason: str = "") -> bool:

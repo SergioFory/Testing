@@ -478,9 +478,14 @@ def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_se
             set_signal_alert_text(signal_id, alert_text)
         except Exception as exc:
             logger.warning(f"[{symbol}] No se pudo añadir el ID al mensaje: {exc}")
+        from monitoring.cycle_health import mark as _mark_cycle
         if send_text(alert_text):
-            mark_signal_notified(signal_id, True)
+            if not mark_signal_notified(signal_id, True):
+                # Llegó pero la BD no lo apuntó: el ciclo siguiente la reenviará
+                # (con la nota de que puede ser la misma) y este ciclo no tiene latido.
+                _mark_cycle("bd", f"marcar notificada la señal #{signal_id}")
         else:
+            _mark_cycle("telegram", f"envío de la señal #{signal_id} de {symbol}")
             logger.error(f"[{symbol}] Señal #{signal_id} guardada pero Telegram falló; "
                          "se reintentará en el próximo ciclo.")
 
@@ -763,7 +768,9 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
 
     def _run_all_signals():
         import gc
+        from monitoring import cycle_health
         _cycle_fresh.clear()
+        cycle_health.reset()
         failed = []
         # Comandos de Telegram (/fill /skip /help, Fase 1 punto 1.10): polling sin
         # espera al inicio del ciclo. Nunca lanza ni bloquea.
@@ -786,6 +793,7 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
                 logger.info(f"Outcome tracker: {resolved} señal(es) resuelta(s).")
         except Exception as exc:
             logger.warning(f"Outcome tracker error: {exc}")
+            cycle_health.mark("bd", f"resolver señales abiertas: {exc}")
 
         # Reenviar señales cuyo envío a Telegram falló en un ciclo anterior
         # (Fase 1, columna notified). Nunca lanza.
@@ -818,9 +826,16 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
         _flush_ohlcv_copies()
 
         # Latido (Fase 1, punto 1.4): ciclo correcto = ningún activo lanzó una
-        # excepción y al menos uno tuvo datos frescos. Si no, no se hace ping y el
-        # servicio externo (HEARTBEAT_URL) avisa cuando falte. Nunca lanza.
-        if not failed and _cycle_fresh:
+        # excepción, al menos uno tuvo datos frescos y (revisión de la Fase 1)
+        # ningún acceso crítico a la BD ni envío de señal a Telegram falló en el
+        # ciclo, y la BD responde ahora (monitoring/cycle_health.py). Si no, no se
+        # hace ping y el servicio externo (HEARTBEAT_URL) avisa cuando falte.
+        # Nunca lanza.
+        db_ok = cycle_health.db_alive()
+        if not db_ok:
+            cycle_health.mark("bd", "SELECT 1 al final del ciclo")
+        problems = cycle_health.problems()
+        if not failed and _cycle_fresh and not problems:
             try:
                 from data.database import kv_set
                 from monitoring.daily_summary import KV_LAST_CYCLE_OK
@@ -831,7 +846,8 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
             ping_heartbeat()
         else:
             logger.warning(f"Ciclo incompleto (errores: {failed or 'ninguno'}; activos con datos: "
-                           f"{sorted(_cycle_fresh) or 'ninguno'}): sin latido.")
+                           f"{sorted(_cycle_fresh) or 'ninguno'}; fallos críticos: "
+                           f"{cycle_health.summary() or 'ninguno'}): sin latido.")
 
     def _run_nightly():
         """Reentrena si es necesario y envía el resumen (se ejecuta 1× al día).

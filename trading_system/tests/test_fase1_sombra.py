@@ -493,9 +493,11 @@ def test_poll_html_escaped_and_bad_inputs(temp_db, fake_telegram, monkeypatch):
     sent = fake_telegram["sent"]
     assert "&lt;b&gt;x&lt;/b&gt; &amp; y" in sent[0]
     assert "no es un precio válido" in sent[1] and "Uso:" in sent[2]
-    assert "más allá del Stop Loss" in sent[3]            # el fill se guarda igual, con aviso
+    # Revisión de la Fase 1: un precio más allá del SL/TP ya NO se guarda sin confirmar.
+    assert "más allá del" in sent[3] and "No lo he guardado" in sent[3]
+    assert f"/fill {sid} 104 confirmar" in sent[3]
     assert "/foo&lt;x&gt;" in sent[4]
-    assert [f["kind"] for f in _rows(temp_db, "fills")] == ["skip", "fill"]
+    assert [f["kind"] for f in _rows(temp_db, "fills")] == ["skip"]
 
 
 def test_poll_never_raises(temp_db, fake_telegram, monkeypatch):

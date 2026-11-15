@@ -122,7 +122,7 @@ def test_retry_resends_recent_with_note_and_marks(temp_db, fake_telegram):
                                  mode="live", notified=False, alert_text="TEXTO ORIGINAL")
     _set_ts(temp_db, sid, "2026-11-15 10:00")
     res = tg.retry_failed_signal_alerts(now=pd.Timestamp("2026-11-15 11:30", tz="UTC"))
-    assert res == {"resent": 1, "failed": 0, "stale": 0}
+    assert res == {"resent": 1, "failed": 0, "stale": 0, "noticed": 0}
     assert len(fake_telegram["sent"]) == 1
     msg = fake_telegram["sent"][0]
     assert msg.startswith(tg.RESEND_NOTE) and "TEXTO ORIGINAL" in msg
@@ -150,10 +150,14 @@ def test_retry_skips_signals_older_than_two_hours(temp_db, fake_telegram):
     from data.outcome_tracker import save_signal_from_trade
     sid = save_signal_from_trade(_Trade(), setup_ts=pd.Timestamp("2026-11-15 00:00", tz="UTC"),
                                  mode="live", notified=False, alert_text="X")
-    _set_ts(temp_db, sid, "2026-11-15 08:00")
+    # 2 h + el margen de 15 min (revisión de la Fase 1) = 2,25 h: con 2,5 h ya no se reenvía.
+    _set_ts(temp_db, sid, "2026-11-15 07:30")
     res = tg.retry_failed_signal_alerts(now=pd.Timestamp("2026-11-15 10:00", tz="UTC"))
-    assert res == {"resent": 0, "failed": 0, "stale": 1}
-    assert fake_telegram["sent"] == []
+    assert res == {"resent": 0, "failed": 0, "stale": 1, "noticed": 1}
+    # No se reenvía la señal; solo un aviso corto de que no llegó (una vez).
+    assert len(fake_telegram["sent"]) == 1
+    assert "No te llegó la señal #" in fake_telegram["sent"][0]
+    assert tg.RESEND_NOTE not in fake_telegram["sent"][0]
     assert _row(temp_db, sid)["notified"] == 0         # queda constancia de que no llegó
 
 

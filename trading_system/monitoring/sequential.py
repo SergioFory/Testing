@@ -43,6 +43,8 @@ from dataclasses import dataclass, field
 SPRT_PARAMS = {"mu0": 0.0, "mu1": 0.25, "sigma": 1.3, "alpha": 0.05, "beta": 0.20}
 CUSUM_PARAMS = {"k": 0.125, "h": 20.0}
 FREEZE_MAX_SIGNALS = 150     # la congelación acaba al decidir el SPRT o con 150 señales
+# Congelación de la configuración (informe final): desde aquí, la prueba real.
+CONFIG_FREEZE_UTC = "2026-09-18 17:21"
 
 # Motivos de shadow_setups que NO entran en la versión "sombra" del SPRT.
 SHADOW_EXCLUDE_MOTIVOS = ("shadow_asset",)
@@ -135,16 +137,29 @@ def cusum(rs, k: float = None, h: float = None) -> CUSUMResult:
 # Lectura de la BD
 # ---------------------------------------------------------------------------
 
-def _r_value(pnl_r, resultado):
-    """R de una fila resuelta: pnl_r; 'be' sin pnl_r cuenta como 0; si no, None."""
+def _r_value(pnl_r, resultado, entry=None, stop_loss=None, take_profit=None):
+    """R de una fila resuelta: pnl_r; si falta, el implícito en el resultado
+    (loss = −1, win = |TP − entrada| / |entrada − SL|, be = 0; misma regla que
+    outcome_tracker.signal_r). None solo si no se puede saber (expirada sin
+    precio). Antes una 'loss' sin pnl_r se omitía y sesgaba el R medio al alza."""
     try:
         if pnl_r is not None and not (isinstance(pnl_r, float) and math.isnan(pnl_r)):
             return float(pnl_r)
     except (TypeError, ValueError):
         pass
-    if resultado == "be":
-        return 0.0
-    return None
+    from data.outcome_tracker import r_from_outcome
+    return r_from_outcome(resultado, entry, stop_loss, take_profit)
+
+
+def _freeze_unix() -> int:
+    import pandas as pd
+    return int(pd.Timestamp(CONFIG_FREEZE_UTC, tz="UTC").timestamp())
+
+
+def _live_symbols() -> list[str]:
+    """Activos operativos que hoy se notifican (no apagados ni en modo sombra)."""
+    from config.settings import active_assets, notify_enabled
+    return [s for s in active_assets() if notify_enabled(s)]
 
 
 def load_live_r(since_ts: int | None = None, phase0: bool = True) -> list[float]:
@@ -152,24 +167,35 @@ def load_live_r(since_ts: int | None = None, phase0: bool = True) -> list[float]
 
     since_ts (Unix): solo señales resueltas desde esa hora (reinicio tras un
     cambio de configuración o una revisión; ver REGLAS_DE_DECISION.md).
-    phase0=False: en vez del universo, las señales live ANTERIORES a la Fase 0
-    (sin setup_ts), que se reportan aparte y no cuentan."""
+    phase0=False: en vez del universo, las señales live ORIGINALES anteriores a
+    la Fase 0 (sin setup_ts) emitidas DESDE LA CONGELACIÓN de la configuración
+    (CONFIG_FREEZE_UTC) de los activos que hoy se notifican: "las 8 originales"
+    del informe (§7, 1.12). Se reportan aparte y no cuentan. (Revisión de la
+    Fase 1: antes entraban las 37 señales sin setup_ts de toda la historia,
+    con configuraciones antiguas y activos ya apagados.)"""
     from sqlalchemy import text
     from data.database import get_engine, init_db
     init_db()
-    q = ("SELECT pnl_r, resultado_real, COALESCE(resolved_ts, ts) AS rts, id FROM signals "
+    q = ("SELECT pnl_r, resultado_real, entry_price, stop_loss, take_profit, "
+         "COALESCE(resolved_ts, ts) AS rts, id, symbol FROM signals "
          "WHERE COALESCE(mode, 'live') = 'live' AND quality_flag IS NULL "
          f"AND setup_ts IS {'NOT ' if phase0 else ''}NULL AND resultado_real IS NOT NULL")
     params = {}
     if since_ts is not None:
         q += " AND COALESCE(resolved_ts, ts) >= :since"
         params["since"] = int(since_ts)
+    if not phase0:
+        q += " AND ts >= :freeze"
+        params["freeze"] = _freeze_unix()
     q += " ORDER BY rts ASC, id ASC"
     with get_engine().connect() as conn:
         rows = conn.execute(text(q), params).fetchall()
+    keep = None if phase0 else set(_live_symbols())
     out = []
-    for pnl_r, resultado, _rts, _id in rows:
-        r = _r_value(pnl_r, resultado)
+    for pnl_r, resultado, entry, sl, tp, _rts, _id, symbol in rows:
+        if keep is not None and symbol not in keep:
+            continue
+        r = _r_value(pnl_r, resultado, entry, sl, tp)
         if r is not None:
             out.append(r)
     return out
@@ -183,7 +209,7 @@ def load_shadow_approved_r(exclude_motivos=SHADOW_EXCLUDE_MOTIVOS,
     from sqlalchemy import text
     from data.database import get_engine, init_db
     init_db()
-    q = ("SELECT pnl_r, resultado, motivo FROM shadow_setups "
+    q = ("SELECT pnl_r, resultado, motivo, entry, sl, tp FROM shadow_setups "
          "WHERE approved = 1 AND resultado IS NOT NULL")
     params = {}
     if since_ts is not None:
@@ -194,10 +220,10 @@ def load_shadow_approved_r(exclude_motivos=SHADOW_EXCLUDE_MOTIVOS,
         rows = conn.execute(text(q), params).fetchall()
     excl = set(exclude_motivos or ())
     out = []
-    for pnl_r, resultado, motivo in rows:
+    for pnl_r, resultado, motivo, entry, sl, tp in rows:
         if motivo in excl:
             continue
-        r = _r_value(pnl_r, resultado)
+        r = _r_value(pnl_r, resultado, entry, sl, tp)
         if r is not None:
             out.append(r)
     return out
@@ -237,7 +263,8 @@ def monitoring_state() -> dict:
         "cusum_since": cus_since,
         "n_live":      len(live),
         "freeze_max":  FREEZE_MAX_SIGNALS,
-        "pre_phase0":  {"n": len(pre), "mean_r": (sum(pre) / len(pre)) if pre else None},
+        "pre_phase0":  {"n": len(pre), "mean_r": (sum(pre) / len(pre)) if pre else None,
+                        "sum_r": sum(pre)},
     }
 
 
@@ -285,8 +312,9 @@ def format_monitoring(state: dict) -> str:
         lines.append(f"• {fmax} señales alcanzadas sin decisión del SPRT: fin de la congelación, revisar.")
     pre = state.get("pre_phase0") or {}
     if pre.get("n"):
-        lines.append(f"• Aparte (anteriores a la Fase 0, no cuentan): {pre['n']} señales, "
-                     f"R medio {pre['mean_r']:+.2f}R")
+        lines.append(f"• Aparte (originales desde la congelación de la configuración, "
+                     f"{CONFIG_FREEZE_UTC[:10]}, anteriores a la Fase 0; no cuentan): "
+                     f"{pre['n']} señal{'es' if pre['n'] != 1 else ''}, R medio {pre['mean_r']:+.2f}R")
     since, cus_since = state.get("since"), state.get("cusum_since")
     if since is not None:
         lines.append(f"• SPRT y CUSUM cuentan desde {_fmt_unix(since)}")

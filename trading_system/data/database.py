@@ -338,6 +338,13 @@ def init_db(force: bool = False) -> None:
     engine = get_engine()
     dialect = engine.dialect.name
     with engine.begin() as conn:
+        # PostgreSQL: el candado va ANTES de los CREATE TABLE. Si el worker y el
+        # dashboard arrancan a la vez sobre una BD sin las tablas nuevas, sus
+        # CREATE TABLE IF NOT EXISTS concurrentes se interbloqueaban
+        # (DeadlockDetected en 7 de 12 arranques simultáneos, revisión de la
+        # Fase 1). Es reentrante: el de _migrate no vuelve a esperar.
+        if dialect != "sqlite":
+            conn.execute(text("SELECT pg_advisory_xact_lock(724501)"))
         for stmt in _DDL:
             conn.execute(text(_adapt_ddl(stmt, dialect)))
         _migrate(conn, dialect)
@@ -536,7 +543,7 @@ def load_unnotified_signals() -> list[dict]:
     with get_engine().connect() as conn:
         rows = conn.execute(text(
             "SELECT id, symbol, ts, direction, setup_type, entry_price, stop_loss, "
-            "take_profit, ml_score, alert_text FROM signals "
+            "take_profit, ml_score, alert_text, resultado_real FROM signals "
             "WHERE notified = 0 AND (mode IS NULL OR mode = 'live') ORDER BY ts ASC"
         )).mappings().fetchall()
     return [dict(r) for r in rows]

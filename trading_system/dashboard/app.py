@@ -75,9 +75,13 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Parámetros")
 
+    # Capital por defecto = TRADING_CAPITAL (el mismo que usa el worker; revisión
+    # de la Fase 1: antes arrancaba siempre en 10.000 y un envío desde aquí salía
+    # con otro tamaño y otro % de riesgo que las señales del worker).
+    from config.settings import TRADING_CAPITAL
     capital = st.number_input(
         "Capital (USD)", min_value=100, max_value=1_000_000,
-        value=int(RISK["capital_inicial"]), step=500
+        value=int(min(max(TRADING_CAPITAL, 100), 1_000_000)), step=500
     )
     risk_pct = st.slider(
         "Riesgo por trade (%)", 0.5, 3.0,

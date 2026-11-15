@@ -124,9 +124,12 @@ def test_time_exit_deadline_crypto_matches_tracker():
 def test_time_exit_deadline_daily_business_days_matches_tracker():
     from data.outcome_tracker import time_exit_deadline, check_outcome_detail
     setup = pd.Timestamp("2026-11-13", tz="UTC")           # viernes
-    # 20 sesiones L-V después del viernes 13 → viernes 11-dic, cierre 22:15 UTC
-    assert time_exit_deadline("XAUUSD", setup) == pd.Timestamp("2026-12-11 22:15", tz="UTC")
-    df = _bars("2026-11-02", 40, freq="B", price=4000.0)   # solo días hábiles
+    # 20 sesiones después del viernes 13; el jueves 26-nov (Acción de Gracias) no
+    # hay sesión ni vela en yfinance → lunes 14-dic, cierre 22:15 UTC.
+    # (Revisión de la Fase 1: antes BDay daba el 11-dic y el tracker cerraba el 14.)
+    assert time_exit_deadline("XAUUSD", setup) == pd.Timestamp("2026-12-14 22:15", tz="UTC")
+    df = _bars("2026-11-02", 40, freq="B", price=4000.0)   # días hábiles…
+    df = df[df.index.normalize() != pd.Timestamp("2026-11-26", tz="UTC")]   # …sin el festivo
     res = check_outcome_detail("XAUUSD", setup + pd.Timedelta(hours=23), "long",
                                4000.0, 3900.0, 4200.0, df=df, setup_ts=setup)
     assert res["outcome"] == "expired"

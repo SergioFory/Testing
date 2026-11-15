@@ -17,7 +17,9 @@ vez se cambia algo de este documento, se escribe aquí con fecha y motivo.
 - **Señales live**: las que recibes por Telegram (no las del activo en modo sombra, hoy SPX),
   sin marca de calidad, emitidas desde la Fase 0 (tienen la vela del setup guardada),
   ya resueltas (ganada, perdida o cerrada por tiempo), **en el orden en que se resolvieron**.
-  Las señales anteriores a la Fase 0 se reportan aparte y no cuentan.
+  Las señales anteriores a la Fase 0 no cuentan; el resumen muestra aparte solo las
+  **originales emitidas desde la congelación** (18-sep-2026 17:21 UTC) de los activos que hoy
+  se notifican: las 8 del informe.
 - El resultado de cada una se mide en **R** (1R = la distancia de la entrada al stop).
   Ganar el TP de BTC = +1,5R; tocar el stop = −1R; cierre por tiempo = lo que haya.
 - Son los R del seguimiento automático: **sin costes del bróker** (spread, comisión, swap)
@@ -62,8 +64,15 @@ mala lo hace crecer. **Alarma si S llega a 20R.** Solo con las señales live.
    (datos, ejecución, mercado). No se "arregla" el sistema retocando filtros sobre los mismos
    datos. Tras la revisión, el CUSUM puede reiniciarse desde esa fecha (clave `cusum_desde`
    de la tabla `kv`, en segundos Unix), dejándolo escrito aquí.
+   **Cómo se aplica:** a mano, operando **la mitad de las unidades (o lotes)** que dice el
+   mensaje en la línea "Para respetar el 0.25 %" (o en "Tamaño" si esa línea no aparece).
+   Cambiar `risk_per_trade` en la configuración NO sirve: el tamaño casi siempre lo fija el
+   tope del 10 % de nominal (ver abajo) y bajarlo a la mitad solo cambia 10 de 212 setups.
 3. **El riesgo no sube del 0,25 %** por operación hasta que el SPRT con las señales live diga
    "edge aceptado". (En la práctica puede tardar años; esperar no cuesta rendimiento.)
+   **Ojo: hoy el sistema NO lo cumple solo** (ver "Riesgo real hoy"). Cada mensaje compara el
+   riesgo real con el 0,25 % y, si lo supera, añade la línea "Para respetar el 0.25 %: X
+   unidades": es el tamaño que hay que operar para cumplir esta regla.
 4. **SPX vuelve a notificarse solo si** el E[R] neto con los costes reales de XM es
    ≥ +0,10R en al menos 2 de 3 épocas **y** pasa la puerta de validación (Fase 2).
    Si no, sigue en sombra (se registra y se mide, sin coste).
@@ -72,9 +81,41 @@ mala lo hace crecer. **Alarma si S llega a 20R.** Solo con las señales live.
    ETH, mejora ≥ +0,10R).
 6. **Costes reales:** tras ~20 fills (`/fill`), si el R ejecutado menos el R teórico es
    menor que −0,10R de media, se ajustan los costes del modelo a los reales.
+   **Oro (base futuro/contado):** la entrada, el SL y el TP del oro salen del futuro GC=F,
+   pero en XM se opera el contado, que cotiza ~0,3–0,5 % por debajo (medido del 29-oct al
+   13-nov-2026 con PAXG/XAUT de Kraken: GC=F por encima en 11 de 12 días). Con el stop típico
+   son ≈0,1R, el mismo tamaño que el umbral de esta regla: un short de oro ejecutado al
+   instante saldrá "en contra" ~0,1R y un long "a favor" sin ser coste de ejecución. Antes de
+   ajustar costes con fills de oro, hay que medir esa base aparte (p. ej. anotar en el /fill
+   el precio de XM en el momento de la señal) o mirar el oro por separado de BTC/ETH.
+   Si un /fill se escribió mal, otro /fill de la misma señal lo sustituye (cuenta el más
+   reciente); un precio a más del 20 % de la entrada o más allá del SL/TP no se guarda sin
+   confirmar.
 7. **Si el SPRT dice "sin edge":** no se sube el riesgo y se revisa con calma qué dicen el
    registro sombra y los fills antes de decidir nada (pausar, seguir en papel o seguir igual
    es decisión tuya; no se cambian filtros a la vista de ese resultado).
+
+## Riesgo real hoy (añadido en la revisión de la Fase 1, 15-nov-2026)
+
+El tamaño lo calcula el sistema con `risk_per_trade` = 1 % y un **tope de nominal del 10 % del
+capital**; casi siempre manda el tope, así que el riesgo real depende de lo lejos que esté el
+stop. Medido con los setups aprobados de la historia (capital 10.000 USD, script
+`G-correcciones/riesgo_real.py`):
+
+| Activo | Últimos 12 meses: riesgo mediano | máximo | señales por encima del 0,25 % |
+|---|---|---|---|
+| BTC | 0,21 % | 0,34 % | 1 de 13 (8 %) |
+| ETH | 0,27 % | 0,55 % | 5 de 8 (63 %) |
+| Oro | 0,40 % | 0,68 % | 6 de 6 (100 %) |
+| SPX (sombra) | 0,19 % | 0,22 % | 0 de 5 |
+
+En toda la historia el rango va de ~0,1 % a ~0,8 %. Es decir: con el tamaño del mensaje, la
+regla 3 no se cumple en el oro ni en la mayoría de señales de ETH. Para cumplirla hay dos
+caminos: (a) operar el tamaño de la línea "Para respetar el 0.25 %" del mensaje (lo que se
+recomienda mientras dure la congelación), o (b) cambiar la configuración a un tope de RIESGO
+del 0,25 % en lugar del tope de nominal, o `risk_per_trade` = 0,0025 (que cambia el tamaño en
+94 de 212 setups). La opción (b) es un cambio de configuración: no altera qué señales salen,
+pero se anota aquí con fecha si se hace.
 
 ## Qué esperar (medido antes de empezar)
 

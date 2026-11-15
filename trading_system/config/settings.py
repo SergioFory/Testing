@@ -362,6 +362,15 @@ LIVE_HISTORY_DAYS = {"4h": 300, "1d": 900}
 # ciclo mientras tengan menos de estas horas; las más antiguas se quedan sin
 # notificar y solo se registran en el log (una señal vieja ya no es ejecutable).
 NOTIFY_RETRY_MAX_AGE_HOURS = 2.0
+# Margen sobre ese límite (revisión de la Fase 1): `schedule` programa el ciclo
+# siguiente 60 min después de TERMINAR el anterior, así que en el segundo
+# reintento la señal ya tiene 2 h + lo que duraron los ciclos (siempre > 2 h) y
+# en la práctica solo había UN reintento. Con 15 min de margen hay dos (a ~1 h y
+# a ~2 h); una señal más vieja ya no se reenvía y se avisa de que no llegó.
+NOTIFY_RETRY_GRACE_MINUTES = 15
+# Durante cuántas horas se intenta avisar (una vez) de una señal que NUNCA llegó
+# ("no te llegó la señal #N…"), por si Telegram vuelve tarde.
+UNDELIVERED_NOTICE_MAX_AGE_HOURS = 48
 
 
 # =============================================================================
@@ -621,6 +630,12 @@ XM_CONTRACTS = {
     "XAUUSD":  {"unit": "oz",  "contract_size": None, "min_lot": None, "lot_step": None},
     "SPX500":  {"unit": "unidades del índice", "contract_size": None, "min_lot": None, "lot_step": None},
 }
+
+# Tope de riesgo de la regla 3 de REGLAS_DE_DECISION.md ("el riesgo no sube del
+# 0,25 % hasta que el SPRT acepte el edge"). NO cambia el tamaño que calcula el
+# sistema (RISK + tope del 10 % de nominal; configuración congelada): el mensaje
+# avisa cuando el riesgo real lo supera y dice qué tamaño lo respetaría.
+RULES_MAX_RISK_PCT = 0.0025
 
 RISK = {
     "capital_inicial":  10_000,     # Capital inicial en USD (para backtest)

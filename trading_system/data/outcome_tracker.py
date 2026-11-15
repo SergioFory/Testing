@@ -42,11 +42,22 @@ def is_duplicate_signal(symbol: str, direction: str, entry_price: float,
             return (row or 0) > 0
     except Exception as exc:
         logger.warning(f"Dedup check falló ({exc}); no se bloquea la señal.")
+        _mark_db(f"dedup por precio: {exc}")
         return False
 
 
 # Alias retrocompatible (se mantenía con guion bajo internamente)
 _is_duplicate_signal = is_duplicate_signal
+
+
+def _mark_db(detail: str) -> None:
+    """Anota un fallo CRÍTICO de BD en la salud del ciclo: ese ciclo no hará
+    latido (revisión de la Fase 1). Nunca lanza."""
+    try:
+        from monitoring.cycle_health import mark
+        mark("bd", detail)
+    except Exception:
+        pass
 
 
 def _unix(ts) -> int:
@@ -77,6 +88,7 @@ def is_duplicate_setup(symbol: str, direction: str, setup_ts) -> bool:
             return (row or 0) > 0
     except Exception as exc:
         logger.error(f"Dedup por setup falló ({exc}); se bloquea la señal por prudencia.")
+        _mark_db(f"dedup por setup: {exc}")
         return True
 
 
@@ -97,6 +109,7 @@ def has_recent_legacy_alert(symbol: str, direction: str, setup_ts) -> bool:
             return (row or 0) > 0
     except Exception as exc:
         logger.error(f"Comprobación de alertas antiguas falló ({exc}); se bloquea la señal por prudencia.")
+        _mark_db(f"alertas antiguas: {exc}")
         return True
 
 
@@ -113,6 +126,7 @@ def emitted_setup_keys(symbol: str, since_ts) -> set:
         return {(pd.Timestamp(int(r[0]), unit="s", tz="UTC"), r[1]) for r in rows}
     except Exception as exc:
         logger.warning(f"No se pudieron leer los setups emitidos de {symbol}: {exc}")
+        _mark_db(f"setups emitidos de {symbol}: {exc}")
         return set()
 
 
@@ -171,6 +185,7 @@ def save_signal_from_trade(trade, sentiment: dict = None, setup_ts=None,
         return signal_id
     except Exception as exc:
         logger.error(f"Error guardando señal: {exc}")
+        _mark_db(f"guardar señal: {exc}")
         return -1
 
 
@@ -328,6 +343,9 @@ def resolve_open_signals(ohlcv_cache: dict | None = None) -> int:
             )
         except Exception as exc:
             logger.warning(f"Error resolviendo señal #{sig_id}: {exc}")
+            from sqlalchemy.exc import SQLAlchemyError
+            if isinstance(exc, SQLAlchemyError):
+                _mark_db(f"resolver señal #{sig_id}: {exc}")
 
     if resolved_count:
         logger.info(f"Outcome tracker: {resolved_count} señales resueltas.")
@@ -449,10 +467,14 @@ def time_exit_deadline(symbol: str, setup_ts) -> pd.Timestamp:
       - Cripto 4H: setup_ts es la APERTURA de la vela i, así que la vela
         i+forward_bars cierra en setup_ts + (forward_bars + 1) × 4h.
       - Diarios de sesión (oro, SPX; yfinance): forward_bars sesiones bursátiles
-        de lunes a viernes después de la del setup, a la hora de cierre de la vela
-        diaria (DAILY_BAR_CLOSE_UTC, 22:15 UTC). No conoce los festivos: si hay
-        uno en medio, la vela número forward_bars llega un día hábil más tarde y
-        el tracker (que cuenta velas reales) cerrará ese día, no antes.
+        después de la del setup (calendario de NYSE, o COMEX para el oro: L-V sin
+        festivos ni cierres excepcionales; data/market_calendar.py), a la hora de cierre de la vela
+        diaria (DAILY_BAR_CLOSE_UTC, 22:15 UTC). yfinance no tiene vela en esos
+        días, así que la vela número forward_bars que cuenta el tracker cae en la
+        misma fecha. (Hasta la revisión de la Fase 1 se usaba BDay, que no conoce
+        los festivos: el mensaje decía un día y el tracker cerraba uno a seis días
+        después en ~62 % de los casos.) Solo un cierre imprevisto o una rareza de
+        yfinance (p. ej. vela de GC=F en un festivo) puede desplazarlo un día.
       - Forex 4H (Twelve Data, apagado): aproximación continua como en cripto
         (no descuenta el fin de semana).
 
@@ -464,11 +486,11 @@ def time_exit_deadline(symbol: str, setup_ts) -> pd.Timestamp:
     fwd = int(ASSETS.get(symbol, {}).get("forward_bars", 24))
     t = pd.Timestamp(_unix(setup_ts), unit="s", tz="UTC")
     if _is_session_daily(symbol):
+        from data.market_calendar import add_sessions, calendar_for
         h, m = DAILY_BAR_CLOSE_UTC
-        day = t.normalize()
-        # Si la fecha del setup cayera en fin de semana, BDay la lleva primero al
-        # siguiente día hábil (no ocurre con datos de yfinance, que son L-V).
-        target = day + pd.offsets.BDay(fwd)
+        # Si la fecha del setup no fuera sesión (fin de semana, festivo con vela
+        # rara), la primera sesión que cuenta es la siguiente.
+        target = add_sessions(t.normalize(), fwd, calendar_for(symbol))
         return target + pd.Timedelta(hours=h, minutes=m)
     return t + pd.Timedelta(hours=4) * (fwd + 1)
 
@@ -611,8 +633,14 @@ def mean_ci90(values) -> tuple:
 
 def signal_r(row) -> float | None:
     """R de una señal resuelta: pnl_r; si falta, se deduce de pnl_pct (filas
-    antiguas: R = pnl_pct × entrada / |entrada − SL|); 'be' sin datos = 0.
-    None si no se puede saber (p. ej. expirada sin velas o cierre manual sin precio)."""
+    antiguas: R = pnl_pct × entrada / |entrada − SL|); si tampoco hay pnl_pct,
+    del resultado: 'loss' = −1R (salió por el SL), 'win' = |TP − entrada| /
+    |entrada − SL| (salió por el TP), 'be' = 0. None solo si no se puede saber
+    (expirada sin precio de salida, o faltan los niveles).
+
+    (Revisión de la Fase 1: antes una 'loss' sin pnl guardado quedaba FUERA del
+    E[R], que así salía sesgado hacia arriba: BTC +0.75R en vez de +0.60R.)
+    La misma regla usa monitoring.sequential._r_value."""
     def _num(v):
         try:
             f = float(v)
@@ -625,8 +653,24 @@ def signal_r(row) -> float | None:
     pct, entry, sl = _num(row.get("pnl_pct")), _num(row.get("entry_price")), _num(row.get("stop_loss"))
     if pct is not None and entry and sl is not None and abs(entry - sl) > 0:
         return pct * entry / abs(entry - sl)
-    if row.get("resultado_real") == "be":
+    return r_from_outcome(row.get("resultado_real"), entry, sl, _num(row.get("take_profit")))
+
+
+def r_from_outcome(resultado, entry=None, stop_loss=None, take_profit=None) -> float | None:
+    """R implícito en el resultado cuando no se guardó el precio de salida:
+    loss = −1, win = |TP − entrada| / |entrada − SL|, be = 0; si no, None."""
+    if resultado == "be":
         return 0.0
+    if resultado == "loss":
+        return -1.0
+    if resultado == "win":
+        try:
+            e, s, t = float(entry), float(stop_loss), float(take_profit)
+        except (TypeError, ValueError):
+            return None
+        if any(pd.isna(v) for v in (e, s, t)) or abs(e - s) <= 0:
+            return None
+        return abs(t - e) / abs(e - s)
     return None
 
 

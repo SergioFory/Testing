@@ -171,8 +171,10 @@ def _asset_block(conn, symbol: str, now_unix: int, since: int) -> list[str]:
 
 
 def _results_block(conn, since: int) -> list[str]:
+    from data.outcome_tracker import r_from_outcome
     rows = conn.execute(text(
-        "SELECT id, symbol, direction, resultado_real, pnl_r, COALESCE(mode, 'live') FROM signals "
+        "SELECT id, symbol, direction, resultado_real, pnl_r, COALESCE(mode, 'live'), "
+        "entry_price, stop_loss, take_profit FROM signals "
         "WHERE resultado_real IS NOT NULL AND quality_flag IS NULL "
         "AND COALESCE(resolved_ts, 0) >= :t ORDER BY resolved_ts ASC, id ASC"), {"t": since}).fetchall()
     lines = ["<b>Resultados de las últimas 24 h</b>"]
@@ -182,8 +184,8 @@ def _results_block(conn, since: int) -> list[str]:
         lines.append("• Ninguna señal live resuelta.")
     else:
         total = 0.0
-        for sid, sym, direction, res, pnl_r, _m in live:
-            r = float(pnl_r) if pnl_r is not None else (0.0 if res == "be" else None)
+        for sid, sym, direction, res, pnl_r, _m, entry, sl, tp in live:
+            r = float(pnl_r) if pnl_r is not None else r_from_outcome(res, entry, sl, tp)
             if r is not None:
                 total += r
             rtxt = f"{r:+.2f}R" if r is not None else "sin R"
@@ -201,6 +203,35 @@ def _results_block(conn, since: int) -> list[str]:
         lines.append(f"• Aprobados NO emitidos (registro sombra): {int(sh[0])} resuelto(s), "
                      f"{float(sh[1] or 0):+.2f}R")
     return lines
+
+
+def _undelivered_block(conn, since: int) -> list[str]:
+    """Señales live que NUNCA llegaron por Telegram (notified = 0): las de las
+    últimas 24 h y las que siguen abiertas. Sin esto, una señal perdida por una
+    caída larga de Telegram solo quedaba en el log (revisión de la Fase 1)."""
+    rows = conn.execute(text(
+        "SELECT id, symbol, direction, ts, entry_price, stop_loss, take_profit, resultado_real "
+        "FROM signals WHERE notified = 0 AND COALESCE(mode, 'live') = 'live' "
+        "AND (ts >= :t OR resultado_real IS NULL) ORDER BY ts ASC, id ASC"), {"t": since}).fetchall()
+    if not rows:
+        return []
+    from config.settings import fmt_price
+    lines = [f"⚠️ <b>Señales que NO te llegaron por Telegram: {len(rows)}</b>"]
+    for sid, sym, direction, ts, entry, sl, tp, res in rows[:5]:
+        estado = (f"cerrada: {_e(RESULT_TEXT.get(res, res))}" if res else "sigue abierta")
+        lines.append(f"• #{sid} {_e(sym)} {_e(str(direction).upper())} del {_fmt_ts(_ts_unix(ts))}: "
+                     f"entrada {_e(fmt_price(float(entry)))}, SL {_e(fmt_price(float(sl)))}, "
+                     f"TP {_e(fmt_price(float(tp)))} ({estado})")
+    if len(rows) > 5:
+        lines.append(f"• … y {len(rows) - 5} más")
+    return lines
+
+
+def _ts_unix(ts) -> int:
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    t = pd.Timestamp(ts)
+    return int((t.tz_localize("UTC") if t.tzinfo is None else t).timestamp())
 
 
 def fills_vs_theory() -> dict:
@@ -255,7 +286,8 @@ def _fills_block() -> list[str]:
         lines.append(f"• R ejecutado − R teórico (entrada): {fv['mean_diff_r']:+.3f}R de media en "
                      f"{fv['n_resolved']} señal(es) resuelta(s)")
         if fv["n_resolved"] >= 20 and fv["mean_diff_r"] < -0.10:
-            lines.append("  ⚠️ Regla 6: con ≥20 fills la diferencia es < −0,10R → ajustar los costes del modelo.")
+            lines.append("  ⚠️ Regla 6: con ≥20 fills la diferencia es < −0,10R → ajustar los costes del modelo "
+                         "(en el oro, descuenta antes la base futuro GC=F / contado de XM, ≈0,1R; ver reglas).")
     return lines
 
 
@@ -278,6 +310,13 @@ def build_daily_summary(now=None, symbols: list | None = None) -> str:
         pass
 
     with get_engine().connect() as conn:
+        try:
+            undelivered = _undelivered_block(conn, since)
+            if undelivered:
+                out.append("")
+                out.extend(undelivered)
+        except Exception as exc:
+            logger.warning(f"Resumen: bloque de señales no entregadas falló: {exc}")
         for sym in symbols:
             out.append("")
             try:

@@ -29,11 +29,16 @@ import notifications.telegram as tg
 from config.settings import fmt_price
 
 KV_OFFSET = "telegram_update_offset"
+# Intentos por comando antes de darlo por perdido y avisar (el contador vive en
+# memoria del proceso: si la BD está caída tampoco se podría guardar en ella).
+MAX_UPDATE_ATTEMPTS = 3
+_update_failures: dict = {}
 
 HELP_TEXT = (
     "🤖 <b>Comandos</b>\n\n"
     "<code>/fill ID PRECIO</code> — ejecutaste la señal #ID a ese precio.\n"
     "   Ej.: <code>/fill 123 65432.5</code>\n"
+    "   Si te equivocas, envía otro <code>/fill</code>: cuenta el más reciente.\n"
     "<code>/skip ID MOTIVO</code> — no la ejecutaste (y por qué).\n"
     "   Ej.: <code>/skip 123 llegué tarde</code>\n"
     "<code>/help</code> — esta ayuda.\n\n"
@@ -71,6 +76,36 @@ def parse_price(raw: str) -> float | None:
     except ValueError:
         return None
     return v if v > 0 and v == v and v != float("inf") else None
+
+
+# Palabras que, al final de un /fill, confirman un precio fuera de SL/TP.
+CONFIRM_WORDS = ("confirmar", "confirmo", "ok", "si", "sí")
+# Distancia máxima razonable entre tu precio y la entrada de la señal.
+MAX_FILL_DEVIATION = 0.20
+# Oro: entrada/SL/TP salen del futuro GC=F; XM opera oro al contado (revisión de
+# la Fase 1: GC=F cotizó +0,3–0,5 % por encima del contado en 11 de 12 días
+# medidos, ≈0,1R con el stop típico, del mismo tamaño que el umbral de la regla 6).
+BASIS_NOTE_GOLD = ("<i>Oro: los precios de la señal son del futuro GC=F y XM cotiza el contado, "
+                   "que suele estar ~0,3–0,5 % por debajo (≈0,1R). Parte de esta diferencia es esa "
+                   "base, no coste de ejecución.</i>")
+
+
+def plausible_price(raw: str, price: float, entry: float) -> tuple[float | None, bool]:
+    """Comprueba que el precio leído esté a menos de MAX_FILL_DEVIATION (20 %)
+    de la entrada. Si no lo está y el texto es ambiguo (un solo '.' o ',' seguido
+    de exactamente 3 cifras: '84.837', '3,125'), prueba la otra lectura (miles o
+    decimales). Devuelve (precio, releído) o (None, False) si ninguna cuadra."""
+    def ok(p):
+        return p is not None and entry > 0 and abs(p / entry - 1.0) <= MAX_FILL_DEVIATION
+    if ok(price):
+        return price, False
+    s = str(raw).strip().replace("$", "").replace(" ", "").replace("\u00a0", "")
+    m = re.fullmatch(r"(\d{1,3})([.,])(\d{3})", s)
+    if m:
+        for alt in (float(m.group(1) + m.group(3)), float(f"{m.group(1)}.{m.group(3)}")):
+            if alt != price and ok(alt):
+                return alt, True
+    return None, False
 
 
 def effective_rr(direction: str, price: float, stop_loss: float, take_profit: float) -> float | None:
@@ -137,7 +172,10 @@ def handle_command(cmd: str, args: list[str], update_id: int | None = None, ts=N
     if cmd in ("help", "start", "ayuda"):
         return HELP_TEXT
     if cmd not in ("fill", "skip"):
-        return f"No conozco el comando /{html.escape(cmd)}.\n\n{HELP_TEXT}"
+        # Truncado: un "comando" de miles de caracteres hacía que la respuesta
+        # superara el límite de 4.096 de Telegram y no llegara.
+        nombre = cmd[:50] + ("…" if len(cmd) > 50 else "")
+        return f"No conozco el comando /{html.escape(nombre)}.\n\n{HELP_TEXT}"
 
     usage = ("Uso: <code>/fill ID PRECIO</code> (p. ej. <code>/fill 123 65432.5</code>)"
              if cmd == "fill" else
@@ -168,15 +206,36 @@ def handle_command(cmd: str, args: list[str], update_id: int | None = None, ts=N
     # /fill
     if len(args) < 2:
         return usage
-    price = parse_price(args[1])
+    raw_price = args[1]
+    price = parse_price(raw_price)
     if price is None:
-        return f"«{html.escape(args[1])}» no es un precio válido.\n{usage}"
+        return f"«{html.escape(raw_price)}» no es un precio válido.\n{usage}"
     entry, sl, tp = float(sig["entry_price"]), float(sig["stop_loss"]), float(sig["take_profit"])
-    note = " ".join(args[2:]).strip()[:500] or None
+    rest = [a for a in args[2:]]
+    confirmed = bool(rest) and rest[-1].lower() in CONFIRM_WORDS
+    if confirmed:
+        rest = rest[:-1]
+    note = " ".join(rest).strip()[:500] or None
+
+    # Revisión de la Fase 1: comprobar el precio ANTES de guardarlo. '84.837'
+    # para un BTC de 84.837 USD se leía 84,837 y una sola lectura así arruinaba
+    # la media de la regla 6 (umbral −0,10R) con −48R.
+    price, reread = plausible_price(raw_price, price, entry)
+    if price is None:
+        return (f"⚠️ <b>No lo he guardado.</b> Leí «{html.escape(raw_price)}» como "
+                f"{_fmt(parse_price(raw_price))}, muy lejos de la entrada de la señal {head} "
+                f"({_fmt(entry)}). Revisa el número y repite <code>/fill {sig_id} PRECIO</code> "
+                "(p. ej. 65432.5 o 65,432.5).")
+    rr = effective_rr(direction, price, sl, tp)
+    if rr is None and not confirmed:
+        return (f"⚠️ <b>No lo he guardado.</b> Tu precio {_fmt(price)} está en o más allá del "
+                f"Stop Loss ({_fmt(sl)}) o del Take Profit ({_fmt(tp)}) de la señal {head}: con él "
+                "la operación no tiene recorrido. Si es un error, repite el /fill con el precio "
+                f"bueno; si de verdad entraste a ese precio, envía "
+                f"<code>/fill {sig_id} {html.escape(raw_price)} confirmar</code>.")
     if not save_fill(sig_id, "fill", price, note, ts=ts, update_id=update_id):
         return None
 
-    rr = effective_rr(direction, price, sl, tp)
     rr_sig = effective_rr(direction, entry, sl, tp)
     diff = entry_diff_r(direction, price, entry, sl)
     lines = [
@@ -185,9 +244,12 @@ def handle_command(cmd: str, args: list[str], update_id: int | None = None, ts=N
         f"Tu precio: {_fmt(price)} (entrada de la señal: {_fmt(entry)})",
         f"Stop Loss: {_fmt(sl)} · Take Profit: {_fmt(tp)}",
     ]
+    if reread:
+        lines.append(f"<i>Leí «{html.escape(raw_price)}» como {_fmt(price)} (la otra lectura quedaba "
+                     "absurda frente a la entrada).</i>")
     if rr is None:
         lines.append("⚠️ <b>Ese precio está en o más allá del Stop Loss o del Take Profit</b>: "
-                     "con él la operación no tiene recorrido. Revisa el precio o cierra la posición.")
+                     "con él la operación no tiene recorrido (guardado porque lo confirmaste).")
     else:
         rr_sig_txt = f" (el de la señal: {rr_sig:.2f})" if rr_sig is not None else ""
         lines.append(f"<b>R:R efectivo a tu precio: {rr:.2f}</b>{rr_sig_txt}")
@@ -197,11 +259,16 @@ def handle_command(cmd: str, args: list[str], update_id: int | None = None, ts=N
         else:
             lado = "a tu favor" if diff > 0 else "en contra"
             lines.append(f"Diferencia de entrada: {diff:+.2f}R ({lado}).")
+    if symbol.upper().startswith("XAU"):
+        lines.append(BASIS_NOTE_GOLD)
     if sig.get("resultado_real"):
+        from monitoring.daily_summary import RESULT_TEXT
+        res = str(sig["resultado_real"])
         lines.append(f"<i>Nota: el sistema ya dio esta señal por cerrada "
-                     f"({html.escape(str(sig['resultado_real']))}).</i>")
+                     f"({html.escape(RESULT_TEXT.get(res, res))}).</i>")
     if str(sig.get("mode") or "live") == "shadow":
         lines.append("<i>Nota: esta señal es de un activo en modo sombra (no se notificó).</i>")
+    lines.append("<i>¿Te equivocaste? Envía otro /fill de esta señal: cuenta el más reciente.</i>")
     return "\n".join(lines) + nota_prev
 
 
@@ -223,6 +290,9 @@ def _get_updates(offset: int | None) -> list[dict] | None:
     if resp.status_code != 200:
         # 409 = hay un webhook configurado o se está usando el bot en otro sitio.
         logger.warning(f"Comandos Telegram: getUpdates respondió {resp.status_code}: {resp.text[:200]}")
+        if resp.status_code in (401, 404):
+            # Token revocado o erróneo: tampoco saldrán las señales → sin latido.
+            tg._mark_cycle("telegram", f"getUpdates {resp.status_code} (token no válido)")
         return None
     data = resp.json()
     if not data.get("ok"):
@@ -249,6 +319,7 @@ def poll_commands() -> dict:
             # Sin saber por dónde íbamos no se procesa nada (se repetirían comandos).
             logger.error(f"Comandos Telegram: no se pudo leer el offset de la BD ({exc}); se omite.")
             out["errors"] += 1
+            tg._mark_cycle("bd", f"offset de comandos: {exc}")
             return out
 
         updates = _get_updates(offset)
@@ -258,9 +329,8 @@ def poll_commands() -> dict:
         new_offset = offset
         for upd in updates:
             uid = upd.get("update_id")
+            advance = True            # False = repetir esta actualización el ciclo siguiente
             try:
-                if uid is not None:
-                    new_offset = max(new_offset or 0, int(uid) + 1)
                 msg = upd.get("message") or upd.get("channel_post") or {}
                 if not _chat_matches(msg.get("chat") or {}):
                     out["ignored"] += 1
@@ -271,14 +341,39 @@ def poll_commands() -> dict:
                 if parsed is None:
                     continue          # texto normal: no se responde
                 cmd, args = parsed
-                reply = handle_command(cmd, args, update_id=uid, ts=msg.get("date"))
-                out["commands"] += 1
+                try:
+                    reply = handle_command(cmd, args, update_id=uid, ts=msg.get("date"))
+                except Exception as exc:
+                    # Revisión de la Fase 1: antes el offset avanzaba igual y el
+                    # /fill se perdía sin respuesta. Ahora NO se avanza más allá de
+                    # esta actualización: se repite en el ciclo siguiente (update_id
+                    # UNIQUE evita duplicar) hasta MAX_UPDATE_ATTEMPTS; después se
+                    # responde que no se pudo registrar y se sigue.
+                    out["errors"] += 1
+                    n = _update_failures.get(uid, 0) + 1
+                    _update_failures[uid] = n
+                    logger.error(f"Comandos Telegram: error procesando /{cmd} (actualización {uid}, "
+                                 f"intento {n}/{MAX_UPDATE_ATTEMPTS}): {exc}")
+                    if uid is not None and n < MAX_UPDATE_ATTEMPTS:
+                        advance = False
+                        break          # el offset se queda en esta actualización
+                    _update_failures.pop(uid, None)
+                    texto = " ".join(["/" + cmd] + args)[:80]
+                    tg._send(f"⚠️ No pude registrar «{html.escape(texto)}» (error de la base de datos "
+                             f"tras {n} intentos). Reenvíalo más tarde.")
+                    reply = None
+                else:
+                    _update_failures.pop(uid, None)
+                    out["commands"] += 1
+                    logger.info(f"Comandos Telegram: /{cmd} {' '.join(args)[:80]} procesado.")
                 if reply:
                     tg._send(reply)
-                logger.info(f"Comandos Telegram: /{cmd} {' '.join(args)[:80]} procesado.")
             except Exception as exc:
                 out["errors"] += 1
                 logger.error(f"Comandos Telegram: error procesando la actualización {uid}: {exc}")
+            finally:
+                if advance and uid is not None:
+                    new_offset = max(new_offset or 0, int(uid) + 1)
         if new_offset is not None and new_offset != offset:
             try:
                 kv_set(KV_OFFSET, new_offset)

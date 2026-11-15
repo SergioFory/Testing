@@ -238,15 +238,17 @@ def _report_data_ok(symbol: str, notify: bool) -> None:
 # Comandos
 # ---------------------------------------------------------------------------
 
-def cmd_signal(symbol: str, notify: bool = False):
-    """Genera la señal actual para el símbolo (solo con velas cerradas)."""
+def cmd_signal(symbol: str, notify: bool = False, ohlcv_cache: dict | None = None):
+    """Genera la señal actual para el símbolo (solo con velas cerradas).
+
+    ohlcv_cache: caché de velas del ciclo (Fase 1, 1.10). Si se pasa, se deja en
+    ella el DataFrame de velas cerradas descargado aquí para que el registro
+    sombra resuelva sus setups sin volver a descargar."""
     from signals.detector          import detect_all_setups
-    from ml.predictor              import score_setups, get_best_setup
-    from risk.position_sizer       import build_trade_setup, PortfolioRiskManager
-    from notifications.telegram    import format_signal_alert, send_text
+    from ml.predictor              import score_setups
     from data.bars                 import last_bar_age_hours
     from config.settings           import (MAX_ENTRY_DIST_ATR, MAX_SETUP_AGE_BARS,
-                                           MAX_DATA_STALENESS_HOURS, notify_enabled, fmt_price)
+                                           MAX_DATA_STALENESS_HOURS, notify_enabled)
 
     cfg    = ASSETS.get(symbol, {})
     source = cfg.get("source", "binance")
@@ -270,6 +272,10 @@ def cmd_signal(symbol: str, notify: bool = False):
         )
         return
     _report_data_ok(symbol, notify_asset)
+    if ohlcv_cache is not None:
+        prev = ohlcv_cache.get(symbol)
+        if prev is None or prev.empty:
+            ohlcv_cache[symbol] = df_4h
 
     data_source = df_4h.attrs.get("source", source)
     last_bar_ts = df_4h.index[-1]
@@ -294,10 +300,57 @@ def cmd_signal(symbol: str, notify: bool = False):
     current_price = float(df_4h["close"].iloc[-1])
     max_dist_atr  = cfg.get("max_entry_dist_atr", MAX_ENTRY_DIST_ATR)
 
-    from data.outcome_tracker import (is_duplicate_signal, is_duplicate_setup,
-                                      has_recent_legacy_alert, emitted_setup_keys,
-                                      save_signal_from_trade)
+    from data.outcome_tracker import emitted_setup_keys
     already = emitted_setup_keys(symbol, min_setup_ts)
+
+    # Registro sombra (Fase 1, punto 1.10): TODOS los setups de la ventana (las 2
+    # últimas velas cerradas), aprobados o no, se guardan al final con su motivo.
+    # `fate` recoge qué le pasó al setup elegido; el registro va en el finally
+    # para que se guarde salga por donde salga el ciclo, y nunca lo tumba.
+    fate = {"key": None, "motivo": None, "symbol_motivo": None}
+    try:
+        _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_setup_ts,
+                         last_bar_ts, already, data_source, notify, fate)
+    finally:
+        _record_shadow_window(symbol, df_scored, min_setup_ts, last_bar_ts, already,
+                              current_price, max_dist_atr, fate)
+
+
+def _record_shadow_window(symbol, df_scored, min_setup_ts, last_bar_ts, already,
+                          current_price, max_dist_atr, fate) -> None:
+    """Guarda en shadow_setups los setups de la ventana del ciclo. Nunca lanza."""
+    try:
+        from data.shadow import classify_window, record_shadow_setups
+        from config.settings import notify_enabled
+        ts = pd.to_datetime(df_scored["ts"], utc=True)
+        lo, hi = pd.Timestamp(min_setup_ts), pd.Timestamp(last_bar_ts)
+        lo = lo.tz_localize("UTC") if lo.tzinfo is None else lo
+        hi = hi.tz_localize("UTC") if hi.tzinfo is None else hi
+        window = df_scored[((ts >= lo) & (ts <= hi)).to_numpy()]
+        rows = classify_window(window, already, current_price, max_dist_atr,
+                               chosen_key=fate.get("key"), chosen_motivo=fate.get("motivo"),
+                               symbol_motivo=fate.get("symbol_motivo"),
+                               asset_live=notify_enabled(symbol))
+        if rows:
+            n = record_shadow_setups(symbol, rows)
+            resumen = ", ".join(f"{r['direction']}@{r['setup_ts']:%m-%d %H:%M}={r['motivo']}" for r in rows)
+            logger.info(f"[{symbol}] Registro sombra: {len(rows)} setup(s) en la ventana "
+                        f"({n} escrito(s)): {resumen}")
+    except Exception as exc:
+        logger.warning(f"[{symbol}] Registro sombra falló (no afecta a la señal): {exc}")
+
+
+def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_setup_ts,
+                     last_bar_ts, already, data_source, notify, fate) -> None:
+    """Parte final de cmd_signal: elige el mejor setup nuevo aprobado, lo valida
+    (riesgo, eventos, antiduplicado), lo registra y lo notifica. Anota en `fate`
+    el motivo del elegido para el registro sombra."""
+    from ml.predictor              import get_best_setup
+    from risk.position_sizer       import build_trade_setup, PortfolioRiskManager
+    from notifications.telegram    import format_signal_alert, send_text
+    from config.settings           import MAX_SETUP_AGE_BARS, notify_enabled, fmt_price
+    from data.outcome_tracker      import (is_duplicate_signal, is_duplicate_setup,
+                                           has_recent_legacy_alert, save_signal_from_trade)
 
     best = get_best_setup(df_scored, current_price=current_price, max_dist_atr=max_dist_atr,
                           min_setup_ts=min_setup_ts, max_setup_ts=last_bar_ts,
@@ -310,11 +363,13 @@ def cmd_signal(symbol: str, notify: bool = False):
         return
 
     setup_ts = pd.Timestamp(best["ts"])
+    fate["key"] = (setup_ts, best["direction"])
     ml_score = float(best.get("ml_score", best.get("raw_score", 0)))
     portfolio = PortfolioRiskManager()
     trade = build_trade_setup(best, portfolio.current_capital, ml_score)
 
     if trade is None:
+        fate["motivo"] = "risk_invalid"
         logger.info(f"[{symbol}] Setup detectado pero no pasa validaciones de riesgo.")
         return
 
@@ -331,6 +386,8 @@ def cmd_signal(symbol: str, notify: bool = False):
             min_impact=EVENT_FILTER.get("min_impact", "High"),
         )
         if blackout:
+            # El evento afecta a todo el activo: también a los demás aprobados.
+            fate["motivo"] = fate["symbol_motivo"] = "event_blackout"
             logger.info(
                 f"[{symbol}] Señal {trade.direction.upper()} omitida por evento "
                 f"macro inminente: {motivo}"
@@ -342,6 +399,7 @@ def cmd_signal(symbol: str, notify: bool = False):
     if is_duplicate_setup(trade.symbol, trade.direction, setup_ts) or \
        has_recent_legacy_alert(trade.symbol, trade.direction, setup_ts) or \
        is_duplicate_signal(trade.symbol, trade.direction, trade.entry_price):
+        fate["motivo"] = "duplicate"
         logger.info(
             f"[{symbol}] Señal {trade.direction.upper()} @ {fmt_price(trade.entry_price)} "
             f"(setup {setup_ts}) ya registrada — se omite."
@@ -371,6 +429,9 @@ def cmd_signal(symbol: str, notify: bool = False):
                                        mode=mode,
                                        notified=False if will_notify else None,
                                        alert_text=alert_text)
+    # -1 = el guardado lo rechazó (duplicado o error de escritura, ya registrado en el log).
+    fate["motivo"] = ("duplicate" if signal_id is None or signal_id <= 0
+                      else "emitted" if mode == "live" else "shadow_asset")
 
     if mode == "shadow":
         logger.info(f"[{symbol}] Modo sombra: señal registrada (ID={signal_id}) sin notificar.")
@@ -378,7 +439,15 @@ def cmd_signal(symbol: str, notify: bool = False):
 
     # Solo notificar si es una señal nueva (no un duplicado ya registrado)
     if will_notify and signal_id > 0:
-        from data.database import mark_signal_notified
+        from data.database import mark_signal_notified, set_signal_alert_text
+        # El ID solo se conoce tras guardar: se añade al mensaje para que el
+        # usuario pueda responder /fill ID PRECIO o /skip ID motivo (Fase 1, 1.10).
+        try:
+            from notifications.telegram_commands import signal_id_footer
+            alert_text = alert_text + signal_id_footer(signal_id)
+            set_signal_alert_text(signal_id, alert_text)
+        except Exception as exc:
+            logger.warning(f"[{symbol}] No se pudo añadir el ID al mensaje: {exc}")
         if send_text(alert_text):
             mark_signal_notified(signal_id, True)
         else:
@@ -664,10 +733,23 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
 
     def _run_all_signals():
         import gc
+        # Comandos de Telegram (/fill /skip /help, Fase 1 punto 1.10): polling sin
+        # espera al inicio del ciclo. Nunca lanza ni bloquea.
+        if notify:
+            try:
+                from notifications.telegram_commands import poll_commands
+                poll_commands()
+            except Exception as exc:
+                logger.warning(f"Comandos Telegram: error ({exc}); el ciclo sigue.")
+
+        # Caché de velas cerradas del ciclo (símbolo → DataFrame): la rellenan el
+        # tracker y cmd_signal, y el registro sombra la reutiliza al final.
+        ohlcv_cache: dict = {}
+
         # Resolver resultados pendientes antes de generar nuevas señales
         try:
             from data.outcome_tracker import resolve_open_signals
-            resolved = resolve_open_signals()
+            resolved = resolve_open_signals(ohlcv_cache=ohlcv_cache)
             if resolved:
                 logger.info(f"Outcome tracker: {resolved} señal(es) resuelta(s).")
         except Exception as exc:
@@ -681,13 +763,22 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
 
         for symbol in active_assets():
             try:
-                cmd_signal(symbol, notify=notify)
+                cmd_signal(symbol, notify=notify, ohlcv_cache=ohlcv_cache)
             except Exception as exc:
                 logger.error(f"Error generando señal para {symbol}: {exc}")
             finally:
                 # Cada ciclo horario carga datos de los activos activos; liberar
                 # entre cada uno evita que la RAM crezca de forma sostenida.
                 gc.collect()
+
+        # Registro sombra: resolver los setups pendientes con las velas ya
+        # descargadas en este ciclo (fuera de la ruta crítica; nunca lanza).
+        try:
+            from data.shadow import resolve_shadow_setups
+            resolve_shadow_setups(ohlcv_cache=ohlcv_cache)
+        except Exception as exc:
+            logger.warning(f"Registro sombra: error resolviendo ({exc}); el ciclo sigue.")
+        ohlcv_cache.clear()
 
         # Copia de las últimas velas en la tabla ohlcv: al final, cuando todas
         # las señales ya se enviaron (fuera de la ruta crítica).

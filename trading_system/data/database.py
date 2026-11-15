@@ -160,6 +160,74 @@ _DDL = [
         last_train  TEXT NOT NULL
     )
     """,
+
+    # Fase 1 (punto 1.10) — REGISTRO SOMBRA. Cada setup detectado en las 2
+    # últimas velas cerradas de cada ciclo (aprobado o no), con el motivo por el
+    # que se emitió o no:
+    #   emitted          registrado como señal live (notificada)
+    #   shadow_asset     habría salido, pero el activo está en modo sombra (SPX)
+    #   below_threshold  raw_score por debajo del umbral del activo
+    #   not_fresh        aprobado, pero la entrada ya está a > max_dist × ATR
+    #   event_blackout   aprobado, bloqueado por un evento macro inminente
+    #   risk_invalid     aprobado, build_trade_setup lo rechazó
+    #   duplicate        aprobado, bloqueado por el antiduplicado (precio/legado)
+    #   not_best         aprobado y ejecutable, pero en ese ciclo salió otro de
+    #                    mayor score (transitorio: suele pasar a 'emitted' en el
+    #                    ciclo siguiente)
+    # El tracker lo resuelve con la MISMA convención que las señales
+    # (check_outcome_detail) para medir también lo que no se emitió. SL/TP = los
+    # del setup. Tiempos en segundos Unix (como signals).
+    """
+    CREATE TABLE IF NOT EXISTS shadow_setups (
+        id          SERIAL PRIMARY KEY,
+        symbol      TEXT   NOT NULL,
+        setup_ts    BIGINT NOT NULL,
+        direction   TEXT   NOT NULL,
+        setup_type  TEXT,
+        raw_score   DOUBLE PRECISION,
+        approved    INTEGER,
+        motivo      TEXT   NOT NULL,
+        entry       DOUBLE PRECISION,
+        sl          DOUBLE PRECISION,
+        tp          DOUBLE PRECISION,
+        atr         DOUBLE PRECISION,
+        created_ts  BIGINT,
+        resultado   TEXT,
+        pnl_r       DOUBLE PRECISION,
+        exit_price  DOUBLE PRECISION,
+        resolved_ts BIGINT,
+        UNIQUE(symbol, setup_ts, direction)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_shadow_open ON shadow_setups(resultado)",
+    "CREATE INDEX IF NOT EXISTS idx_shadow_created ON shadow_setups(created_ts)",
+
+    # Fase 1 (punto 1.10) — ejecuciones reales que el usuario comunica por
+    # Telegram: /fill <id> <precio> (kind='fill') y /skip <id> <motivo>
+    # (kind='skip'). update_id = id de la actualización de Telegram: UNIQUE para
+    # que procesar dos veces el mismo mensaje no duplique la fila.
+    """
+    CREATE TABLE IF NOT EXISTS fills (
+        id         SERIAL PRIMARY KEY,
+        signal_id  INTEGER NOT NULL,
+        kind       TEXT    NOT NULL,
+        price      DOUBLE PRECISION,
+        note       TEXT,
+        ts         BIGINT  NOT NULL,
+        update_id  BIGINT  UNIQUE
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_fills_signal ON fills(signal_id)",
+
+    # Pares clave-valor persistentes (p. ej. el offset de getUpdates de
+    # Telegram, para no procesar dos veces los comandos tras un reinicio).
+    """
+    CREATE TABLE IF NOT EXISTS kv (
+        name       TEXT PRIMARY KEY,
+        value      TEXT,
+        updated_ts BIGINT
+    )
+    """,
 ]
 
 # ---------------------------------------------------------------------------
@@ -508,3 +576,89 @@ def set_last_train(symbol: str, iso_ts: str) -> None:
             conn.execute(sql, {"sym": symbol, "ts": iso_ts})
     except Exception as exc:
         logger.warning(f"set_last_train falló para {symbol}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Clave-valor persistente (Fase 1): p. ej. offset de getUpdates de Telegram
+# ---------------------------------------------------------------------------
+
+def kv_get(name: str, default: str | None = None) -> str | None:
+    """Valor guardado bajo `name`, o `default` si no existe. Lanza si la BD
+    falla (quien llama decide: el polling de Telegram NO procesa comandos si no
+    sabe por dónde iba)."""
+    init_db()
+    with get_engine().connect() as conn:
+        row = conn.execute(text("SELECT value FROM kv WHERE name = :n"), {"n": name}).fetchone()
+    return row[0] if row is not None else default
+
+
+def kv_set(name: str, value) -> None:
+    """Guarda (upsert) `value` como texto bajo `name`. Lanza si la BD falla."""
+    import time
+    init_db()
+    sql = text(
+        "INSERT INTO kv (name, value, updated_ts) VALUES (:n, :v, :t) "
+        "ON CONFLICT (name) DO UPDATE SET value = excluded.value, updated_ts = excluded.updated_ts"
+    )
+    with get_engine().begin() as conn:
+        conn.execute(sql, {"n": name, "v": None if value is None else str(value),
+                           "t": int(time.time())})
+
+
+# ---------------------------------------------------------------------------
+# Fills (Fase 1): ejecuciones reales comunicadas por Telegram (/fill, /skip)
+# ---------------------------------------------------------------------------
+
+def save_fill(signal_id: int, kind: str, price: float | None = None,
+              note: str | None = None, ts=None, update_id: int | None = None) -> bool:
+    """Inserta un fill/skip. Devuelve False si ese update_id de Telegram ya se
+    había guardado (mensaje procesado dos veces: no se duplica)."""
+    import time
+    if kind not in ("fill", "skip"):
+        raise ValueError(f"kind debe ser 'fill' o 'skip', no {kind!r}")
+    init_db()
+    params = {"sid": int(signal_id), "kind": kind,
+              "price": None if price is None else float(price),
+              "note": note, "ts": _to_unix(ts) if ts is not None else int(time.time()),
+              "uid": None if update_id is None else int(update_id)}
+    sql = text(
+        "INSERT INTO fills (signal_id, kind, price, note, ts, update_id) "
+        "VALUES (:sid, :kind, :price, :note, :ts, :uid) ON CONFLICT (update_id) DO NOTHING"
+    )
+    with get_engine().begin() as conn:
+        res = conn.execute(sql, params)
+        return (res.rowcount or 0) > 0
+
+
+def load_fills(signal_id: int | None = None) -> pd.DataFrame:
+    """Fills/skips registrados (todos o de una señal), del más antiguo al más reciente."""
+    init_db()
+    query, params = "SELECT * FROM fills", {}
+    if signal_id is not None:
+        query += " WHERE signal_id = :sid"
+        params["sid"] = int(signal_id)
+    query += " ORDER BY ts ASC, id ASC"
+    with get_engine().connect() as conn:
+        return pd.read_sql_query(text(query), conn, params=params)
+
+
+def load_signal_by_id(signal_id: int) -> dict | None:
+    """Fila de signals con ese id (como dict) o None."""
+    init_db()
+    with get_engine().connect() as conn:
+        row = conn.execute(text("SELECT * FROM signals WHERE id = :i"),
+                           {"i": int(signal_id)}).mappings().fetchone()
+    return dict(row) if row is not None else None
+
+
+def set_signal_alert_text(signal_id: int, alert_text: str) -> bool:
+    """Actualiza el texto guardado de la alerta (p. ej. tras añadir el ID de la
+    señal). Devuelve False si falla (se registra, no lanza)."""
+    try:
+        with get_engine().begin() as conn:
+            conn.execute(text("UPDATE signals SET alert_text=:t WHERE id=:id"),
+                         {"t": alert_text, "id": int(signal_id)})
+        return True
+    except Exception as exc:
+        logger.error(f"No se pudo actualizar alert_text de la señal #{signal_id}: {exc}")
+        return False

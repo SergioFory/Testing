@@ -233,7 +233,7 @@ def compute_result_fields(direction: str, entry: float, stop_loss: float,
     }
 
 
-def resolve_open_signals() -> int:
+def resolve_open_signals(ohlcv_cache: dict | None = None) -> int:
     """
     Revisa todas las señales abiertas (resultado_real IS NULL) y las resuelve
     con velas CERRADAS posteriores a la señal:
@@ -249,6 +249,12 @@ def resolve_open_signals() -> int:
     47 % al 28 % (F04). En cripto el plazo era 7 días para un horizonte de 4.
 
     Las señales en modo sombra se resuelven igual (para medirlas).
+
+    Args:
+        ohlcv_cache: caché del ciclo (símbolo → velas cerradas). Si se pasa, se
+                     reutiliza y se rellena con lo descargado aquí, para que el
+                     registro sombra (data/shadow.py) no vuelva a descargar
+                     (Fase 1, punto 1.10).
 
     Returns:
         Número de señales resueltas en este ciclo.
@@ -268,7 +274,8 @@ def resolve_open_signals() -> int:
 
     # Caché de OHLCV por símbolo: se descarga una sola vez por ciclo aunque
     # haya varias señales pendientes del mismo activo.
-    ohlcv_cache: dict = {}
+    if ohlcv_cache is None:
+        ohlcv_cache = {}
     now = pd.Timestamp.now(tz="UTC")
 
     resolved_count = 0

@@ -234,6 +234,27 @@ def _report_data_ok(symbol: str, notify: bool) -> None:
         send_data_recovered(symbol, since=st["since"])
 
 
+# Activos con datos frescos en el ciclo en curso (para el latido: un ciclo solo
+# es "correcto" si al menos un activo tuvo datos y ninguno lanzó una excepción).
+_cycle_fresh: set = set()
+
+
+def _record_data_status(symbol: str, source, df_4h=None, session_daily: bool = False,
+                        problem: str | None = None) -> None:
+    """Fuente y última vela cerrada del ciclo → tabla kv, para el resumen nocturno
+    (Fase 1, punto 1.4). Nunca lanza."""
+    try:
+        from monitoring.daily_summary import record_data_status
+        last_ts = last_close = None
+        if df_4h is not None and not df_4h.empty:
+            from data.bars import bar_close_times
+            last_ts = df_4h.index[-1]
+            last_close = bar_close_times(df_4h.iloc[[-1]], "4h", session=session_daily)[0]
+        record_data_status(symbol, source, last_ts, last_close, problem=problem)
+    except Exception as exc:
+        logger.debug(f"[{symbol}] Estado de datos no guardado: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Comandos
 # ---------------------------------------------------------------------------
@@ -258,20 +279,22 @@ def cmd_signal(symbol: str, notify: bool = False, ohlcv_cache: dict | None = Non
 
     df_4h, df_daily, macro_df = _load_data(symbol, history="live")
     if df_4h is None:
-        _report_data_problem(symbol, "la fuente de precios no devolvió datos tras los reintentos.", notify_asset)
+        motivo = "la fuente de precios no devolvió datos tras los reintentos."
+        _record_data_status(symbol, source, problem=motivo)
+        _report_data_problem(symbol, motivo, notify_asset)
         return
 
     # Fuente congelada: si la última vela cerrada es demasiado vieja, no emitir.
     stale_key = "1d_session" if session_daily else "4h"
     age_h = last_bar_age_hours(df_4h, "4h", session=session_daily)
     if age_h > MAX_DATA_STALENESS_HOURS[stale_key]:
-        _report_data_problem(
-            symbol,
-            f"la última vela cerrada ({df_4h.index[-1]}) tiene {age_h:.0f} h; la fuente parece congelada.",
-            notify_asset,
-        )
+        motivo = f"la última vela cerrada ({df_4h.index[-1]}) tiene {age_h:.0f} h; la fuente parece congelada."
+        _record_data_status(symbol, df_4h.attrs.get("source", source), df_4h, session_daily, problem=motivo)
+        _report_data_problem(symbol, motivo, notify_asset)
         return
     _report_data_ok(symbol, notify_asset)
+    _record_data_status(symbol, df_4h.attrs.get("source", source), df_4h, session_daily)
+    _cycle_fresh.add(symbol)
     if ohlcv_cache is not None:
         prev = ohlcv_cache.get(symbol)
         if prev is None or prev.empty:
@@ -717,7 +740,7 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
     """
     import time
     import schedule as sched
-    from notifications.telegram  import test_connection, send_daily_summary
+    from notifications.telegram  import test_connection
     from config.settings         import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 
     notify = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
@@ -733,6 +756,8 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
 
     def _run_all_signals():
         import gc
+        _cycle_fresh.clear()
+        failed = []
         # Comandos de Telegram (/fill /skip /help, Fase 1 punto 1.10): polling sin
         # espera al inicio del ciclo. Nunca lanza ni bloquea.
         if notify:
@@ -765,6 +790,7 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
             try:
                 cmd_signal(symbol, notify=notify, ohlcv_cache=ohlcv_cache)
             except Exception as exc:
+                failed.append(symbol)
                 logger.error(f"Error generando señal para {symbol}: {exc}")
             finally:
                 # Cada ciclo horario carga datos de los activos activos; liberar
@@ -784,6 +810,22 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
         # las señales ya se enviaron (fuera de la ruta crítica).
         _flush_ohlcv_copies()
 
+        # Latido (Fase 1, punto 1.4): ciclo correcto = ningún activo lanzó una
+        # excepción y al menos uno tuvo datos frescos. Si no, no se hace ping y el
+        # servicio externo (HEARTBEAT_URL) avisa cuando falte. Nunca lanza.
+        if not failed and _cycle_fresh:
+            try:
+                from data.database import kv_set
+                from monitoring.daily_summary import KV_LAST_CYCLE_OK
+                kv_set(KV_LAST_CYCLE_OK, int(time.time()))
+            except Exception as exc:
+                logger.debug(f"No se pudo guardar la hora del último ciclo correcto: {exc}")
+            from monitoring.heartbeat import ping_heartbeat
+            ping_heartbeat()
+        else:
+            logger.warning(f"Ciclo incompleto (errores: {failed or 'ninguno'}; activos con datos: "
+                           f"{sorted(_cycle_fresh) or 'ninguno'}): sin latido.")
+
     def _run_nightly():
         """Reentrena si es necesario y envía el resumen (se ejecuta 1× al día).
 
@@ -792,7 +834,6 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
         RAM/tiempo y enviaba alertas de "modelo actualizado" engañosas."""
         import gc
         logger.info("Tarea nocturna: verificando reentrenamiento...")
-        portfolio = None
         skipped = [s for s in active_assets() if s not in _nightly_retrain_symbols()]
         if skipped:
             logger.info(f"Sin reentreno nocturno (use_ml=False): {', '.join(skipped)}.")
@@ -806,15 +847,13 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
                 # acumular el dataset + folds de cada uno provoca el OOM en Render.
                 gc.collect()
 
-        # Resumen diario por Telegram
+        # Resumen diario por Telegram, construido desde la BD (Fase 1, punto 1.4;
+        # antes PortfolioRiskManager, que no veía la BD y siempre decía "Sin
+        # operaciones"). Nunca lanza.
         if notify:
-            from risk.position_sizer import PortfolioRiskManager
-            try:
-                portfolio = PortfolioRiskManager()
-                send_daily_summary(portfolio.summary())
+            from monitoring.daily_summary import send_daily_report
+            if send_daily_report():
                 logger.info("Resumen diario enviado a Telegram.")
-            except Exception as exc:
-                logger.error(f"Error enviando resumen diario a Telegram: {exc}")
 
     # Señales recurrentes
     sched.every(interval_minutes).minutes.do(_run_all_signals)
@@ -898,6 +937,7 @@ Ejemplos:
   python main.py schedule --interval 60
   python main.py schedule --interval 60 --retrain-hour 03:00
   python main.py telegram                           # test de conexión
+  python main.py summary                            # resumen diario (vista previa)
         """,
     )
     sub = p.add_subparsers(dest="command", required=True)
@@ -953,6 +993,10 @@ Ejemplos:
 
     # telegram (test de conexión)
     sub.add_parser("telegram", help="Verificar conexión a Telegram y enviar mensaje de prueba")
+
+    # summary — resumen nocturno desde la BD (vista previa; --send lo envía)
+    psm = sub.add_parser("summary", help="Resumen diario desde la BD con el estado SPRT/CUSUM (vista previa)")
+    psm.add_argument("--send", action="store_true", help="Enviarlo además por Telegram")
 
     return p
 
@@ -1011,6 +1055,14 @@ def main():
     elif args.command == "telegram":
         from notifications.telegram import test_connection
         test_connection()
+
+    elif args.command == "summary":
+        import re
+        from monitoring.daily_summary import build_daily_summary, send_daily_report
+        import html as _html
+        print(_html.unescape(re.sub(r"<[^>]+>", "", build_daily_summary())))
+        if args.send:
+            print("Enviado." if send_daily_report() else "No se pudo enviar (¿Telegram configurado?).")
 
 
 if __name__ == "__main__":

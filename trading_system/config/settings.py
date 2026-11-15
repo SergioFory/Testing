@@ -41,6 +41,12 @@ ANTHROPIC_KEY      = _clean_env("ANTHROPIC_API_KEY")
 TELEGRAM_TOKEN     = _clean_env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = _clean_env("TELEGRAM_CHAT_ID")
 
+# Latido opcional (Fase 1, punto 1.4): URL de un servicio externo gratuito tipo
+# healthchecks.io. Al final de cada ciclo correcto el worker hace un GET (5 s,
+# sin fallar si no responde); si los pings dejan de llegar, el servicio avisa.
+# Vacía = desactivado. Ver monitoring/heartbeat.py.
+HEARTBEAT_URL      = _clean_env("HEARTBEAT_URL")
+
 # CryptoPanic discontinuó su plan gratuito el 01-Apr-2026.
 # Sentimiento ahora usa Fear & Greed Index (Alternative.me) — sin API key.
 CRYPTOPANIC_KEY    = ""  # deprecated — mantenido para no romper imports antiguos

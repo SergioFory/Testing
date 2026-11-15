@@ -671,3 +671,43 @@ def test_rechazo_de_fill_recorta_el_precio_largo(temp_db, fake_telegram):
     sid = save_signal_from_trade(_Trade(), setup_ts=pd.Timestamp("2026-11-15", tz="UTC"), mode="live")
     r = handle_command("fill", [str(sid), "9" * 5000], update_id=1)
     assert r is not None and len(r) < 1000
+
+
+def test_fetcher_no_usa_la_vela_plana_del_final_de_pagina(monkeypatch):
+    """Gate.io entrega PLANA (O=H=L=C, volumen 0) la vela que cae al final de cada
+    página. El fetcher debe descartarla y volver a pedirla en la página siguiente."""
+    import data.fetchers.binance_fetcher as bf
+    monkeypatch.setattr(bf.time, "sleep", lambda s: None)
+    step = 4 * 3600 * 1000
+    now = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
+    start = now - 2500 * step
+
+    class _Ex:
+        id, rateLimit = "fake", 0
+        calls = []
+
+        def parse_timeframe(self, tf):
+            return 4 * 3600
+
+        def fetch_ohlcv(self, symbol, tf, since=None, limit=1000):
+            self.calls.append(since)
+            first = start + ((since - start + step - 1) // step) * step
+            out = []
+            for k in range(999):          # Gate.io: 999 velas aunque se pidan 1000
+                ts = first + k * step
+                if ts > now:
+                    break
+                out.append([ts, 1.0, 2.0, 0.5, 1.5, 10.0])
+            if out and out[-1][0] + step <= now:   # vela final de página: plana
+                ts = out[-1][0]
+                out[-1] = [ts, 1.0, 1.0, 1.0, 1.0, 0.0]
+            return out
+
+    ex = _Ex()
+    df = bf._fetch_ohlcv_from(ex, "BTC/USDT:USDT", "4h", days=int(2500 * 4 / 24))
+    flat = (df["high"] == df["low"]) & (df["volume"] == 0)
+    assert int(flat.sum()) == 0
+    assert df.index.is_monotonic_increasing and not df.index.duplicated().any()
+    assert len(ex.calls) >= 3
+    gaps = df.index.to_series().diff().dropna()
+    assert (gaps == pd.Timedelta(hours=4)).all()

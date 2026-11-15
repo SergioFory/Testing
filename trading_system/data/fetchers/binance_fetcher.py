@@ -82,6 +82,7 @@ def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int,
     all_candles = []
     limit = 1000
     prev_last_ts = None
+    tf_ms = int(exchange.parse_timeframe(timeframe) * 1000)
 
     while True:
         candles = None
@@ -103,15 +104,23 @@ def _fetch_ohlcv_from(exchange, symbol: str, timeframe: str, days: int,
         if not candles:
             break
         last_ts = candles[-1][0]
-        # Guard: si el exchange no avanza en el tiempo, salir
-        if last_ts == prev_last_ts:
+        # Última página (llega hasta la vela en curso) o el exchange no avanza en el
+        # tiempo: se usa entera y se sale. (Gate.io devuelve 999 velas por página
+        # aunque se pidan 1000: no se puede usar len(candles) < limit.)
+        if last_ts == prev_last_ts or len(candles) == 1 or last_ts + tf_ms > now_ms:
+            all_candles.extend(candles)
             break
         prev_last_ts = last_ts
-        all_candles.extend(candles)
-        # Terminar cuando se alcanza el tiempo actual (en lugar de contar candles)
-        if last_ts >= now_ms:
-            break
-        since_ms = last_ts + 1
+        # La ÚLTIMA vela de una página intermedia NO se usa: se vuelve a pedir como
+        # primera de la página siguiente. Medido en Gate.io (2026-11-15): la vela que
+        # cae justo en el final de la ventana llega PLANA (O=H=L=C) y con volumen 0;
+        # pedida dentro de otra página llega con sus valores reales. Antes quedaban
+        # ~8 velas falsas por serie 4H de ~10.000 en validate/check-live, en
+        # posiciones que dependían del "ahora" (por eso el nº de aprobados de un
+        # mismo histórico podía variar ±1 de un día a otro). Igual que
+        # backfill_history.iter_closed_pages.
+        all_candles.extend(candles[:-1])
+        since_ms = last_ts
         time.sleep(exchange.rateLimit / 1000)
 
     if not all_candles:

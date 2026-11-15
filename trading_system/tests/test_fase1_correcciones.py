@@ -626,3 +626,48 @@ def test_dashboard_capital_por_defecto_es_trading_capital():
     src = (ROOT / "dashboard" / "app.py").read_text(encoding="utf-8")
     block = src[src.index('"Capital (USD)"') - 200: src.index('"Capital (USD)"') + 200]
     assert "TRADING_CAPITAL" in block and 'RISK["capital_inicial"]' not in block
+
+
+# ---------------------------------------------------------------------------
+# Segunda revisión (commit de correcciones)
+# ---------------------------------------------------------------------------
+
+def test_lotes_pendientes_indican_el_tamano_reducido_si_supera_el_tope():
+    """Si el riesgo supera el 0,25 %, la línea de lotes no puede mandar operar el
+    tamaño completo justo después de dar el reducido."""
+    from risk.position_sizer import build_trade_setup
+    from notifications.telegram import format_signal_alert
+    row = pd.Series({"close": 4168.40, "stop_loss": 4323.68, "take_profit": 3961.36,
+                     "atr": 103.52, "direction": "short", "symbol": "XAUUSD", "setup_type": "breakout"})
+    t = build_trade_setup(row, 10_000.0, 0.23)
+    msg = format_signal_alert(t, setup_ts=pd.Timestamp("2026-09-28", tz="UTC"), capital=10_000,
+                              now=pd.Timestamp("2026-09-28 22:20", tz="UTC"))
+    lot_line = [l for l in msg.splitlines() if "Lotes XM" in l][0]
+    cap_line = [l for l in msg.splitlines() if "Para respetar" in l][0]
+    reduced = cap_line.split("</b>")[1].strip().split()[0]
+    assert f"opera {reduced} " in lot_line
+
+
+def test_cierre_manual_sin_precio_queda_sin_r(temp_db):
+    from data.outcome_tracker import signal_r, get_outcome_stats
+    from monitoring.sequential import load_live_r
+    base = {"entry_price": 100.0, "stop_loss": 98.0, "take_profit": 103.0, "pnl_r": None,
+            "pnl_pct": None, "resolved_by": "manual"}
+    assert signal_r({**base, "resultado_real": "win"}) is None
+    assert signal_r({**base, "resultado_real": "loss"}) is None
+    assert signal_r({**base, "resultado_real": "be"}) == 0.0
+    assert signal_r({**base, "resultado_real": "loss", "resolved_by": "auto"}) == -1.0
+    sid = _signal(temp_db, resultado_real="win", pnl_r=None, resolved_ts=U("2026-11-19 10:00"))
+    with temp_db.get_engine().begin() as c:
+        c.execute(text("UPDATE signals SET resolved_by='manual' WHERE id=:i"), {"i": sid})
+    _signal(temp_db, resultado_real="loss", pnl_r=None, resolved_ts=U("2026-11-19 12:00"))
+    assert load_live_r() == [-1.0]
+    assert get_outcome_stats("BTCUSDT")["n_r"] == 1
+
+
+def test_rechazo_de_fill_recorta_el_precio_largo(temp_db, fake_telegram):
+    from data.outcome_tracker import save_signal_from_trade
+    from notifications.telegram_commands import handle_command
+    sid = save_signal_from_trade(_Trade(), setup_ts=pd.Timestamp("2026-11-15", tz="UTC"), mode="live")
+    r = handle_command("fill", [str(sid), "9" * 5000], update_id=1)
+    assert r is not None and len(r) < 1000

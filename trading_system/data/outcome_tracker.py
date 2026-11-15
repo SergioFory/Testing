@@ -653,14 +653,22 @@ def signal_r(row) -> float | None:
     pct, entry, sl = _num(row.get("pnl_pct")), _num(row.get("entry_price")), _num(row.get("stop_loss"))
     if pct is not None and entry and sl is not None and abs(entry - sl) > 0:
         return pct * entry / abs(entry - sl)
-    return r_from_outcome(row.get("resultado_real"), entry, sl, _num(row.get("take_profit")))
+    return r_from_outcome(row.get("resultado_real"), entry, sl, _num(row.get("take_profit")),
+                          resolved_by=row.get("resolved_by"))
 
 
-def r_from_outcome(resultado, entry=None, stop_loss=None, take_profit=None) -> float | None:
+def r_from_outcome(resultado, entry=None, stop_loss=None, take_profit=None,
+                   resolved_by=None) -> float | None:
     """R implícito en el resultado cuando no se guardó el precio de salida:
-    loss = −1, win = |TP − entrada| / |entrada − SL|, be = 0; si no, None."""
+    loss = −1, win = |TP − entrada| / |entrada − SL|, be = 0; si no, None.
+
+    Un cierre MANUAL sin precio (resolved_by='manual') no tiene R implícito
+    (salvo 'be' = 0): el usuario pudo cerrar antes del SL/TP, así que suponer el
+    R completo inventaría un resultado. Queda "sin R", como dice el dashboard."""
     if resultado == "be":
         return 0.0
+    if resolved_by == "manual":
+        return None
     if resultado == "loss":
         return -1.0
     if resultado == "win":

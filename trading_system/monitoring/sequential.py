@@ -137,7 +137,7 @@ def cusum(rs, k: float = None, h: float = None) -> CUSUMResult:
 # Lectura de la BD
 # ---------------------------------------------------------------------------
 
-def _r_value(pnl_r, resultado, entry=None, stop_loss=None, take_profit=None):
+def _r_value(pnl_r, resultado, entry=None, stop_loss=None, take_profit=None, resolved_by=None):
     """R de una fila resuelta: pnl_r; si falta, el implícito en el resultado
     (loss = −1, win = |TP − entrada| / |entrada − SL|, be = 0; misma regla que
     outcome_tracker.signal_r). None solo si no se puede saber (expirada sin
@@ -148,7 +148,7 @@ def _r_value(pnl_r, resultado, entry=None, stop_loss=None, take_profit=None):
     except (TypeError, ValueError):
         pass
     from data.outcome_tracker import r_from_outcome
-    return r_from_outcome(resultado, entry, stop_loss, take_profit)
+    return r_from_outcome(resultado, entry, stop_loss, take_profit, resolved_by=resolved_by)
 
 
 def _freeze_unix() -> int:
@@ -177,7 +177,7 @@ def load_live_r(since_ts: int | None = None, phase0: bool = True) -> list[float]
     from data.database import get_engine, init_db
     init_db()
     q = ("SELECT pnl_r, resultado_real, entry_price, stop_loss, take_profit, "
-         "COALESCE(resolved_ts, ts) AS rts, id, symbol FROM signals "
+         "COALESCE(resolved_ts, ts) AS rts, id, symbol, resolved_by FROM signals "
          "WHERE COALESCE(mode, 'live') = 'live' AND quality_flag IS NULL "
          f"AND setup_ts IS {'NOT ' if phase0 else ''}NULL AND resultado_real IS NOT NULL")
     params = {}
@@ -192,10 +192,10 @@ def load_live_r(since_ts: int | None = None, phase0: bool = True) -> list[float]
         rows = conn.execute(text(q), params).fetchall()
     keep = None if phase0 else set(_live_symbols())
     out = []
-    for pnl_r, resultado, entry, sl, tp, _rts, _id, symbol in rows:
+    for pnl_r, resultado, entry, sl, tp, _rts, _id, symbol, resolved_by in rows:
         if keep is not None and symbol not in keep:
             continue
-        r = _r_value(pnl_r, resultado, entry, sl, tp)
+        r = _r_value(pnl_r, resultado, entry, sl, tp, resolved_by)
         if r is not None:
             out.append(r)
     return out

@@ -235,8 +235,11 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
                      f"(${float(trade.position_size) * rules_cap_line:,.0f} de nominal; "
                      f"riesgo ${risk_usd * rules_cap_line:,.2f})")
     if lots["status"] == "pending":
+        # Revisión: si el riesgo supera el tope de las reglas, la cantidad que se
+        # indica operar es la REDUCIDA (no contradecir la línea anterior).
+        op_qty = qty * rules_cap_line if rules_cap_line is not None else qty
         lines.append("<b>Lotes XM:</b> pendiente de la especificación del contrato "
-                     f"<i>(opera {_e(_fmt_qty(qty))} {_e(unit)})</i>")
+                     f"<i>(opera {_e(_fmt_qty(op_qty))} {_e(unit)})</i>")
     elif lots["status"] == "below_min":
         txt = (f"el tamaño no llega al lote mínimo de XM ({lots['min_lot']:g}). "
                "No operar o asumir más riesgo")

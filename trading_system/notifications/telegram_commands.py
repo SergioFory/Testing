@@ -51,6 +51,13 @@ HELP_TEXT = (
 # Utilidades puras (probadas sin red)
 # ---------------------------------------------------------------------------
 
+
+def _short(t, n: int = 40) -> str:
+    """Recorta texto del usuario que se repite en una respuesta (límite de 4096
+    caracteres de Telegram: un mensaje más largo no se entrega)."""
+    t = str(t)
+    return t if len(t) <= n else t[:n] + "…"
+
 def parse_price(raw: str) -> float | None:
     """Precio escrito por una persona → float, o None si no es un número > 0.
     Acepta '65432.5', '65432,5', '65,432.5', '65.432,5', '2 650,5' y '$65432'."""
@@ -209,7 +216,7 @@ def handle_command(cmd: str, args: list[str], update_id: int | None = None, ts=N
     raw_price = args[1]
     price = parse_price(raw_price)
     if price is None:
-        return f"«{html.escape(raw_price)}» no es un precio válido.\n{usage}"
+        return f"«{html.escape(_short(raw_price))}» no es un precio válido.\n{usage}"
     entry, sl, tp = float(sig["entry_price"]), float(sig["stop_loss"]), float(sig["take_profit"])
     rest = [a for a in args[2:]]
     confirmed = bool(rest) and rest[-1].lower() in CONFIRM_WORDS
@@ -222,7 +229,7 @@ def handle_command(cmd: str, args: list[str], update_id: int | None = None, ts=N
     # la media de la regla 6 (umbral −0,10R) con −48R.
     price, reread = plausible_price(raw_price, price, entry)
     if price is None:
-        return (f"⚠️ <b>No lo he guardado.</b> Leí «{html.escape(raw_price)}» como "
+        return (f"⚠️ <b>No lo he guardado.</b> Leí «{html.escape(_short(raw_price))}» como "
                 f"{_fmt(parse_price(raw_price))}, muy lejos de la entrada de la señal {head} "
                 f"({_fmt(entry)}). Revisa el número y repite <code>/fill {sig_id} PRECIO</code> "
                 "(p. ej. 65432.5 o 65,432.5).")
@@ -232,7 +239,7 @@ def handle_command(cmd: str, args: list[str], update_id: int | None = None, ts=N
                 f"Stop Loss ({_fmt(sl)}) o del Take Profit ({_fmt(tp)}) de la señal {head}: con él "
                 "la operación no tiene recorrido. Si es un error, repite el /fill con el precio "
                 f"bueno; si de verdad entraste a ese precio, envía "
-                f"<code>/fill {sig_id} {html.escape(raw_price)} confirmar</code>.")
+                f"<code>/fill {sig_id} {html.escape(_short(raw_price))} confirmar</code>.")
     if not save_fill(sig_id, "fill", price, note, ts=ts, update_id=update_id):
         return None
 
@@ -245,7 +252,7 @@ def handle_command(cmd: str, args: list[str], update_id: int | None = None, ts=N
         f"Stop Loss: {_fmt(sl)} · Take Profit: {_fmt(tp)}",
     ]
     if reread:
-        lines.append(f"<i>Leí «{html.escape(raw_price)}» como {_fmt(price)} (la otra lectura quedaba "
+        lines.append(f"<i>Leí «{html.escape(_short(raw_price))}» como {_fmt(price)} (la otra lectura quedaba "
                      "absurda frente a la entrada).</i>")
     if rr is None:
         lines.append("⚠️ <b>Ese precio está en o más allá del Stop Loss o del Take Profit</b>: "

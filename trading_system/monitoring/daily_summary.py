@@ -174,7 +174,7 @@ def _results_block(conn, since: int) -> list[str]:
     from data.outcome_tracker import r_from_outcome
     rows = conn.execute(text(
         "SELECT id, symbol, direction, resultado_real, pnl_r, COALESCE(mode, 'live'), "
-        "entry_price, stop_loss, take_profit FROM signals "
+        "entry_price, stop_loss, take_profit, resolved_by FROM signals "
         "WHERE resultado_real IS NOT NULL AND quality_flag IS NULL "
         "AND COALESCE(resolved_ts, 0) >= :t ORDER BY resolved_ts ASC, id ASC"), {"t": since}).fetchall()
     lines = ["<b>Resultados de las últimas 24 h</b>"]
@@ -184,8 +184,8 @@ def _results_block(conn, since: int) -> list[str]:
         lines.append("• Ninguna señal live resuelta.")
     else:
         total = 0.0
-        for sid, sym, direction, res, pnl_r, _m, entry, sl, tp in live:
-            r = float(pnl_r) if pnl_r is not None else r_from_outcome(res, entry, sl, tp)
+        for sid, sym, direction, res, pnl_r, _m, entry, sl, tp, rby in live:
+            r = float(pnl_r) if pnl_r is not None else r_from_outcome(res, entry, sl, tp, resolved_by=rby)
             if r is not None:
                 total += r
             rtxt = f"{r:+.2f}R" if r is not None else "sin R"

@@ -5,9 +5,11 @@ Qué hace:
   1. Copia de seguridad: CREATE TABLE signals_backup_fase0 AS SELECT * FROM signals
      (dentro de la misma base de datos; si ya existe, no se toca).
   2. Migra columnas nuevas (setup_ts, mode, pnl_r, exit_price, quality_flag...).
-  3. Marca en `quality_flag` las alertas que NO debieron enviarse (no se borra nada):
-       - 'stale_reemission' : su entrada es idéntica a la de una alerta ANTERIOR
-                              del mismo activo y dirección (setup viejo re-enviado, F01).
+  3. Marca en `quality_flag` las alertas ANTIGUAS (sin setup_ts) que NO debieron
+     enviarse (no se borra nada; las señales nuevas de la Fase 0 no se tocan):
+       - 'stale_reemission' : su entrada, SL y TP son idénticos a los de una alerta
+                              ANTERIOR del mismo activo y dirección (setup viejo
+                              re-enviado, F01).
        - 'intrabar_repeat'  : llega menos de 4 h (cripto) / 24 h (diarios) después
                               de otra alerta del mismo activo y dirección (vela aún
                               abierta, F03).
@@ -17,7 +19,8 @@ Qué hace:
        - recalcula resultado, pnl_pct, exit_price, pnl_r y pnl_usd (= tamaño × %);
        - las 'expired' sin PnL (caducadas antes de tiempo, F04) pasan a tener su
          salida por tiempo real;
-       - los resultados manuales 'be' y los registrados a mano se respetan.
+       - se respetan los resultados manuales: 'be' y los 'win'/'loss' puestos a
+         mano desde el dashboard (sin pnl_pct).
   5. Borra de la tabla `ohlcv` las velas que se desvían más de un 2 % de la fuente
      actual (velas guardadas desde GLD×10 / SPY×10 o velas a medio formar).
 
@@ -85,25 +88,36 @@ def classify_repeats(df: pd.DataFrame) -> pd.Series:
     quality_flag propuesto por fila (None = alerta original).
 
     Regla (la misma que se dio al usuario para operar a mano):
-      (a) entrada idéntica (tolerancia relativa 1e-4) a la de una alerta anterior
-          del mismo activo y dirección → 'stale_reemission';
+      (a) entrada, SL y TP idénticos a los de una alerta anterior del mismo
+          activo y dirección (el mismo setup re-enviado) → 'stale_reemission';
       (b) si no, llega a menos de 4 h (cripto) / 24 h (diarios) de la alerta
           anterior del mismo activo y dirección → 'intrabar_repeat'.
+
+    Solo se clasifican las filas ANTIGUAS (setup_ts NULL). Las señales emitidas
+    con la Fase 0 ya llevan su antiduplicado por setup y conservan su quality_flag.
     """
-    flags = pd.Series([None] * len(df), index=df.index, dtype=object)
-    for (sym, direction), g in df.sort_values(["ts_dt", "id"]).groupby(["symbol", "direction"]):
+    flags = df["quality_flag"].copy() if "quality_flag" in df.columns else \
+        pd.Series([None] * len(df), index=df.index, dtype=object)
+    flags = flags.astype(object)
+    legacy = df["setup_ts"].isna() if "setup_ts" in df.columns else pd.Series(True, index=df.index)
+
+    def same(a, b):
+        return abs(a - b) <= max(abs(a) * 1e-6, 1e-9)
+
+    for (sym, direction), g in df[legacy].sort_values(["ts_dt", "id"]).groupby(["symbol", "direction"]):
         src = ASSETS.get(sym, {}).get("source", "binance")
         window = pd.Timedelta(hours=REPEAT_WINDOW_H.get(src, 4))
-        seen_entries: list[float] = []
+        seen: list[tuple] = []
         prev_ts = None
         for i, row in g.iterrows():
-            entry = float(row["entry_price"])
-            tol = max(abs(entry) * 1e-4, 1e-6)
-            if any(abs(entry - e) <= tol for e in seen_entries):
+            lv = (float(row["entry_price"]), float(row["stop_loss"]), float(row["take_profit"]))
+            if any(all(same(x, y) for x, y in zip(lv, s_)) for s_ in seen):
                 flags[i] = "stale_reemission"
             elif prev_ts is not None and row["ts_dt"] - prev_ts < window:
                 flags[i] = "intrabar_repeat"
-            seen_entries.append(entry)
+            else:
+                flags[i] = None
+            seen.append(lv)
             prev_ts = row["ts_dt"]
     return flags
 
@@ -142,13 +156,21 @@ def re_resolve(df: pd.DataFrame, histories: dict) -> pd.DataFrame:
             rec["note"] = f"manual '{r['resultado_real']}': se respeta"
             out.append(rec)
             continue
+        if r["resultado_real"] in ("win", "loss") and pd.isna(r.get("pnl_pct")):
+            rec["note"] = f"'{r['resultado_real']}' puesto a mano (sin pnl_pct): se respeta"
+            rec["manual"] = True
+            out.append(rec)
+            continue
         hist = histories.get(r["symbol"])
         if hist is None or hist.empty:
             rec["note"] = "sin datos de la fuente"
             out.append(rec)
             continue
+        sts = r.get("setup_ts")
+        sts = pd.Timestamp(int(sts), unit="s", tz="UTC") if sts is not None and not pd.isna(sts) else None
         res = check_outcome_detail(r["symbol"], r["ts_dt"], r["direction"], float(r["entry_price"]),
-                                   float(r["stop_loss"]), float(r["take_profit"]), df=hist)
+                                   float(r["stop_loss"]), float(r["take_profit"]), df=hist,
+                                   setup_ts=sts)
         if res is None:
             rec["note"] = "aún abierta / sin velas suficientes"
             out.append(rec)
@@ -276,8 +298,12 @@ def main(apply: bool) -> None:
 
     with engine.begin() as conn:
         for _, r in m.iterrows():
-            params = {"id": int(r["id"]), "flag": r["new_flag"]}
+            flag = r["new_flag"]
+            params = {"id": int(r["id"]), "flag": None if flag is None or pd.isna(flag) else flag}
             sets = ["quality_flag=:flag"]
+            if r.get("manual") is True:
+                conn.execute(text(f"UPDATE signals SET {', '.join(sets)} WHERE id=:id"), params)
+                continue
             if r["new_outcome"] is not None and not pd.isna(r["new_outcome"]):
                 sets += ["resultado_real=:o", "pnl_pct=:p", "pnl_usd=:u", "pnl_r=:r",
                          "exit_price=:x", "resolved_ts=:rts"]
@@ -286,9 +312,15 @@ def main(apply: bool) -> None:
                               r=None if pd.isna(r["new_pnl_r"]) else float(r["new_pnl_r"]),
                               x=float(r["new_exit"]), rts=int(r["new_resolved_ts"]))
             elif r["resultado_real"] in ("win", "loss", "expired") and not pd.isna(r.get("pnl_pct")):
-                # Sin datos para re-resolver: al menos corregir pnl_usd con el tamaño.
-                sets += ["pnl_usd=:u"]
-                params["u"] = round(float(r["position_size"]) * float(r["pnl_pct"]), 2)
+                # Sin datos para re-resolver (p. ej. forex apagado): corregir pnl_usd
+                # con el tamaño y deducir el R y el precio de salida del pnl_pct.
+                entry, sl, pct = float(r["entry_price"]), float(r["stop_loss"]), float(r["pnl_pct"])
+                sign = 1.0 if r["direction"] == "long" else -1.0
+                risk = abs(entry - sl)
+                sets += ["pnl_usd=:u", "pnl_r=:r", "exit_price=:x"]
+                params.update(u=round(float(r["position_size"]) * pct, 2),
+                              r=round(pct * entry / risk, 4) if risk > 0 else None,
+                              x=entry * (1 + sign * pct))
             conn.execute(text(f"UPDATE signals SET {', '.join(sets)} WHERE id=:id"), params)
         for sym, ids in bad.items():
             for i in ids:

@@ -23,7 +23,9 @@ from data.fetchers   import fetch_ohlcv, fetch_multi_timeframe, fetch_gold, fetc
 from signals.detector import detect_all_setups, get_current_setup
 from ml.features      import build_training_dataset, compute_base_features
 from ml.trainer       import train_model, load_model, get_model_importance
-from ml.predictor     import score_setups
+from ml.predictor     import score_setups, get_best_setup
+from data.bars        import drop_unclosed_bars
+from config.settings  import notify_enabled, MAX_SETUP_AGE_BARS, MAX_ENTRY_DIST_ATR
 from risk.position_sizer import build_trade_setup, PortfolioRiskManager
 from backtest.engine  import run_backtest
 from backtest.metrics import format_metrics_table
@@ -149,12 +151,15 @@ with tab_signal:
             if asset_cfg["source"] == "binance":
                 crypto_days = asset_cfg.get("days_history", DAYS_HISTORY)
                 data = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
-                _df4h    = data.get("4h",  pd.DataFrame())
-                df_daily = data.get("1d",  pd.DataFrame())
+                # Fase 0: solo velas CERRADAS, igual que el worker y el validador.
+                _df4h    = drop_unclosed_bars(data.get("4h",  pd.DataFrame()), "4h")
+                df_daily = drop_unclosed_bars(data.get("1d",  pd.DataFrame()), "1d")
                 funding  = fetch_funding_rates(symbol, days=90)
             else:
-                df_daily = fetch_yfinance_asset(symbol, days=yf_days)
+                df_daily = drop_unclosed_bars(fetch_yfinance_asset(symbol, days=yf_days), "1d", session=True)
                 _df4h    = df_daily.copy() if not df_daily.empty else pd.DataFrame()
+                if not _df4h.empty:
+                    _df4h.attrs = dict(df_daily.attrs)
                 funding  = pd.Series(dtype=float)
 
             # Macro cubre el mismo período que los precios (sin cap)
@@ -197,15 +202,26 @@ with tab_signal:
                 with st.spinner("Analizando sentimiento..."):
                     _sent = get_sentiment_summary(asset_cfg["label"])
 
+            # Fase 0: misma selección que el worker (main.cmd_signal): ventana
+            # anclada a la última vela cerrada, frescura y sin setups ya emitidos.
             best = None
-            _lookback = 72 if asset_cfg["source"] != "binance" else 12
-            if not _dfsetups.empty:
-                recent = _dfsetups[
-                    _dfsetups["ts"] >= _dfsetups["ts"].max() - pd.Timedelta(hours=_lookback)
-                ]
-                approved = recent[recent["ml_score"] >= ml_threshold] if "ml_score" in recent.columns else recent
-                if not approved.empty:
-                    best = approved.loc[approved["ml_score"].idxmax()]
+            _lookback = MAX_SETUP_AGE_BARS + 1
+            _meta = {}
+            if not _dfsetups.empty and "ml_score" in _dfsetups.columns:
+                from data.outcome_tracker import emitted_setup_keys
+                _dfsetups["ml_approved"] = _dfsetups["ml_score"] >= ml_threshold
+                _min_ts = _df4h.index[max(0, len(_df4h) - 1 - MAX_SETUP_AGE_BARS)]
+                best = get_best_setup(
+                    _dfsetups,
+                    current_price=float(_df4h["close"].iloc[-1]),
+                    max_dist_atr=asset_cfg.get("max_entry_dist_atr", MAX_ENTRY_DIST_ATR),
+                    min_setup_ts=_min_ts, max_setup_ts=_df4h.index[-1],
+                    exclude_keys=emitted_setup_keys(symbol, _min_ts),
+                )
+                if best is not None:
+                    _meta = {"setup_ts": pd.Timestamp(best["ts"]),
+                             "data_source": _df4h.attrs.get("source", asset_cfg["source"]),
+                             "last_bar_ts": _df4h.index[-1]}
 
             if best is not None:
                 _trade = build_trade_setup(
@@ -224,6 +240,7 @@ with tab_signal:
         st.session_state["_sig_df4h"]     = _df4h
         st.session_state["_sig_dfsetups"] = _dfsetups
         st.session_state["_sig_lookback"] = _lookback
+        st.session_state["_sig_meta"]     = _meta if not _df4h.empty else {}
 
     # =========================================================================
     # DISPLAY — siempre lee de session_state (persiste cuando se pulsan botones)
@@ -305,13 +322,16 @@ with tab_signal:
                 col_btns = st.columns(2)
                 with col_btns[0]:
                     if st.button("💾 Registrar señal en DB", type="secondary"):
-                        sig_id = save_signal_from_trade(_trade, _sent)
+                        sig_id = save_signal_from_trade(
+                            _trade, _sent, **st.session_state.get("_sig_meta", {}))
                         if sig_id > 0:
                             st.success(f"Señal guardada (ID #{sig_id}). El resultado se resolverá automáticamente.")
                         else:
-                            st.error("Error al guardar la señal.")
+                            st.error("No se guardó: el setup ya estaba registrado o hubo un error.")
                 with col_btns[1]:
-                    if tg_notify:
+                    if not notify_enabled(symbol):
+                        st.caption("Activo en modo sombra: no se envía a Telegram.")
+                    elif tg_notify:
                         if st.button("📲 Enviar a Telegram", type="secondary"):
                             ok = send_signal_alert(_trade, _sent)
                             if ok:

@@ -208,10 +208,12 @@ def cmd_signal(symbol: str, notify: bool = False):
     cfg    = ASSETS.get(symbol, {})
     source = cfg.get("source", "binance")
     session_daily = source == "yfinance"
+    # Un activo en modo sombra no envía nada por Telegram, tampoco avisos de datos.
+    notify_asset = notify and notify_enabled(symbol)
 
     df_4h, df_daily, macro_df = _load_data(symbol)
     if df_4h is None:
-        _report_data_problem(symbol, "la fuente de precios no devolvió datos tras los reintentos.", notify)
+        _report_data_problem(symbol, "la fuente de precios no devolvió datos tras los reintentos.", notify_asset)
         return
 
     # Fuente congelada: si la última vela cerrada es demasiado vieja, no emitir.
@@ -221,10 +223,10 @@ def cmd_signal(symbol: str, notify: bool = False):
         _report_data_problem(
             symbol,
             f"la última vela cerrada ({df_4h.index[-1]}) tiene {age_h:.0f} h; la fuente parece congelada.",
-            notify,
+            notify_asset,
         )
         return
-    _report_data_ok(symbol, notify)
+    _report_data_ok(symbol, notify_asset)
 
     data_source = df_4h.attrs.get("source", source)
     last_bar_ts = df_4h.index[-1]
@@ -250,7 +252,8 @@ def cmd_signal(symbol: str, notify: bool = False):
     max_dist_atr  = cfg.get("max_entry_dist_atr", MAX_ENTRY_DIST_ATR)
 
     from data.outcome_tracker import (is_duplicate_signal, is_duplicate_setup,
-                                      emitted_setup_keys, save_signal_from_trade)
+                                      has_recent_legacy_alert, emitted_setup_keys,
+                                      save_signal_from_trade)
     already = emitted_setup_keys(symbol, min_setup_ts)
 
     best = get_best_setup(df_scored, current_price=current_price, max_dist_atr=max_dist_atr,
@@ -294,6 +297,7 @@ def cmd_signal(symbol: str, notify: bool = False):
     # Antiduplicado PERMANENTE por setup (símbolo, dirección, vela del setup) y,
     # como segunda barrera, el heredado por precio.
     if is_duplicate_setup(trade.symbol, trade.direction, setup_ts) or \
+       has_recent_legacy_alert(trade.symbol, trade.direction, setup_ts) or \
        is_duplicate_signal(trade.symbol, trade.direction, trade.entry_price):
         logger.info(
             f"[{symbol}] Señal {trade.direction.upper()} @ {fmt_price(trade.entry_price)} "
@@ -550,7 +554,8 @@ def cmd_auto_retrain(symbol: str, notify: bool = False) -> bool:
             f"Folds={metrics.get('n_folds',0)}"
         )
 
-        if notify:
+        from config.settings import notify_enabled
+        if notify and notify_enabled(symbol):
             from notifications.telegram import send_retrain_alert
             send_retrain_alert(symbol, metrics)
 
@@ -558,7 +563,8 @@ def cmd_auto_retrain(symbol: str, notify: bool = False) -> bool:
 
     except Exception as exc:
         logger.error(f"[{symbol}] Error durante reentrenamiento: {exc}")
-        if notify:
+        from config.settings import notify_enabled
+        if notify and notify_enabled(symbol):
             from notifications.telegram import send_error_alert
             send_error_alert(symbol, f"Reentrenamiento fallido: {exc}")
         return False

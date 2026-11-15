@@ -91,6 +91,12 @@ def fetch_yfinance_asset(symbol: str, days: int = 730) -> pd.DataFrame:
 # reintenta con espera.
 _YF_RETRY_WAITS = (5, 15, 30)
 
+# Si un ticker agotó los reintentos hace poco (p. ej. el tracker en este mismo
+# ciclo), se intenta UNA sola vez más en vez de repetir todas las esperas: no
+# multiplicar las peticiones a Yahoo justo cuando está limitando.
+_RECENT_FAILURE_WINDOW_S = 15 * 60
+_recent_failures: dict = {}   # ticker -> time.time() del último fallo completo
+
 
 def _download_yfinance_daily(candidatos, start, end, min_price: float = 0) -> pd.DataFrame:
     """
@@ -105,8 +111,9 @@ def _download_yfinance_daily(candidatos, start, end, min_price: float = 0) -> pd
         DataFrame OHLCV con df.attrs["source"] = ticker usado, o vacío si todos
         los candidatos fallan tras los reintentos.
     """
-    n_attempts = len(_YF_RETRY_WAITS) + 1
     for ticker, multiplier, desc in candidatos:
+        failed_recently = time.time() - _recent_failures.get(ticker, 0) < _RECENT_FAILURE_WINDOW_S
+        n_attempts = 1 if failed_recently else len(_YF_RETRY_WAITS) + 1
         for attempt in range(n_attempts):
             motivo = None
             try:
@@ -144,6 +151,7 @@ def _download_yfinance_daily(candidatos, start, end, min_price: float = 0) -> pd
                             break
 
                         df.attrs["source"] = ticker
+                        _recent_failures.pop(ticker, None)
                         logger.success(f"{desc} | ${last_close:,.2f} | {len(df)} barras")
                         return df
             except Exception as e:
@@ -155,6 +163,7 @@ def _download_yfinance_daily(candidatos, start, end, min_price: float = 0) -> pd
                 time.sleep(wait)
             else:
                 logger.warning(f"{ticker}: {motivo}. Sin más reintentos.")
+                _recent_failures[ticker] = time.time()
 
     logger.error("No se pudo obtener datos yfinance para los candidatos")
     return pd.DataFrame()

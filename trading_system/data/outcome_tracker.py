@@ -50,6 +50,11 @@ _is_duplicate_signal = is_duplicate_signal
 
 
 def _unix(ts) -> int:
+    """Timestamp/datetime → segundos Unix. Los números se toman como segundos Unix
+    (no como nanosegundos, que es lo que haría pd.Timestamp con un entero)."""
+    import numpy as np
+    if isinstance(ts, (int, float, np.integer, np.floating)):
+        return int(ts)
     t = pd.Timestamp(ts)
     if t.tzinfo is None:
         t = t.tz_localize("UTC")
@@ -75,6 +80,26 @@ def is_duplicate_setup(symbol: str, direction: str, setup_ts) -> bool:
         return True
 
 
+def has_recent_legacy_alert(symbol: str, direction: str, setup_ts) -> bool:
+    """Transición a la Fase 0: True si existe una alerta ANTIGUA (sin setup_ts)
+    del mismo activo y dirección emitida desde la apertura de la vela del setup.
+
+    Las alertas antiguas salían con la vela aún abierta y con otro precio, así que
+    ni el antiduplicado por setup_ts ni el de precio las reconocen: sin esta
+    barrera, el primer ciclo tras desplegar podría reenviar ese mismo setup ya
+    con la vela cerrada. Solo mira filas antiguas: no afecta a setups nuevos."""
+    try:
+        with get_engine().connect() as conn:
+            row = conn.execute(text(
+                "SELECT COUNT(*) FROM signals WHERE symbol=:sym AND direction=:dir "
+                "AND setup_ts IS NULL AND ts >= :sts"
+            ), {"sym": symbol, "dir": direction, "sts": _unix(setup_ts)}).scalar()
+            return (row or 0) > 0
+    except Exception as exc:
+        logger.error(f"Comprobación de alertas antiguas falló ({exc}); se bloquea la señal por prudencia.")
+        return True
+
+
 def emitted_setup_keys(symbol: str, since_ts) -> set:
     """Setups ya registrados para el símbolo con vela de setup >= since_ts,
     como conjunto de (Timestamp UTC, direction). Se pasa a get_best_setup para
@@ -93,7 +118,7 @@ def emitted_setup_keys(symbol: str, since_ts) -> set:
 
 def save_signal_from_trade(trade, sentiment: dict = None, setup_ts=None,
                            data_source: str = None, last_bar_ts=None,
-                           mode: str = "live") -> int:
+                           mode: str = None) -> int:
     """
     Persiste una señal generada (TradeSetup) en la tabla signals.
     Retorna el ID asignado, o -1 si falló o era duplicado.
@@ -102,8 +127,13 @@ def save_signal_from_trade(trade, sentiment: dict = None, setup_ts=None,
         setup_ts:    vela del setup (activa el antiduplicado permanente).
         data_source: fuente de precios usada (gateio, GC=F, ^GSPC...).
         last_bar_ts: última vela cerrada al emitir.
-        mode:        'live' (se notifica) o 'shadow' (solo se registra).
+        mode:        'live' (se notifica) o 'shadow' (solo se registra). Si no
+                     se indica, se deduce de la configuración del activo
+                     (notify False → 'shadow'), también para el dashboard.
     """
+    if mode is None:
+        from config.settings import notify_enabled
+        mode = "live" if notify_enabled(trade.symbol) else "shadow"
     if setup_ts is not None and is_duplicate_setup(trade.symbol, trade.direction, setup_ts):
         logger.debug(f"Setup ya registrado: {trade.symbol} {trade.direction} @ {setup_ts}.")
         return -1
@@ -223,7 +253,7 @@ def resolve_open_signals() -> int:
     with engine.connect() as conn:
         rows = conn.execute(text(
             "SELECT id, symbol, ts, direction, entry_price, stop_loss, take_profit, "
-            "position_size FROM signals WHERE resultado_real IS NULL ORDER BY ts ASC"
+            "position_size, setup_ts FROM signals WHERE resultado_real IS NULL ORDER BY ts ASC"
         )).fetchall()
 
     if not rows:
@@ -236,7 +266,7 @@ def resolve_open_signals() -> int:
 
     resolved_count = 0
     for row in rows:
-        sig_id, symbol, ts_value, direction, entry, sl, tp, pos_size = row
+        sig_id, symbol, ts_value, direction, entry, sl, tp, pos_size, setup_ts_value = row
         try:
             sig_ts = _signal_timestamp(ts_value)
 
@@ -247,14 +277,17 @@ def resolve_open_signals() -> int:
                 logger.warning(f"Señal #{sig_id} {symbol}: sin datos para resolver; se reintenta en el próximo ciclo.")
                 continue
 
-            res = check_outcome_detail(symbol, sig_ts, direction, entry, sl, tp, df=df)
+            setup_ts = (pd.Timestamp(int(setup_ts_value), unit="s", tz="UTC")
+                        if setup_ts_value is not None and not pd.isna(setup_ts_value) else None)
+            res = check_outcome_detail(symbol, sig_ts, direction, entry, sl, tp, df=df,
+                                       setup_ts=setup_ts)
 
             age_days = (now - sig_ts).total_seconds() / 86400
             if res is None and age_days > safety_net_days(symbol):
                 after = df[df.index > sig_ts]
                 if not after.empty and df.index[0] <= sig_ts:
                     res = {"outcome": "expired", "exit_price": float(after["close"].iloc[-1]),
-                           "exit_ts": after.index[-1]}
+                           "exit_ts": _bar_close(symbol, after.index[-1])}
                     logger.warning(
                         f"Señal #{sig_id} {symbol}: red de seguridad ({age_days:.1f}d > "
                         f"{safety_net_days(symbol):.0f}d) con solo {len(after)} velas; "
@@ -322,9 +355,21 @@ def check_outcome_detail(
     stop_loss: float,
     take_profit: float,
     df: pd.DataFrame = None,
+    setup_ts: pd.Timestamp = None,
 ) -> dict | None:
     """
-    Resultado de una señal con las velas CERRADAS posteriores a signal_ts.
+    Resultado de una señal con velas CERRADAS, con la MISMA convención que el
+    validador (backtest/validate.py:_simulate_setup):
+      - vela del setup = i (la de setup_ts; en señales antiguas sin setup_ts, la
+        vela que contiene la hora de la señal: entonces se emitía con la vela
+        aún abierta);
+      - la vela i+1 es la de entrada y NO se revisa;
+      - SL/TP se revisan de i+2 a i+1+forward_bars (si una vela toca ambos,
+        cuenta el SL);
+      - salida por tiempo al cierre de la vela i+1+forward_bars.
+    Antes se contaba desde la hora de emisión: en cripto coincidía, pero en los
+    diarios (emitidos tras el cierre) se incluía la vela de entrada y la salida
+    por tiempo caía una vela antes que en el validador.
 
     Returns:
         {"outcome": "win"|"loss"|"expired", "exit_price": float, "exit_ts": Timestamp}
@@ -342,35 +387,51 @@ def check_outcome_detail(
 
     # El histórico debe empezar ANTES de la señal: si empieza después, las
     # "primeras velas posteriores" serían otras y el resultado sería falso.
-    if df.index[0] > signal_ts:
+    anchor = setup_ts if setup_ts is not None else signal_ts
+    if df.index[0] > anchor:
         logger.warning(
             f"{symbol}: el histórico cargado empieza el {df.index[0]} y la señal es del "
-            f"{signal_ts}; no se puede resolver con estos datos."
+            f"{anchor}; no se puede resolver con estos datos."
         )
         return None
 
-    future = df[df.index > signal_ts].head(forward_bars)
+    if setup_ts is not None and setup_ts in df.index:
+        setup_pos = int(df.index.get_loc(setup_ts))
+    else:
+        setup_pos = int(df.index.searchsorted(anchor, side="right")) - 1
+    if setup_pos < 0:
+        return None
+    future = df.iloc[setup_pos + 2: setup_pos + 2 + forward_bars]
     if future.empty:
         return None  # Muy pronto para resolver
 
     for ts, bar in future.iterrows():
         if direction == "long":
             if bar["low"] <= stop_loss:
-                return {"outcome": "loss", "exit_price": float(stop_loss), "exit_ts": ts}
+                return {"outcome": "loss", "exit_price": float(stop_loss), "exit_ts": _bar_close(symbol, ts)}
             if bar["high"] >= take_profit:
-                return {"outcome": "win", "exit_price": float(take_profit), "exit_ts": ts}
+                return {"outcome": "win", "exit_price": float(take_profit), "exit_ts": _bar_close(symbol, ts)}
         else:  # short
             if bar["high"] >= stop_loss:
-                return {"outcome": "loss", "exit_price": float(stop_loss), "exit_ts": ts}
+                return {"outcome": "loss", "exit_price": float(stop_loss), "exit_ts": _bar_close(symbol, ts)}
             if bar["low"] <= take_profit:
-                return {"outcome": "win", "exit_price": float(take_profit), "exit_ts": ts}
+                return {"outcome": "win", "exit_price": float(take_profit), "exit_ts": _bar_close(symbol, ts)}
 
     # Se agotaron las velas del horizonte sin tocar SL ni TP → salida por tiempo
     if len(future) >= forward_bars:
         return {"outcome": "expired", "exit_price": float(future["close"].iloc[-1]),
-                "exit_ts": future.index[-1]}
+                "exit_ts": _bar_close(symbol, future.index[-1])}
 
     return None  # Aún hay velas por venir
+
+
+def _bar_close(symbol: str, bar_open_ts) -> pd.Timestamp:
+    """Hora de CIERRE de la vela que abre en bar_open_ts (para resolved_ts)."""
+    from data.bars import bar_close_times
+    one = pd.DataFrame(index=pd.DatetimeIndex([bar_open_ts]))
+    if _is_session_daily(symbol):
+        return bar_close_times(one, "1d", session=True)[0]
+    return bar_close_times(one, "4h")[0]
 
 
 def _check_outcome(symbol, signal_ts, direction, entry, stop_loss, take_profit, df=None) -> tuple:

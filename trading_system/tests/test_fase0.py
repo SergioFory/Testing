@@ -135,9 +135,26 @@ def test_time_exit_after_forward_bars_with_pnl():
     sig = pd.Timestamp("2026-11-01 01:00", tz="UTC")
     res = check_outcome_detail("BTCUSDT", sig, "long", 100.0, 97.0, 104.5, df=df)
     assert res["outcome"] == "expired"
-    # 24 velas posteriores (04:00 del 1-nov en adelante) → cierre de la 24.ª
-    assert res["exit_ts"] == df.index[24]
+    # Señal antigua sin setup_ts: vela del setup = la que contiene la señal (pos 0).
+    # Como en el validador: entrada en la 1, se revisan de la 2 a la 25 y se sale
+    # al cierre de la 25 (resolved_ts = cierre de esa vela).
+    assert res["exit_ts"] == df.index[25] + pd.Timedelta(hours=4)
     assert res["exit_price"] == pytest.approx(100.0)
+
+
+def test_tracker_matches_validator_convention_daily():
+    """Diario emitido tras el cierre: la vela de entrada (D+1) no se revisa y la
+    salida por tiempo cae en la vela i+1+forward, igual que _simulate_setup."""
+    from data.outcome_tracker import check_outcome_detail
+    df = _bars("2026-09-01", 40, freq="1D", price=4000.0)
+    df["close"] = 4000.0 + np.arange(40)
+    setup = df.index[5]
+    # La vela de entrada toca el SL: el validador no la mira, el tracker tampoco
+    df.loc[df.index[6], "high"] = 4300.0
+    sig = setup + pd.Timedelta(hours=23)
+    res = check_outcome_detail("XAUUSD", sig, "short", 4005.0, 4160.0, 3800.0, df=df, setup_ts=setup)
+    assert res["outcome"] == "expired"
+    assert res["exit_price"] == pytest.approx(float(df["close"].iloc[5 + 1 + 20]))
 
 
 def test_sl_checked_before_tp_and_before_age():
@@ -236,3 +253,52 @@ def test_resolve_open_signals_end_to_end(temp_db, monkeypatch):
     assert row["pnl_r"] == pytest.approx(1.5)
     assert row["pnl_usd"] == pytest.approx(2000.0 * 0.045)
     assert row["exit_price"] == pytest.approx(104.5)
+
+
+def test_legacy_alert_blocks_first_cycle_after_deploy(temp_db):
+    """Una alerta antigua (sin setup_ts) emitida con la vela abierta bloquea que
+    el primer ciclo tras desplegar reenvíe ese setup ya cerrado."""
+    from sqlalchemy import text
+    import data.outcome_tracker as ot
+    with temp_db.get_engine().begin() as conn:
+        conn.execute(text(
+            "INSERT INTO signals (symbol, ts, setup_type, direction, ml_score, entry_price, stop_loss, "
+            "take_profit, position_size, atr) VALUES ('BTCUSDT', :ts, 'breakout', 'long', 0.6, 80584.3, "
+            "79000, 83000, 1000, 1000)"), {"ts": int(pd.Timestamp("2026-11-04 15:26", tz="UTC").timestamp())})
+    assert ot.has_recent_legacy_alert("BTCUSDT", "long", pd.Timestamp("2026-11-04 12:00", tz="UTC"))
+    assert not ot.has_recent_legacy_alert("BTCUSDT", "long", pd.Timestamp("2026-11-04 16:00", tz="UTC"))
+    assert not ot.has_recent_legacy_alert("BTCUSDT", "short", pd.Timestamp("2026-11-04 12:00", tz="UTC"))
+
+
+def test_unix_helpers_take_numbers_as_seconds():
+    import numpy as np
+    from data.outcome_tracker import _unix
+    from data.database import _to_unix
+    assert _unix(np.int64(1758215000)) == 1758215000
+    assert _to_unix(np.int64(1758215000)) == 1758215000
+
+
+def test_cleanup_classification_respects_new_rows():
+    """La limpieza marca solo filas antiguas; las de la Fase 0 (con setup_ts)
+    conservan su quality_flag aunque sean de velas consecutivas."""
+    from fase0_db_cleanup import classify_repeats
+    t = lambda x: pd.Timestamp(x, tz="UTC")
+    df = pd.DataFrame([
+        # antiguas: original, re-alerta de vela abierta, re-emisión idéntica días después
+        dict(id=1, symbol="BTCUSDT", direction="long", entry_price=100.0, stop_loss=97.0, take_profit=104.5,
+             ts_dt=t("2026-09-21 09:31"), setup_ts=None, quality_flag=None),
+        dict(id=2, symbol="BTCUSDT", direction="long", entry_price=100.4, stop_loss=97.4, take_profit=104.9,
+             ts_dt=t("2026-09-21 10:31"), setup_ts=None, quality_flag=None),
+        dict(id=3, symbol="BTCUSDT", direction="long", entry_price=100.0, stop_loss=97.0, take_profit=104.5,
+             ts_dt=t("2026-09-25 10:00"), setup_ts=None, quality_flag=None),
+        # otro setup con entrada casi igual pero SL/TP distintos → original
+        dict(id=4, symbol="BTCUSDT", direction="long", entry_price=100.001, stop_loss=96.0, take_profit=106.0,
+             ts_dt=t("2026-10-05 10:00"), setup_ts=None, quality_flag=None),
+        # nuevas (Fase 0) en velas consecutivas → no se tocan
+        dict(id=5, symbol="ETHUSDT", direction="long", entry_price=2093.6, stop_loss=2000, take_profit=2280,
+             ts_dt=t("2026-11-10 12:05"), setup_ts=1762761600, quality_flag=None),
+        dict(id=6, symbol="ETHUSDT", direction="long", entry_price=2022.4, stop_loss=1930, take_profit=2200,
+             ts_dt=t("2026-11-10 16:05"), setup_ts=1762776000, quality_flag=None),
+    ])
+    flags = classify_repeats(df)
+    assert list(flags) == [None, "intrabar_repeat", "stale_reemission", None, None, None]

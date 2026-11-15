@@ -197,17 +197,31 @@ def _existing_columns(conn, table: str, dialect: str) -> set:
         rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
         return {r[1] for r in rows}
     rows = conn.execute(text(
-        "SELECT column_name FROM information_schema.columns WHERE table_name = :t"
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = :t AND table_schema = current_schema()"
     ), {"t": table}).fetchall()
     return {r[0] for r in rows}
 
 
 def _migrate(conn, dialect: str) -> None:
+    # El worker y el dashboard pueden arrancar a la vez con el mismo despliegue:
+    # en PostgreSQL se usa ADD COLUMN IF NOT EXISTS (y un candado de transacción)
+    # y en SQLite se tolera "duplicate column" para que ninguno de los dos falle.
+    if dialect != "sqlite":
+        conn.execute(text("SELECT pg_advisory_xact_lock(724501)"))
     have = _existing_columns(conn, "signals", dialect)
     for col, sqltype in _SIGNAL_COLUMNS:
-        if col not in have:
-            conn.execute(text(_adapt_ddl(f"ALTER TABLE signals ADD COLUMN {col} {sqltype}", dialect)))
-            logger.info(f"Migración: columna signals.{col} añadida.")
+        if col in have:
+            continue
+        if dialect == "sqlite":
+            try:
+                conn.execute(text(_adapt_ddl(f"ALTER TABLE signals ADD COLUMN {col} {sqltype}", dialect)))
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+        else:
+            conn.execute(text(f"ALTER TABLE signals ADD COLUMN IF NOT EXISTS {col} {sqltype}"))
+        logger.info(f"Migración: columna signals.{col} añadida.")
     for stmt in _SIGNAL_INDEXES:
         conn.execute(text(stmt))
 
@@ -343,8 +357,9 @@ def _to_unix(value):
             return None
     except (TypeError, ValueError):
         pass
-    if isinstance(value, (int, float)):
-        return int(value)
+    import numpy as np
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return int(value)   # segundos Unix (pd.Timestamp los tomaría como ns)
     ts = pd.Timestamp(value)
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")

@@ -152,6 +152,13 @@ def re_resolve(df: pd.DataFrame, histories: dict) -> pd.DataFrame:
     for _, r in df.iterrows():
         rec = {"id": r["id"], "new_outcome": None, "new_exit": None, "new_pnl_pct": None,
                "new_pnl_r": None, "new_pnl_usd": None, "new_resolved_ts": None, "note": ""}
+        # Cerrada con el formulario del dashboard (Fase 1, resolved_by='manual'):
+        # lleva pnl_pct y no se distingue de una automática por otros campos.
+        if r.get("resolved_by") == "manual":
+            rec["note"] = "cerrada a mano en el dashboard: se respeta"
+            rec["manual"] = True
+            out.append(rec)
+            continue
         if r["resultado_real"] not in (None, "win", "loss", "expired") and not pd.isna(r["resultado_real"]):
             rec["note"] = f"manual '{r['resultado_real']}': se respeta"
             out.append(rec)
@@ -301,12 +308,14 @@ def main(apply: bool) -> None:
             flag = r["new_flag"]
             params = {"id": int(r["id"]), "flag": None if flag is None or pd.isna(flag) else flag}
             sets = ["quality_flag=:flag"]
-            if r.get("manual") is True:
+            # `in (True,)` y no `is True`: si TODAS las filas son manuales la columna
+            # es booleana de numpy (np.True_) y `is True` daría False.
+            if r.get("manual") in (True,):
                 conn.execute(text(f"UPDATE signals SET {', '.join(sets)} WHERE id=:id"), params)
                 continue
             if r["new_outcome"] is not None and not pd.isna(r["new_outcome"]):
                 sets += ["resultado_real=:o", "pnl_pct=:p", "pnl_usd=:u", "pnl_r=:r",
-                         "exit_price=:x", "resolved_ts=:rts"]
+                         "exit_price=:x", "resolved_ts=:rts", "resolved_by='auto'"]
                 params.update(o=r["new_outcome"], p=float(r["new_pnl_pct"]),
                               u=None if pd.isna(r["new_pnl_usd"]) else float(r["new_pnl_usd"]),
                               r=None if pd.isna(r["new_pnl_r"]) else float(r["new_pnl_r"]),

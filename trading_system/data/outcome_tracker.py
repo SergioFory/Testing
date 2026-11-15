@@ -500,16 +500,151 @@ def _update_signal_result(signal_id: int, outcome: str, pnl_usd, pnl_pct,
     with engine.begin() as conn:
         conn.execute(text(
             "UPDATE signals SET resultado_real=:outcome, pnl_usd=:pnl_usd, pnl_pct=:pnl_pct, "
-            "pnl_r=:pnl_r, exit_price=:exit_price, resolved_ts=:rts WHERE id=:id"
+            "pnl_r=:pnl_r, exit_price=:exit_price, resolved_ts=:rts, resolved_by='auto' WHERE id=:id"
         ), {"outcome": outcome, "pnl_usd": pnl_usd, "pnl_pct": pnl_pct, "pnl_r": pnl_r,
             "exit_price": exit_price, "rts": rts, "id": signal_id})
 
 
+# ---------------------------------------------------------------------------
+# Cierre manual desde el dashboard (Fase 1, 1.9)
+# ---------------------------------------------------------------------------
+
+MANUAL_OUTCOMES = ("win", "loss", "be", "expired")
+
+
+def resolve_signal_manually(signal_id: int, outcome: str, exit_price: float = None,
+                            now=None) -> dict:
+    """
+    Cierra a mano una señal ABIERTA (formulario del dashboard).
+
+    Escribe resolved_by='manual', resolved_ts=ahora y, si se puede calcular,
+    exit_price, pnl_pct, pnl_r y pnl_usd (con el tamaño emitido):
+      - con precio de salida → se calculan con compute_result_fields;
+      - 'be' sin precio → salida = entrada, R = 0;
+      - win/loss/expired sin precio → sin R (cuenta en los recuentos, no en el E[R]).
+    Solo actúa sobre señales sin resultado (si el tracker la cerró antes, no la
+    pisa). Devuelve {"updated": bool, "pnl_r", "pnl_usd", "exit_price", "motivo"}.
+    Lanza ValueError si el resultado o el precio no son válidos.
+    """
+    if outcome not in MANUAL_OUTCOMES:
+        raise ValueError(f"Resultado no válido: {outcome!r} (usa {', '.join(MANUAL_OUTCOMES)})")
+    if exit_price is not None:
+        exit_price = float(exit_price)
+        if not exit_price > 0:
+            raise ValueError("El precio de salida debe ser mayor que 0.")
+    from data.database import init_db
+    init_db()
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT id, direction, entry_price, stop_loss, position_size, resultado_real "
+            "FROM signals WHERE id=:id"), {"id": int(signal_id)}).mappings().fetchone()
+    if row is None:
+        return {"updated": False, "motivo": f"no existe la señal #{signal_id}"}
+    if row["resultado_real"] is not None:
+        return {"updated": False, "motivo": f"la señal #{signal_id} ya estaba cerrada "
+                                            f"({row['resultado_real']})"}
+
+    entry, sl = float(row["entry_price"]), float(row["stop_loss"])
+    if exit_price is None and outcome == "be":
+        exit_price = entry
+    fields = {"pnl_pct": None, "pnl_r": None, "pnl_usd": None}
+    if exit_price is not None:
+        fields = compute_result_fields(row["direction"], entry, sl, exit_price,
+                                       row["position_size"])
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    with engine.begin() as conn:
+        res = conn.execute(text(
+            "UPDATE signals SET resultado_real=:o, pnl_usd=:u, pnl_pct=:p, pnl_r=:r, "
+            "exit_price=:x, resolved_ts=:rts, resolved_by='manual' "
+            "WHERE id=:id AND resultado_real IS NULL"),
+            {"o": outcome, "u": fields["pnl_usd"], "p": fields["pnl_pct"], "r": fields["pnl_r"],
+             "x": exit_price, "rts": _unix(now), "id": int(signal_id)})
+        updated = (res.rowcount or 0) > 0
+    if updated:
+        logger.info(f"Señal #{signal_id} cerrada A MANO: {outcome} | salida={exit_price} | "
+                    f"R={fields['pnl_r']}")
+    return {"updated": updated, "pnl_r": fields["pnl_r"], "pnl_usd": fields["pnl_usd"],
+            "exit_price": exit_price,
+            "motivo": None if updated else "otra escritura la cerró a la vez"}
+
+
+# ---------------------------------------------------------------------------
+# Estadísticas del dashboard en R (Fase 1, 1.3 / 1.9)
+# ---------------------------------------------------------------------------
+
+# Cuantiles t de Student al 95 % (una cola) → intervalo bilateral del 90 %.
+_T95 = [6.314, 2.920, 2.353, 2.132, 2.015, 1.943, 1.895, 1.860, 1.833, 1.812,
+        1.796, 1.782, 1.771, 1.761, 1.753, 1.746, 1.740, 1.734, 1.729, 1.725,
+        1.721, 1.717, 1.714, 1.711, 1.708, 1.706, 1.703, 1.701, 1.699, 1.697]
+
+
+def _t95(df: int) -> float:
+    """Cuantil 0.95 de la t con `df` grados de libertad (tabla hasta 30; después,
+    desarrollo de Cornish-Fisher, error < 0.001). Evita depender de scipy."""
+    if df < 1:
+        raise ValueError("df debe ser ≥ 1")
+    if df <= 30:
+        return _T95[df - 1]
+    z = 1.6448536269514722
+    return (z + (z**3 + z) / (4 * df)
+            + (5 * z**5 + 16 * z**3 + 3 * z) / (96 * df**2))
+
+
+def mean_ci90(values) -> tuple:
+    """(media, límite inferior, límite superior) del intervalo de confianza del
+    90 % de la media con la t de Student. Con menos de 2 valores el intervalo es
+    (None, None). Se usa la t y no un bootstrap porque con pocas señales el
+    bootstrap da intervalos demasiado estrechos y además es aleatorio."""
+    import math
+    vals = [float(v) for v in values]
+    n = len(vals)
+    if n == 0:
+        return None, None, None
+    mean = sum(vals) / n
+    if n < 2:
+        return mean, None, None
+    var = sum((v - mean) ** 2 for v in vals) / (n - 1)
+    half = _t95(n - 1) * math.sqrt(var / n)
+    return mean, mean - half, mean + half
+
+
+def signal_r(row) -> float | None:
+    """R de una señal resuelta: pnl_r; si falta, se deduce de pnl_pct (filas
+    antiguas: R = pnl_pct × entrada / |entrada − SL|); 'be' sin datos = 0.
+    None si no se puede saber (p. ej. expirada sin velas o cierre manual sin precio)."""
+    def _num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if pd.isna(f) else f
+    r = _num(row.get("pnl_r"))
+    if r is not None:
+        return r
+    pct, entry, sl = _num(row.get("pnl_pct")), _num(row.get("entry_price")), _num(row.get("stop_loss"))
+    if pct is not None and entry and sl is not None and abs(entry - sl) > 0:
+        return pct * entry / abs(entry - sl)
+    if row.get("resultado_real") == "be":
+        return 0.0
+    return None
+
+
 def get_outcome_stats(symbol: str = None) -> dict:
     """
-    Estadísticas de señales resueltas para mostrar en el dashboard.
+    Estadísticas de señales para el dashboard, en R (Fase 1, 1.3 / 1.9).
+
+    Universo: señales LIVE (las que recibe el usuario) sin quality_flag, de un
+    activo o de todos (symbol=None), SIN límite de filas.
+      - resueltas = cualquier resultado: win (TP), loss (SL), expired (salida por
+        tiempo) y be (break-even, R = 0 si no hay precio);
+      - win_rate = ganadas / resueltas;
+      - E[R] medio con intervalo de confianza del 90 % (t de Student) y suma de R,
+        sobre las resueltas cuyo R se conoce (n_r);
+      - manual / auto: cuántas cerró el formulario y cuántas el tracker.
+    Devuelve {} si no hay señales live.
     """
-    df = load_signals(symbol=symbol, limit=500)
+    df = load_signals(symbol=symbol, limit=None)
     if df.empty:
         return {}
     # Fase 0: las estadísticas solo cuentan señales notificadas (modo live) y
@@ -521,20 +656,29 @@ def get_outcome_stats(symbol: str = None) -> dict:
     if df.empty:
         return {}
 
-    resolved = df[df["resultado_real"].isin(["win", "loss", "expired"])]
-    if resolved.empty:
-        return {"total": len(df), "resolved": 0}
-
-    wins = resolved[resolved["resultado_real"] == "win"]
-    losses = resolved[resolved["resultado_real"] == "loss"]
-
-    return {
-        "total":       len(df),
-        "resolved":    len(resolved),
-        "pending":     len(df) - len(resolved),
-        "wins":        len(wins),
-        "losses":      len(losses),
-        "win_rate":    round(len(wins) / len(resolved), 3) if len(resolved) > 0 else 0,
-        "avg_pnl_pct": round(resolved["pnl_pct"].mean() * 100, 2) if "pnl_pct" in resolved else 0,
-        "total_pnl":   round(resolved["pnl_usd"].sum(), 2) if "pnl_usd" in resolved else 0,
+    resolved = df[df["resultado_real"].notna()]
+    out = {
+        "total":    len(df),
+        "resolved": len(resolved),
+        "pending":  len(df) - len(resolved),
+        "wins":     int((resolved["resultado_real"] == "win").sum()),
+        "losses":   int((resolved["resultado_real"] == "loss").sum()),
+        "expired":  int((resolved["resultado_real"] == "expired").sum()),
+        "be":       int((resolved["resultado_real"] == "be").sum()),
+        "win_rate": None, "n_r": 0, "mean_r": None, "ci90_low": None, "ci90_high": None,
+        "sum_r": 0.0, "manual": 0, "auto": 0,
     }
+    out["other"] = out["resolved"] - out["wins"] - out["losses"] - out["expired"] - out["be"]
+    if resolved.empty:
+        return out
+    out["win_rate"] = round(out["wins"] / out["resolved"], 4)
+    if "resolved_by" in resolved.columns:
+        out["manual"] = int((resolved["resolved_by"] == "manual").sum())
+        out["auto"] = int((resolved["resolved_by"] == "auto").sum())
+    rs = [r for r in (signal_r(row) for row in resolved.to_dict("records")) if r is not None]
+    mean, lo, hi = mean_ci90(rs)
+    out.update(n_r=len(rs), sum_r=round(sum(rs), 4),
+               mean_r=None if mean is None else round(mean, 4),
+               ci90_low=None if lo is None else round(lo, 4),
+               ci90_high=None if hi is None else round(hi, 4))
+    return out

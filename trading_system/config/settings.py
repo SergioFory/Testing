@@ -581,6 +581,47 @@ WALK_FORWARD = {
 # =============================================================================
 # GESTIÓN DE RIESGO
 # =============================================================================
+def _env_capital(key: str = "TRADING_CAPITAL", default: float = 10_000.0) -> float:
+    """Capital de la cuenta en USD desde la variable de entorno (Fase 1, 1.1).
+    Admite "25000", "25_000", "25,000" o "25000.50". Vacía o inválida → default."""
+    raw = _clean_env(key).replace("_", "").replace(",", "").replace("$", "").strip()
+    if not raw:
+        return float(default)
+    try:
+        val = float(raw)
+    except ValueError:
+        val = 0.0
+    if val <= 0:
+        from loguru import logger
+        logger.warning(f"{key}={raw!r} no es un capital válido; se usa {default:,.0f} USD.")
+        return float(default)
+    return val
+
+
+# Capital REAL de la cuenta del usuario (USD). Con él se calcula el tamaño de la
+# posición y el riesgo en % que muestra el mensaje de Telegram. Se configura en
+# Render con la variable TRADING_CAPITAL; sin ella, 10.000 USD.
+TRADING_CAPITAL = _env_capital()
+
+# =============================================================================
+# CONTRATOS DE XM (Fase 1, 1.1)
+# -----------------------------------------------------------------------------
+# Para mostrar el tamaño en LOTES de XM hacen falta, por activo:
+#   contract_size: unidades del activo por 1 lote (p. ej. 1 BTC, 100 oz…)
+#   min_lot:       lote mínimo que acepta XM
+#   lot_step:      incremento de lote (p. ej. 0.01)
+# PENDIENTE: el usuario aún no ha enviado la especificación de sus contratos, así
+# que van en None y el mensaje dice "Lotes XM: pendiente de la especificación del
+# contrato" y muestra el tamaño en unidades del activo (`unit`). Cuando lleguen
+# los datos, basta con rellenarlos aquí (no hay que tocar nada más).
+# =============================================================================
+XM_CONTRACTS = {
+    "BTCUSDT": {"unit": "BTC", "contract_size": None, "min_lot": None, "lot_step": None},
+    "ETHUSDT": {"unit": "ETH", "contract_size": None, "min_lot": None, "lot_step": None},
+    "XAUUSD":  {"unit": "oz",  "contract_size": None, "min_lot": None, "lot_step": None},
+    "SPX500":  {"unit": "unidades del índice", "contract_size": None, "min_lot": None, "lot_step": None},
+}
+
 RISK = {
     "capital_inicial":  10_000,     # Capital inicial en USD (para backtest)
     "risk_per_trade":   0.01,       # 1% del capital por operación

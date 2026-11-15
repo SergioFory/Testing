@@ -261,6 +261,9 @@ _SIGNAL_COLUMNS = [
     ("quality_flag", "TEXT"),
     ("notified",     "INTEGER"),
     ("alert_text",   "TEXT"),
+    # Quién cerró la señal (Fase 1, 1.9): 'auto' = el tracker por velas;
+    # 'manual' = el formulario del dashboard. NULL = filas anteriores.
+    ("resolved_by",  "TEXT"),
 ]
 _SIGNAL_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_signals_setup ON signals(symbol, direction, setup_ts)",
@@ -492,15 +495,19 @@ def load_unnotified_signals() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def load_signals(symbol: str = None, limit: int = 100) -> pd.DataFrame:
+def load_signals(symbol: str = None, limit: int | None = 100) -> pd.DataFrame:
+    """Señales de la BD, de la más reciente a la más antigua.
+    limit=None → todas (las estadísticas del dashboard no deben recortarse)."""
     init_db()
     query  = "SELECT * FROM signals"
     params: dict = {}
     if symbol:
         query += " WHERE symbol = :symbol"
         params["symbol"] = symbol
-    query += " ORDER BY ts DESC LIMIT :limit"
-    params["limit"] = limit
+    query += " ORDER BY ts DESC"
+    if limit is not None:
+        query += " LIMIT :limit"
+        params["limit"] = int(limit)
 
     with get_engine().connect() as conn:
         return pd.read_sql_query(text(query), conn, params=params)

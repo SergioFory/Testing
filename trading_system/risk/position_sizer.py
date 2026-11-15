@@ -176,6 +176,52 @@ def build_trade_setup(
     )
 
 
+def xm_lot_size(symbol: str, qty: float, entry: float = None, stop_loss: float = None,
+                capital: float = None, contracts: dict = None) -> dict:
+    """
+    Convierte el tamaño en unidades del activo a LOTES de XM (Fase 1, 1.1).
+
+    Usa XM_CONTRACTS[symbol] = {unit, contract_size, min_lot, lot_step}. El lote
+    se redondea HACIA ABAJO al paso de XM (nunca arriesgar más de lo calculado).
+
+    Devuelve un dict con:
+      status: "pending"   → falta algún dato del contrato (aún no enviado)
+              "below_min" → el tamaño no llega al lote mínimo de XM
+              "ok"        → lots es el tamaño a operar
+      unit, qty, lots (o None), min_lot, lot_step,
+      risk_usd / risk_pct: riesgo con el tamaño en lotes redondeado (o con el
+      lote mínimo si status = "below_min"), si se pasan entry, stop_loss y capital.
+    """
+    if contracts is None:
+        from config.settings import XM_CONTRACTS as contracts
+    spec = contracts.get(symbol) or {}
+    out = {"status": "pending", "unit": spec.get("unit") or "unidades",
+           "qty": float(qty), "lots": None,
+           "min_lot": spec.get("min_lot"), "lot_step": spec.get("lot_step"),
+           "risk_usd": None, "risk_pct": None}
+    cs, min_lot, step = spec.get("contract_size"), spec.get("min_lot"), spec.get("lot_step")
+    if not cs or not min_lot or not step or cs <= 0 or step <= 0:
+        return out
+
+    raw = float(qty) / float(cs)
+    # Redondeo hacia abajo al paso; el 1e-9 evita que 0.3/0.1 = 2.9999… pierda un paso.
+    lots = int(raw / float(step) + 1e-9) * float(step)
+    lots = round(lots, 8)
+    if lots + 1e-12 < float(min_lot):
+        out["status"] = "below_min"
+        used = float(min_lot)
+    else:
+        out["status"] = "ok"
+        out["lots"] = lots
+        used = lots
+    if entry is not None and stop_loss is not None:
+        risk = used * float(cs) * abs(float(entry) - float(stop_loss))
+        out["risk_usd"] = round(risk, 2)
+        if capital:
+            out["risk_pct"] = risk / float(capital)
+    return out
+
+
 class PortfolioRiskManager:
     """
     Controla el riesgo a nivel de portafolio:

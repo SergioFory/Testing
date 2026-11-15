@@ -32,6 +32,10 @@ services:
         sync: false
       - key: TWELVEDATA_API_KEY
         sync: false
+      # Capital real de la cuenta en USD (tamaño y riesgo en % del mensaje).
+      # Sin valor → 10000.
+      - key: TRADING_CAPITAL
+        sync: false
 
   # Worker: corre el scheduler (señales cada 60 min + tarea nocturna 03:00 UTC).
   # Fase 1: sin "retrain --all" al arrancar. El ML está apagado en todos los
@@ -65,4 +69,8 @@ services:
       - key: TELEGRAM_CHAT_ID
         sync: false
       - key: TWELVEDATA_API_KEY
+        sync: false
+      # Capital real de la cuenta en USD (tamaño y riesgo en % del mensaje).
+      # Sin valor → 10000.
+      - key: TRADING_CAPITAL
         sync: false

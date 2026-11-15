@@ -369,9 +369,10 @@ def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_se
     (riesgo, eventos, antiduplicado), lo registra y lo notifica. Anota en `fate`
     el motivo del elegido para el registro sombra."""
     from ml.predictor              import get_best_setup
-    from risk.position_sizer       import build_trade_setup, PortfolioRiskManager
-    from notifications.telegram    import format_signal_alert, send_text
-    from config.settings           import MAX_SETUP_AGE_BARS, notify_enabled, fmt_price
+    from risk.position_sizer       import build_trade_setup
+    from notifications.telegram    import safe_format_signal_alert, send_text
+    from config.settings           import (MAX_SETUP_AGE_BARS, notify_enabled, fmt_price,
+                                           TRADING_CAPITAL)
     from data.outcome_tracker      import (is_duplicate_signal, is_duplicate_setup,
                                            has_recent_legacy_alert, save_signal_from_trade)
 
@@ -388,8 +389,9 @@ def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_se
     setup_ts = pd.Timestamp(best["ts"])
     fate["key"] = (setup_ts, best["direction"])
     ml_score = float(best.get("ml_score", best.get("raw_score", 0)))
-    portfolio = PortfolioRiskManager()
-    trade = build_trade_setup(best, portfolio.current_capital, ml_score)
+    # Capital REAL de la cuenta (variable TRADING_CAPITAL, por defecto 10.000 USD;
+    # Fase 1, 1.1). Solo cambia el tamaño en USD/unidades, no qué setup se emite.
+    trade = build_trade_setup(best, TRADING_CAPITAL, ml_score)
 
     if trade is None:
         fate["motivo"] = "risk_invalid"
@@ -446,7 +448,11 @@ def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_se
     # falla, el ciclo siguiente la reenvía (retry_failed_signal_alerts) mientras
     # tenga menos de 2 h.
     will_notify = bool(notify) and mode == "live"
-    alert_text = format_signal_alert(trade, sentiment) if will_notify else None
+    alert_text = (safe_format_signal_alert(trade, sentiment, setup_ts=setup_ts,
+                                           current_price=current_price,
+                                           threshold=cfg.get("ml_threshold"),
+                                           capital=TRADING_CAPITAL)
+                  if will_notify else None)
     signal_id = save_signal_from_trade(trade, sentiment, setup_ts=setup_ts,
                                        data_source=data_source, last_bar_ts=last_bar_ts,
                                        mode=mode,
@@ -890,7 +896,7 @@ def _print_signal(trade, sentiment: dict = None) -> None:
     table.add_row("Símbolo",      trade.symbol)
     table.add_row("Dirección",    f"[{direction_color}]{direction_label}[/{direction_color}]")
     table.add_row("Setup Type",   trade.setup_type.replace("_", " ").title())
-    table.add_row("Confianza ML", f"{trade.ml_score:.1%}")
+    table.add_row("Score setup",  f"{trade.ml_score:.2f}")
     table.add_row("",             "")
     from config.settings import fmt_price
     table.add_row("Entrada",      f"${fmt_price(trade.entry_price)}")

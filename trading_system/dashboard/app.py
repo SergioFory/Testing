@@ -17,7 +17,8 @@ from loguru import logger
 
 from config.settings import ASSETS, RISK, ML_PARAMS, DAYS_HISTORY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, fmt_price
 from data.database        import init_db, load_signals
-from data.outcome_tracker import save_signal_from_trade, resolve_open_signals, get_outcome_stats
+from data.outcome_tracker import (save_signal_from_trade, resolve_open_signals, get_outcome_stats,
+                                  resolve_signal_manually, MANUAL_OUTCOMES)
 from notifications.telegram import send_signal_alert, test_connection as tg_test
 from data.fetchers   import fetch_ohlcv, fetch_multi_timeframe, fetch_gold, fetch_yfinance_asset, fetch_macro, fetch_funding_rates
 from signals.detector import detect_all_setups, get_current_setup
@@ -84,8 +85,11 @@ with st.sidebar:
     ) / 100
 
     _default_threshold = float(asset_cfg.get("ml_threshold", ML_PARAMS["prob_threshold"]))
+    # Rango 0–1: los umbrales de oro (0.20) y SPX (0.12) quedan por debajo del
+    # antiguo mínimo 0.50 (Streamlit movía el mínimo en silencio). Solo afecta a
+    # la pestaña de señal del dashboard; el worker usa ml_threshold de settings.
     ml_threshold = st.slider(
-        "Umbral ML", 0.50, 0.80,
+        "Umbral del score", 0.0, 1.0,
         _default_threshold, 0.01
     )
 
@@ -128,7 +132,8 @@ with tab_signal:
 
     # Limpiar caché si el usuario cambia de activo en el selector
     if st.session_state.get("_sig_symbol") != symbol:
-        for _k in ("_sig_trade", "_sig_sentiment", "_sig_df4h", "_sig_dfsetups", "_sig_lookback"):
+        for _k in ("_sig_trade", "_sig_sentiment", "_sig_df4h", "_sig_dfsetups", "_sig_lookback",
+                   "_sig_meta", "_sig_price"):
             st.session_state.pop(_k, None)
         st.session_state["_sig_symbol"] = symbol
 
@@ -223,6 +228,8 @@ with tab_signal:
         st.session_state["_sig_dfsetups"] = _dfsetups
         st.session_state["_sig_lookback"] = _lookback
         st.session_state["_sig_meta"]     = _meta if not _df4h.empty else {}
+        st.session_state["_sig_price"]    = (float(_df4h["close"].iloc[-1])
+                                             if not _df4h.empty else None)
 
     # =========================================================================
     # DISPLAY — siempre lee de session_state (persiste cuando se pulsan botones)
@@ -242,12 +249,12 @@ with tab_signal:
             last = hist_df.iloc[0]
             _dir = last.get("direction", "")
             if _dir == "long":
-                st.success(f"LONG | ML: {last.get('ml_score',0):.2f} | "
+                st.success(f"LONG | Score: {last.get('ml_score',0):.2f} | "
                            f"Entry: ${fmt_price(last.get('entry_price',0))} | "
                            f"SL: ${fmt_price(last.get('stop_loss',0))} | "
                            f"TP: ${fmt_price(last.get('take_profit',0))}")
             elif _dir == "short":
-                st.error(f"SHORT | ML: {last.get('ml_score',0):.2f} | "
+                st.error(f"SHORT | Score: {last.get('ml_score',0):.2f} | "
                          f"Entry: ${fmt_price(last.get('entry_price',0))} | "
                          f"SL: ${fmt_price(last.get('stop_loss',0))} | "
                          f"TP: ${fmt_price(last.get('take_profit',0))}")
@@ -263,7 +270,7 @@ with tab_signal:
                     <h2>🟢 LONG — {asset_cfg['label']}</h2>
                     <p>Setup: <b>{_trade.setup_type.upper()}</b> |
                        Timeframe: 4H |
-                       ML Score: <b>{_trade.ml_score:.0%}</b></p>
+                       Score del setup: <b>{_trade.ml_score:.2f}</b> (umbral {ml_threshold:.2f})</p>
                     </div>
                     """, unsafe_allow_html=True)
                 else:
@@ -272,7 +279,7 @@ with tab_signal:
                     <h2>🔴 SHORT — {asset_cfg['label']}</h2>
                     <p>Setup: <b>{_trade.setup_type.upper()}</b> |
                        Timeframe: 4H |
-                       ML Score: <b>{_trade.ml_score:.0%}</b></p>
+                       Score del setup: <b>{_trade.ml_score:.2f}</b> (umbral {ml_threshold:.2f})</p>
                     </div>
                     """, unsafe_allow_html=True)
             else:
@@ -315,7 +322,11 @@ with tab_signal:
                         st.caption("Activo en modo sombra: no se envía a Telegram.")
                     elif tg_notify:
                         if st.button("📲 Enviar a Telegram", type="secondary"):
-                            ok = send_signal_alert(_trade, _sent)
+                            _m = st.session_state.get("_sig_meta", {})
+                            ok = send_signal_alert(
+                                _trade, None, setup_ts=_m.get("setup_ts"),
+                                current_price=st.session_state.get("_sig_price"),
+                                threshold=ml_threshold, capital=capital)
                             if ok:
                                 st.success("Notificación enviada a Telegram.")
                             else:
@@ -484,41 +495,85 @@ with tab_history:
                 n = resolve_open_signals()
             st.success(f"{n} señal(es) resuelta(s).") if n else st.info("No hay señales pendientes por resolver.")
 
+    # Estadísticas en R (Fase 1, 1.3 / 1.9): solo señales LIVE (las que recibes
+    # por Telegram) sin marca de calidad, sin límite de filas.
+    _all_assets = st.checkbox("Estadísticas de todos los activos", value=False)
+    stats = get_outcome_stats(symbol=None if _all_assets else symbol)
+    _ambito = "todos los activos" if _all_assets else asset_cfg["label"]
+    if not stats:
+        st.info(f"Sin señales live registradas ({_ambito}).")
+    else:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Señales live", stats["total"])
+        c2.metric("Abiertas", stats["pending"])
+        c3.metric("Ganadas (TP)", stats["wins"])
+        c4.metric("Perdidas (SL)", stats["losses"])
+        c5.metric("Cierre por tiempo", stats["expired"])
+        c6, c7, c8, c9, c10 = st.columns(5)
+        c6.metric("Break-even", stats["be"])
+        c7.metric("% de aciertos",
+                  f"{stats['win_rate']*100:.1f}%" if stats.get("win_rate") is not None else "—",
+                  help="Ganadas (tocaron el TP) / resueltas (TP + SL + tiempo + break-even).")
+        c8.metric("R medio por operación",
+                  f"{stats['mean_r']:+.2f}R" if stats.get("mean_r") is not None else "—",
+                  help="R = ganancia o pérdida medida en 'riesgos': −1R = tocó el SL; "
+                       "+1,5R = ganó 1,5 veces lo arriesgado.")
+        c9.metric("Intervalo 90 %",
+                  (f"{stats['ci90_low']:+.2f} a {stats['ci90_high']:+.2f}R"
+                   if stats.get("ci90_low") is not None else "—"),
+                  help="Con estos resultados, el R medio real está probablemente (90 %) en "
+                       "este rango. Si incluye el 0, aún no se puede saber si el sistema gana.")
+        c10.metric("Suma de R", f"{stats['sum_r']:+.2f}R")
+        _txt = (f"{_ambito}: {stats['resolved']} resueltas "
+                f"({stats['auto']} por el sistema, {stats['manual']} a mano)")
+        if stats["n_r"] < stats["resolved"]:
+            _txt += f"; {stats['resolved'] - stats['n_r']} sin R conocido (no entran en el R medio)"
+        if stats.get("other"):
+            _txt += f"; {stats['other']} con otro resultado"
+        st.caption(_txt + ". R sin costes del bróker y con la entrada al precio del mensaje.")
+        if stats.get("ci90_low") is not None and stats["ci90_low"] <= 0 <= stats["ci90_high"]:
+            st.caption("El intervalo incluye el 0: con tan pocas operaciones todavía no se puede "
+                       "distinguir un sistema ganador de uno que no gana.")
+
     hist_df = load_signals(symbol=symbol, limit=200)
     if hist_df.empty:
         st.info("No hay señales guardadas para este activo aún. Genera una señal y pulsa 'Registrar señal en DB'.")
     else:
-        stats = get_outcome_stats(symbol=symbol)
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Total señales",  stats.get("total", 0))
-        c2.metric("Resueltas",      stats.get("resolved", 0))
-        c3.metric("Pendientes",     stats.get("pending", 0))
-        c4.metric("Win Rate real",
-                  f"{stats['win_rate']*100:.1f}%" if stats.get("resolved", 0) > 0 else "—")
-        c5.metric("PnL total",
-                  f"${stats.get('total_pnl', 0):+,.2f}")
-
         st.dataframe(
             hist_df.sort_values("ts", ascending=False),
             use_container_width=True,
         )
 
-        # Marcar resultados
-        st.subheader("Actualizar resultado de señal")
-        signal_ids = hist_df[hist_df["resultado_real"].isna()]["id"].tolist()
-        if signal_ids:
-            sel_id  = st.selectbox("ID de señal pendiente", signal_ids)
-            outcome = st.radio("Resultado", ["win", "loss", "be"])
-            pnl     = st.number_input("PnL (USD)", value=0.0, step=10.0)
+        # Cerrar a mano una señal abierta (resolved_by='manual'; el tracker escribe 'auto').
+        st.subheader("Cerrar una señal a mano")
+        pend = hist_df[hist_df["resultado_real"].isna()]
+        if not pend.empty:
+            sel_id  = st.selectbox("ID de señal abierta", pend["id"].tolist())
+            row     = pend[pend["id"] == sel_id].iloc[0]
+            _labels = {"win": "Ganada (TP)", "loss": "Perdida (SL)",
+                       "be": "Break-even", "expired": "Cerrada por tiempo"}
+            outcome = st.radio("Resultado", list(MANUAL_OUTCOMES),
+                               format_func=lambda k: _labels.get(k, k), horizontal=True)
+            # Precio sugerido según el resultado (TP, SL o entrada); edítalo si
+            # cerraste a otro precio. Con él se calcula el R.
+            _default = {"win": row["take_profit"], "loss": row["stop_loss"]}.get(
+                outcome, row["entry_price"])
+            exit_px = st.number_input("Precio de salida", min_value=0.0,
+                                      value=float(_default), format="%.5f",
+                                      key=f"exit_{sel_id}_{outcome}")
             if st.button("Guardar resultado"):
-                from data.database import get_engine
-                from sqlalchemy import text as _sql
-                with get_engine().begin() as _conn:
-                    _conn.execute(
-                        _sql("UPDATE signals SET resultado_real=:outcome, pnl_usd=:pnl WHERE id=:id"),
-                        {"outcome": outcome, "pnl": float(pnl), "id": int(sel_id)}
-                    )
-                st.success("Resultado guardado.")
-                st.rerun()
+                try:
+                    res = resolve_signal_manually(int(sel_id), outcome,
+                                                  exit_price=exit_px if exit_px > 0 else None)
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    if res["updated"]:
+                        _r = res.get("pnl_r")
+                        st.success("Resultado guardado" +
+                                   (f": {_r:+.2f}R." if _r is not None else " (sin R: falta el precio)."))
+                        st.rerun()
+                    else:
+                        st.warning(f"No se guardó: {res.get('motivo')}.")
         else:
             st.caption("Todas las señales tienen resultado registrado.")

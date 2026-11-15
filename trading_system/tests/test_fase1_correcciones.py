@@ -711,3 +711,46 @@ def test_fetcher_no_usa_la_vela_plana_del_final_de_pagina(monkeypatch):
     assert len(ex.calls) >= 3
     gaps = df.index.to_series().diff().dropna()
     assert (gaps == pd.Timedelta(hours=4)).all()
+
+
+# ---------------------------------------------------------------------------
+# Vela diaria "en curso" de los futuros de yfinance (GC=F)
+# ---------------------------------------------------------------------------
+
+def _daily(dates):
+    idx = pd.DatetimeIndex(pd.to_datetime(dates)).tz_localize("UTC")
+    return pd.DataFrame({"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 1.0}, index=idx)
+
+
+@pytest.mark.parametrize("now, expected_last", [
+    # Domingo 23:30 UTC (18:30 ET): fila fechada domingo = sesión del lunes en curso.
+    ("2026-11-15 23:30", "2026-11-13"),
+    # Lunes 22:30 UTC (17:30 ET, invierno): vela del lunes cerrada y aún sin reapertura.
+    ("2026-11-16 22:30", "2026-11-16"),
+    # Lunes 23:30 UTC (18:30 ET): la fila "lunes" puede ser la sesión del martes.
+    ("2026-11-16 23:30", "2026-11-13"),
+    # Martes 05:30 UTC (00:30 ET): la fila del lunes vuelve a ser la verdadera.
+    ("2026-11-17 05:30", "2026-11-16"),
+    # Verano: 22:30 UTC = 18:30 EDT, ya reabrió a las 22:00 UTC.
+    ("2026-07-14 22:30", "2026-07-10"),
+    ("2026-07-15 04:30", "2026-07-14"),
+])
+def test_vela_diaria_en_curso_de_futuros_no_se_da_por_cerrada(now, expected_last):
+    from data.bars import drop_unclosed_bars
+    if now.startswith("2026-07"):
+        df = _daily(["2026-07-09", "2026-07-10", "2026-07-14", "2026-07-15"])
+        if now.startswith("2026-07-14"):
+            df = df.iloc[:3]
+    else:
+        df = _daily(["2026-11-12", "2026-11-13", "2026-11-15", "2026-11-16", "2026-11-17"])
+        df = df[df.index <= pd.Timestamp(now, tz="UTC").normalize()]
+    out = drop_unclosed_bars(df, "1d", session=True, now=pd.Timestamp(now, tz="UTC"))
+    assert out.index[-1] == pd.Timestamp(expected_last, tz="UTC")
+    assert (out.index.dayofweek < 5).all()
+
+
+def test_filtro_de_sesion_no_toca_el_historico():
+    from data.bars import drop_unclosed_bars
+    df = _daily(pd.bdate_range("2025-01-01", "2026-11-13"))
+    out = drop_unclosed_bars(df, "1d", session=True, now=pd.Timestamp("2026-11-15 23:30", tz="UTC"))
+    assert len(out) == len(df)

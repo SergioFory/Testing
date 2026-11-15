@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 
 _TF_LEN = {
@@ -53,6 +54,49 @@ def bar_close_times(df: pd.DataFrame, timeframe: str, session: bool = False) -> 
     return idx + _TF_LEN[timeframe]
 
 
+#: Hora de Nueva York a la que reabre la sesión de futuros (CME Globex, GC=F).
+_NY_TZ = "America/New_York"
+_EVENING_REOPEN_NY_HOUR = 18
+
+
+def _session_rows_trustworthy(df: pd.DataFrame, now_utc: pd.Timestamp) -> "np.ndarray":
+    """
+    Filas diarias de yfinance (GC=F, ^GSPC) cuyo contenido es la sesión que dice su
+    fecha. Corrección del 2026-11-15 (encontrada al ver en la BD una vela de oro con
+    fecha DOMINGO):
+
+    Yahoo devuelve la sesión EN CURSO de los futuros como una fila más, fechada con
+    el día de Nueva York en que se negocia. yfinance 1.7.0
+    (utils.fix_Yahoo_returning_live_separate) junta las dos últimas filas si tienen
+    la misma fecha y se queda con la EN CURSO. Resultado, para el oro:
+      - domingo desde la reapertura (18:00 ET) hasta medianoche ET: fila fechada
+        domingo con unas horas de la sesión del lunes;
+      - lunes a viernes desde la reapertura (18:00 ET) hasta medianoche ET: la vela
+        COMPLETA del día D desaparece y en su lugar llega una fila "D" con las
+        primeras horas de la sesión siguiente.
+    En ambos casos la fila ya pasó las 22:15 UTC de su fecha y se daba por cerrada:
+    el ciclo evaluaba setups sobre una vela que no existe (alertas fantasma de oro
+    por la noche, como las del 28-sep).
+
+    Regla: (1) nunca se aceptan filas con fecha de sábado o domingo (no hay sesiones
+    en fin de semana); (2) la fila con fecha de HOY en Nueva York no se acepta desde
+    las 18:00 ET (puede ser la sesión siguiente). La vela verdadera del día D vuelve
+    a medianoche ET (la sesión en curso pasa a fecharse D+1) y se evalúa en el primer
+    ciclo después: en invierno también en el hueco 22:15–23:00 UTC; en verano la
+    reapertura es a las 22:00 UTC, antes de las 22:15, así que el oro se evalúa a
+    partir de las 04:00 UTC. Para ^GSPC (sin sesión nocturna) solo retrasa unas horas
+    la evaluación (además está en modo sombra).
+    """
+    idx = _utc_index(df)
+    dates = idx.normalize()
+    weekday_ok = dates.dayofweek < 5
+    now_ny = now_utc.tz_convert(_NY_TZ)
+    today_ny = pd.Timestamp(now_ny.date(), tz="UTC")
+    evening = now_ny.hour >= _EVENING_REOPEN_NY_HOUR
+    live_row = (dates == today_ny) & evening
+    return np.asarray(weekday_ok & ~live_row, dtype=bool)
+
+
 def drop_unclosed_bars(df: pd.DataFrame | None, timeframe: str,
                        session: bool = False, now=None) -> pd.DataFrame | None:
     """
@@ -65,8 +109,11 @@ def drop_unclosed_bars(df: pd.DataFrame | None, timeframe: str,
     """
     if df is None or df.empty:
         return df
+    now_utc = _now_utc(now)
     closes = bar_close_times(df, timeframe, session=session)
-    mask = closes <= _now_utc(now)
+    mask = np.asarray(closes <= now_utc, dtype=bool)
+    if session:
+        mask = mask & _session_rows_trustworthy(df, now_utc)
     out = df.loc[mask]
     if hasattr(df, "attrs"):
         out.attrs = dict(df.attrs)

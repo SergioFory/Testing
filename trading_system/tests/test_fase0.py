@@ -62,11 +62,11 @@ def test_drop_unclosed_4h():
 
 def test_drop_unclosed_daily_session():
     from data.bars import drop_unclosed_bars
-    df = _bars("2026-11-12", 3, freq="1D")          # 12, 13, 14
-    # 14-nov a las 15:00 UTC: la sesión del 14 sigue abierta
-    assert drop_unclosed_bars(df, "1d", session=True, now="2026-11-14 15:00").index[-1].day == 13
-    # 14-nov a las 22:30 UTC: ya cerró
-    assert drop_unclosed_bars(df, "1d", session=True, now="2026-11-14 22:30").index[-1].day == 14
+    df = _bars("2026-11-11", 3, freq="1D")          # mié 11, jue 12, vie 13
+    # 13-nov a las 15:00 UTC: la sesión del 13 sigue abierta
+    assert drop_unclosed_bars(df, "1d", session=True, now="2026-11-13 15:00").index[-1].day == 12
+    # 13-nov a las 22:30 UTC: ya cerró (y aún no ha reabierto: 17:30 ET)
+    assert drop_unclosed_bars(df, "1d", session=True, now="2026-11-13 22:30").index[-1].day == 13
 
 
 # ---------------------------------------------------------------------------

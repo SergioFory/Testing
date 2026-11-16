@@ -260,6 +260,16 @@ def cycle_incidents(symbol: str, df_4h: pd.DataFrame, df_daily: pd.DataFrame | N
 _alert_state: dict = {}        # symbol -> última hora de aviso (pd.Timestamp)
 _alerted_keys: set = set()     # (symbol, check, ts) ya avisados en este proceso
 _ALERTED_MAX = 2000
+# Avisos graves PENDIENTES: su envío por Telegram falló. "Nueva en la BD" y "aviso
+# enviado" son cosas distintas: si el envío falla, la incidencia ya está en
+# data_quality y en el ciclo siguiente no sería nueva, así que sin esto el aviso
+# se perdería. (symbol, check, ts) -> (incidencia, hora del primer fallo). Se
+# reintenta en los ciclos siguientes (con el mismo throttling de 6 h) hasta
+# PENDING_MAX_AGE; después solo queda en el resumen nocturno. Vive en la memoria
+# del proceso (un reinicio del worker lo pierde: queda el resumen nocturno).
+_pending: dict = {}
+PENDING_MAX_AGE = timedelta(hours=24)
+_PENDING_MAX = 200
 
 
 def record_incidents(symbol: str, incidents: list[dict], now=None) -> set:
@@ -287,33 +297,63 @@ def record_incidents(symbol: str, incidents: list[dict], now=None) -> set:
 def _maybe_alert(symbol: str, graves: list[dict], new_keys: set | None, notify: bool, now) -> bool:
     """Aviso inmediato por Telegram de las incidencias GRAVES nuevas, como máximo
     uno cada ALERT_EVERY por activo. new_keys=None = la BD falló (se decide solo
-    con la memoria del proceso). Devuelve True si se envió."""
+    con la memoria del proceso). Los graves cuyo envío falló (_pending) se
+    reintentan aunque ya no sean nuevos en la BD. Devuelve True si se envió."""
     from data.database import _to_unix
+    t = _now(now)
     fresh = []
+    seen = set()
     for g in graves:
         key = (symbol, g["check"], _to_unix(g["ts"]))
-        if key in _alerted_keys:
+        if key in _alerted_keys or key in seen:
             continue
         if new_keys is not None and (g["check"], key[2]) not in new_keys:
-            continue      # ya estaba en la BD: se vio (y se avisó) en un ciclo anterior
+            continue      # ya estaba en la BD (si su envío falló, la recoge el bucle de _pending)
+        seen.add(key)
         fresh.append((key, g))
+    # Pendientes de este activo que ya no salen como graves en este ciclo (la vela
+    # dejó de ser de las 2 últimas): se reintentan igual mientras no caduquen.
+    for key, (g, since) in list(_pending.items()):
+        if key[0] != symbol:
+            continue
+        if key in _alerted_keys or t - since > PENDING_MAX_AGE:
+            _pending.pop(key, None)
+            if key not in _alerted_keys:
+                logger.warning(f"[{symbol}] Calidad de datos: el aviso de {key[1]}@{key[2]} no se pudo enviar "
+                               f"en {PENDING_MAX_AGE}; queda solo en el resumen nocturno.")
+            continue
+        if key not in seen:
+            seen.add(key)
+            fresh.append((key, g))
     if not fresh or not notify:
         return False
-    t = _now(now)
     last = _alert_state.get(symbol)
     if last is not None and t - last < ALERT_EVERY:
         logger.info(f"[{symbol}] Calidad de datos: {len(fresh)} incidencia(s) grave(s) sin aviso "
                     f"(último aviso hace < {ALERT_EVERY}); irán al resumen nocturno.")
         return False
     from notifications.telegram import send_data_quality_alert
-    ok = bool(send_data_quality_alert(symbol, [CHECK_TEXT.get(g["check"].split(":")[0], g["check"])
-                                               + (" [diario]" if g["check"].endswith(":1d") else "")
-                                               + ": " + g["detalle"] for _, g in fresh]))
+    try:
+        ok = bool(send_data_quality_alert(symbol, [CHECK_TEXT.get(g["check"].split(":")[0], g["check"])
+                                                   + (" [diario]" if g["check"].endswith(":1d") else "")
+                                                   + ": " + g["detalle"] for _, g in fresh]))
+    except Exception as exc:  # noqa: BLE001 — un fallo de envío es un aviso pendiente, no un error del ciclo
+        logger.warning(f"[{symbol}] Calidad de datos: excepción al enviar el aviso: {exc}")
+        ok = False
     if ok:
         _alert_state[symbol] = t
         if len(_alerted_keys) > _ALERTED_MAX:
             _alerted_keys.clear()
         _alerted_keys.update(k for k, _ in fresh)
+        for k, _ in fresh:
+            _pending.pop(k, None)
+    else:
+        logger.warning(f"[{symbol}] Calidad de datos: el aviso por Telegram falló; se reintentará en el "
+                       "próximo ciclo.")
+        if len(_pending) > _PENDING_MAX:
+            _pending.clear()
+        for k, g in fresh:
+            _pending.setdefault(k, (g, t))
     return ok
 
 
@@ -330,6 +370,11 @@ def run_cycle_checks(symbol: str, df_4h: pd.DataFrame, df_daily: pd.DataFrame | 
     ms = (time.perf_counter() - t0) * 1000
     if not incidents:
         logger.debug(f"[{symbol}] Calidad de datos: sin incidencias ({ms:.1f} ms).")
+        if any(k[0] == symbol for k in _pending):
+            try:                  # reintento de un aviso grave que no se pudo enviar
+                _maybe_alert(symbol, [], set(), notify, now)
+            except Exception as exc:
+                logger.warning(f"[{symbol}] Calidad de datos: reintento del aviso falló: {exc}")
         return incidents
     resumen = "; ".join(f"{i['check']}@{i['ts']:%m-%d %H:%M}" for i in incidents[:6])
     logger.warning(f"[{symbol}] Calidad de datos: {len(incidents)} incidencia(s) ({ms:.1f} ms): {resumen}"
@@ -340,7 +385,7 @@ def run_cycle_checks(symbol: str, df_4h: pd.DataFrame, df_daily: pd.DataFrame | 
     except Exception as exc:
         logger.warning(f"[{symbol}] Calidad de datos: no se pudo guardar en data_quality: {exc}")
     graves = [i for i in incidents if i["grave"]]
-    if graves:
+    if graves or any(k[0] == symbol for k in _pending):
         try:
             _maybe_alert(symbol, graves, new_keys, notify, now)
         except Exception as exc:

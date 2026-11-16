@@ -272,6 +272,10 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
 
 
 EVENT_LINE_MAX = 3
+# La línea sale en casi todas las señales de oro/SPX (y ~1 de cada 3 de cripto): se
+# dice en el propio mensaje que NO es motivo para saltarse la señal (saltarlas
+# sesgaría el forward test; REGLAS_DE_DECISION.md, "Filtro de eventos macro").
+EVENT_LINE_NOTE = "<i>(solo aviso: no es motivo para no entrar)</i>"
 
 
 def event_warning_line(start, end) -> str | None:
@@ -293,7 +297,7 @@ def event_warning_line(start, end) -> str | None:
     txt = ", ".join(format_event_short(e) for e in evs[:EVENT_LINE_MAX])
     if len(evs) > EVENT_LINE_MAX:
         txt += f" (y {len(evs) - EVENT_LINE_MAX} más)"
-    return f"⚠️ <b>Evento de alto impacto dentro del plazo de la operación:</b> {_e(txt)}"
+    return f"⚠️ <b>Evento de alto impacto dentro del plazo de la operación:</b> {_e(txt)} {EVENT_LINE_NOTE}"
 
 
 def safe_format_signal_alert(trade, sentiment: dict = None, **kwargs) -> str:

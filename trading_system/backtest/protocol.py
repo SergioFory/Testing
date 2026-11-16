@@ -291,10 +291,15 @@ def new_variant_entries(entries: list[dict], variants: list[dict], run_id: str) 
     return out
 
 
-def final_access_entry(variant: dict, run_id: str, okx: bool) -> dict:
-    """Línea de acceso a la reserva (y al holdout OKX en cripto)."""
-    return {"kind": "final_access", "hash": variant["hash"], "symbol": variant["params"]["symbol"],
-            "label": variant["label"], "run": run_id, "okx": bool(okx)}
+def final_access_entry(variant: dict, run_id: str, okx: bool, role: str | None = None) -> dict:
+    """Línea de acceso a la reserva (y al holdout OKX en cripto). role: "candidate",
+    "reference" (configuración actual enseñada junto a un candidato) o "current"
+    (configuración actual evaluada sola). Las líneas antiguas no tienen role."""
+    e = {"kind": "final_access", "hash": variant["hash"], "symbol": variant["params"]["symbol"],
+         "label": variant["label"], "run": run_id, "okx": bool(okx)}
+    if role:
+        e["role"] = role
+    return e
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +339,8 @@ def simulate_trades(df: pd.DataFrame, setups: pd.DataFrame, atr_stop: float,
 
     Devuelve una fila por operación simulable con: ts, direction, setup_type,
     raw_score, pos, entry_pos, exit_pos, entry_mid, exit_mid, exit_kind
-    ('sl'/'tp'/'time'), risk (atr_stop × ATR), complete (el horizonte cabe en los
-    datos o salió antes por SL/TP), d_in (apertura de la vela de entrada) y d_out
+    ('sl'/'tp'/'time'), risk (atr_stop × ATR), complete (la vela i+forward_bars ya
+    está en los datos, aunque la operación saliera antes por SL/TP), d_in (apertura de la vela de entrada) y d_out
     (mitad de la vela de salida), para el swap. Los R por escenario de costes se
     calculan con costs.net_returns.
     """
@@ -380,7 +385,11 @@ def simulate_trades(df: pd.DataFrame, setups: pd.DataFrame, atr_stop: float,
                 break
         if exit_mid is None:
             exit_mid = C[last_pos]
-        complete = kind != "time" or (pos + forward_bars) <= n - 1
+        # Horizonte completo = la vela i+forward_bars ya está en los datos, SEA CUAL SEA
+        # la salida. No vale "salió pronto por SL/TP": aceptar las resueltas pronto y
+        # excluir las abiertas es seleccionar por el resultado (el SL está más cerca que
+        # el TP → sesgo hacia pérdidas). Se usa en la reserva y en el holdout OKX.
+        complete = (pos + forward_bars) <= n - 1
         rows.append({"ts": pd.Timestamp(s.ts), "direction": s.direction,
                      "setup_type": s.setup_type, "raw_score": float(s.raw_score),
                      "pos": pos, "entry_pos": entry_pos, "exit_pos": exit_pos,
@@ -501,9 +510,11 @@ def selection_start(symbol: str) -> pd.Timestamp:
 def split_reserve(trades: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     (selección, reserva). Selección = setups con selection_start <= ts < reserva
-    (todos con su horizonte completo). Reserva = setups con ts >= reserva y
-    horizonte COMPLETO (las operaciones aún abiertas al final de los datos no
-    cuentan). La regla es por fecha del SETUP (especificación).
+    (todos con su horizonte completo). Reserva = setups con ts >= reserva cuyo
+    horizonte COMPLETO (i+forward_bars) ya está en los datos, haya salido o no
+    antes por SL/TP (ni las abiertas ni las cerradas pronto de esas últimas velas
+    cuentan: así no se selecciona por el resultado). La regla es por fecha del
+    SETUP (especificación).
     """
     if trades is None or len(trades) == 0:
         return trades, trades
@@ -861,6 +872,37 @@ CRIT_MIN_FOLDS = 2            # b) folds (de 3) con mejora >= CRIT_MIN_IMPROVEME
 CRIT_MAX_PBO = 0.20           # c) PBO de la rejilla con el candidato < 0,20
 CRIT_MIN_DSR = 0.95           # d) DSR del candidato > 0,95
 CRIT_MIN_FINAL_DELTA = 0.0    # e) candidato − actual en la reserva y en OKX >= 0
+FOLD_SMALL_N = 10             # solo informe: folds con menos operaciones se marcan "(!)"
+
+# Avisos de lectura de la línea base (sin candidato): las cifras de la config
+# actual son DENTRO DE MUESTRA y los umbrales c)/d) son para candidatos.
+BASELINE_IN_SAMPLE = ("Cifras DENTRO DE MUESTRA: la configuración actual se eligió mirando estos mismos "
+                      "datos; no son una expectativa de lo que va a dar (ver REGLAS_DE_DECISION.md).")
+
+
+def _baseline_notes(results: list[dict]) -> list[str]:
+    """Avisos de lectura de la línea base (sin candidato)."""
+    fails = []
+    for r in results:
+        rob = r.get("robustness") or {}
+        if not rob or rob.get("error"):
+            continue
+        pbo = (rob.get("pbo") or {}).get("pbo")
+        dsr = (rob.get("dsr_current") or {}).get("dsr")
+        bad = []
+        if pbo is None or not pbo < CRIT_MAX_PBO:
+            bad.append(f"PBO {_f(pbo, 2, False)}")
+        if dsr is None or not dsr > CRIT_MIN_DSR:
+            bad.append(f"DSR {_f(dsr, 2, False)}")
+        if bad:
+            fails.append(f"{r['symbol']}: {', '.join(bad)}")
+    notes = [BASELINE_IN_SAMPLE]
+    if fails:
+        notes.append(f"Los umbrales de c) PBO < {CRIT_MAX_PBO:.2f} y d) DSR > {CRIT_MIN_DSR:.2f} se aplican a "
+                     f"CANDIDATOS. La configuración actual tampoco los pasa ({'; '.join(fails)}): es lo "
+                     "esperable con 30–55 operaciones por activo y cientos de pruebas registradas, y no "
+                     "cambia nada del vivo.")
+    return notes
 
 
 def _dec_er(table) -> float | None:
@@ -945,7 +987,8 @@ def evaluate_criteria(results: list[dict], candidate: dict | None, final: bool =
     """
     if not candidate:
         return {"status": "baseline", "failed": [], "criteria": None,
-                "text": "LÍNEA BASE (sin candidato): estas cifras quedan como referencia; no se adopta nada."}
+                "text": "LÍNEA BASE (sin candidato): estas cifras quedan como referencia; no se adopta nada.",
+                "notes": _baseline_notes(results)}
     # El candidato es de un solo activo; si hubiera varios, cada criterio se combina
     # con "Y": falla si falla en alguno, pendiente si está pendiente en alguno.
     per = [criteria_for_symbol(r, final) for r in results]
@@ -981,14 +1024,22 @@ def _table_lines(table: list[dict], indent: str = "  ", folds: bool = True) -> l
     if folds and table and table[0].get("folds"):
         head += "   " + " | ".join(f"{f['fold']}" for f in table[0]["folds"])
     lines.append(head)
+    small = False
     for r in table:
         lab = r["label"] + ("  ← decisión" if r["decision"] else "")
         ci = f"[{_f(r['ci_lo'], 2)}, {_f(r['ci_hi'], 2)}]" if r["n"] >= 3 else "(N<3)"
         wr = f"{r['win_rate'] * 100:5.1f} %" if r["win_rate"] is not None else "—"
         line = f"{indent}{lab:56} {r['n']:>4} {_f(r['er']):>7}  {ci:^17} {wr:>7}"
         if folds and r.get("folds"):
-            line += "   " + " | ".join(f"{_f(f['er'], 2)} (N={f['n']})" for f in r["folds"])
+            parts = []
+            for f in r["folds"]:
+                flag = 0 < f["n"] < FOLD_SMALL_N
+                small |= flag
+                parts.append(f"{_f(f['er'], 2)} (N={f['n']}{' (!)' if flag else ''})")
+            line += "   " + " | ".join(parts)
         lines.append(line)
+    if small:
+        lines.append(f"{indent}(!) = menos de {FOLD_SMALL_N} operaciones en ese tramo: esa cifra es casi ruido.")
     return lines
 
 
@@ -1002,10 +1053,13 @@ def _robustness_lines(rob: dict | None) -> list[str]:
     pr = cp["procedure"]
     L = ["  Robustez (solo datos anteriores a la reserva):"]
     if pr["n"]:
+        sin_op = cp["n_comb"] - pr["n"]
         L.append(f"    · CPCV ({cp['n_comb']} pruebas): si se elige \"la mejor variante de la rejilla\" con 4/6 "
                  f"de la historia y se prueba en los otros 2/6, da de mediana {_f(pr['median'], 2)}R por "
-                 f"operación (del {_f(pr['p10'], 2)} al {_f(pr['p90'], 2)}; por debajo de 0 en "
-                 f"{round(pr['frac_neg'] * pr['n'])} de {pr['n']}).")
+                 f"operación (en 8 de cada 10 pruebas entre {_f(pr['p10'], 2)} y {_f(pr['p90'], 2)}; "
+                 f"peor {_f(pr['min'], 2)}, mejor {_f(pr['max'], 2)}; por debajo de 0 en "
+                 f"{round(pr['frac_neg'] * pr['n'])} de {pr['n']}"
+                 + (f"; {sin_op} prueba(s) sin operaciones, no cuenta(n)" if sin_op > 0 else "") + ").")
     cf = cp["current_fixed"]
     L.append(f"      La configuración actual habría sido la elegida {cp['times_current']} de {cp['n_comb']} veces; "
              f"fija, en esas mismas pruebas, da de mediana {_f(cf['median'], 2)}R.")
@@ -1060,6 +1114,30 @@ def _robustness_detail(rob: dict | None) -> list[str]:
     return L
 
 
+def _cost_lines(table: list[dict] | None, indent: str = "      ") -> list[str]:
+    """Coste medio por operación del escenario de decisión (XM swap 5 %) de una tabla."""
+    dec = decision_row(table) if table else None
+    c = (dec or {}).get("cost_R") or {}
+    if not dec or not dec.get("n") or not c:
+        return []
+    return [f"{indent}coste medio por operación (XM swap 5 %): spread {_f(c.get('spread'), 3, False)}R, "
+            f"swap {_f(c.get('swap'), 3, False)}R"]
+
+
+def _reserve_note_lines(prior: dict) -> list[str]:
+    """Nota de independencia de la reserva para la configuración ACTUAL (y el
+    candidato), según los accesos --final que ya constaban en el registro."""
+    L = ["    Nota: la configuración actual se eligió en sep-2026 mirando datos hasta entonces; "
+         "para ella solo es independiente el tramo posterior al 18-sep-2026"
+         + ("." if not prior.get("current") else ",")]
+    if prior.get("current"):
+        L.append(f"    y además YA VIO esta reserva en {len(prior['current'])} --final anterior(es) "
+                 f"(el primero {prior['current'][0]}): para ella ningún tramo de la reserva es ya independiente.")
+    if prior.get("candidate") and prior.get("candidate") is not prior.get("current"):
+        L.append(f"    El candidato también YA VIO esta reserva (el primero {prior['candidate'][0]}).")
+    return L
+
+
 def format_report(report: dict) -> str:
     """Texto del informe en español: veredicto, tablas por escenario y detalle técnico."""
     L = []
@@ -1072,6 +1150,8 @@ def format_report(report: dict) -> str:
         for k, c in (v.get("criteria") or {}).items():
             st = {True: "OK", False: "FALLA", None: "PENDIENTE"}[c["ok"]]
             L.append(f"  {k}) [{st:^9}] {c['text']}")
+        for n in v.get("notes") or []:
+            L.append(f"  · {n}")
     else:
         L.append("SIN VEREDICTO: " + (report.get("registry_error") or "no se pudo completar el protocolo."))
     for w in report.get("warnings", []):
@@ -1103,26 +1183,33 @@ def format_report(report: dict) -> str:
             L.extend(_table_lines(res["candidate"]))
         L.extend(_robustness_lines(res.get("robustness")))
         if res.get("reserve"):
-            L.append(f"  RESERVA (setups ≥ {report['reserve_start']}, horizonte completo):")
-            L.append("    Nota: la configuración actual se eligió en sep-2026 mirando datos hasta entonces; "
-                     "para ella solo es independiente el tramo posterior al 18-sep-2026.")
+            L.append(f"  RESERVA (setups ≥ {report['reserve_start']}, solo operaciones cuyo horizonte "
+                     "completo ya cabe en los datos):")
+            L.extend(_reserve_note_lines(res.get("prior_final_access") or {}))
             L.append("    Actual:")
             L.extend(_table_lines(res["reserve"]["current"], "    ", folds=False))
+            L.extend(_cost_lines(res["reserve"]["current"]))
             if "candidate" in res["reserve"]:
                 L.append("    Candidato:")
                 L.extend(_table_lines(res["reserve"]["candidate"], "    ", folds=False))
+                L.extend(_cost_lines(res["reserve"]["candidate"]))
         if res.get("okx"):
             ok = res["okx"]
             if ok.get("error"):
                 L.append(f"  HOLDOUT OKX: no disponible — {ok['error']}")
             else:
                 L.append(f"  HOLDOUT OKX ({ok['origin']}; {ok['bars']} velas 4H, "
-                         f"{ok['period'][0][:10]} → {ok['period'][1][:10]}; diario reconstruido en días UTC):")
+                         f"{ok['period'][0][:10]} → {ok['period'][1][:10]}; diario reconstruido en días UTC; "
+                         "solo operaciones cuyo horizonte completo cabe en esos datos):")
                 L.append("    Actual:")
                 L.extend(_table_lines(ok["current"], "    ", folds=False))
+                L.extend(_cost_lines(ok["current"]))
                 if "candidate" in ok:
                     L.append("    Candidato:")
                     L.extend(_table_lines(ok["candidate"], "    ", folds=False))
+                    L.extend(_cost_lines(ok["candidate"]))
+                L.append("    Ojo: el spread de XM va en USD fijos (los de hoy); con el precio bajo de 2020–2021 "
+                         "pesa mucho más en R que hoy (supuesto conservador). Compara con la fila del validador.")
     L.append("")
     L.append("-" * 100)
     L.append("DETALLE TÉCNICO")
@@ -1139,8 +1226,10 @@ def format_report(report: dict) -> str:
             L.append(f"   {mark} {g['label']:42} N={s['n']:>4}  E[R]={_f(s['er'])}"
                      + ("" if s["eligible"] else "  (no elegible)"))
         L.extend(_robustness_detail(res.get("robustness")))
-    L.append("Costes: spread de XM medio a la entrada y medio a la salida (1 por operación); swap siempre en "
-             "contra por noche (cripto 7/semana; oro y SPX 5 con triple el miércoles), rollover a las 00:00 UTC.")
+    L.append("Costes: spread de XM medio a la entrada y medio a la salida (1 por operación), en unidades de "
+             "precio FIJAS (las de hoy) en toda la historia: en años de precio bajo pesa mucho más en R "
+             "(conservador); swap siempre en contra por noche (cripto 7/semana; oro y SPX 5 con triple el "
+             "miércoles), rollover a las 00:00 UTC.")
     L.append("=" * 100)
     return "\n".join(L)
 
@@ -1183,6 +1272,52 @@ def _default_load_data(symbol):
     from main import _load_data
     d4, d1, _ = _load_data(symbol)
     return d4, d1
+
+
+def _okx_shown(res: dict) -> bool:
+    """True si el informe enseña cifras del holdout OKX de este activo (sin error)."""
+    ok = res.get("okx")
+    return ok is not None and not ok.get("error")
+
+
+def _final_access_lines(res: dict, entries: list[dict], run_id: str, warnings: list[str]) -> list[dict]:
+    """
+    Líneas final_access de un activo en un --final: una por CADA configuración cuyas
+    cifras de la reserva (y de OKX) enseña el informe, es decir, el candidato (si lo
+    hay; role="candidate") y SIEMPRE la configuración actual (role="reference" si va
+    junto a un candidato, "current" si se evalúa sola). Si el candidato coincide con
+    la actual (mismo hash) se escribe una sola línea.
+
+    Antes de añadirlas comprueba en el registro si alguna de ellas YA vio la
+    reserva: añade el aviso en grande a `warnings` y guarda en
+    res["prior_final_access"] ({"current"/"candidate": lista de "run" anteriores})
+    lo que necesita el informe para la nota de independencia de la reserva.
+    """
+    cand = next((g for g in res["grid"] if g["is_candidate"]), None)
+    cur = res["current"]
+    shown = []
+    if cand is not None:
+        shown.append((cand, "candidate"))
+    if cand is None or cand["hash"] != cur["hash"]:
+        shown.append((cur, "reference" if cand is not None else "current"))
+    okx = _okx_shown(res)
+    out, prior = [], {}
+    for v, role in shown:
+        prev = final_accesses(entries, v["hash"])
+        if prev:
+            runs = [e.get("run") for e in prev]
+            if v["hash"] == cur["hash"]:
+                prior["current"] = runs
+            if role == "candidate":
+                prior["candidate"] = runs
+            quien = "ESTE CANDIDATO" if role == "candidate" else "LA CONFIGURACIÓN ACTUAL"
+            vio = "LA RESERVA" + (" Y OKX" if any(e.get("okx") for e in prev) else "")
+            warnings.append(
+                f"{quien} YA VIO {vio} ({res['symbol']}: {v['label']}; {len(prev)} acceso(s) previo(s), "
+                f"el primero {prev[0].get('run')}): el resultado ya no es independiente.")
+        out.append(final_access_entry(v, run_id, okx=okx, role=role))
+    res["prior_final_access"] = prior
+    return out
 
 
 def run_protocol(symbol: str | None = None, candidate_path: str | None = None,
@@ -1274,13 +1409,7 @@ def run_protocol(symbol: str | None = None, candidate_path: str | None = None,
     finals = []
     if final:
         for r in report["symbols"]:
-            target = next((g for g in r["grid"] if g["is_candidate"]), None) or r["current"]
-            prev = final_accesses(entries, target["hash"])
-            if prev:
-                report["warnings"].append(
-                    f"ESTE CANDIDATO YA VIO LA RESERVA ({target['label']}, {len(prev)} acceso(s) previo(s), "
-                    f"el primero {prev[0].get('run')}): el resultado ya no es independiente.")
-            finals.append(final_access_entry(target, run_id, okx=r.get("okx") is not None))
+            finals.extend(_final_access_lines(r, entries, run_id, report["warnings"]))
     try:
         _append_lines(path, new + finals)
         entries = entries + new + finals

@@ -208,17 +208,18 @@ def _trade(symbol="XAUUSD", direction="long", entry=2650.0, sl=2610.0, tp=2703.3
 
 
 def test_linea_de_eventos_en_el_mensaje():
-    from notifications.telegram import format_signal_alert, event_warning_line
+    from notifications.telegram import format_signal_alert, event_warning_line, EVENT_LINE_NOTE as NOTE
     # Oro: setup del 2026-11-30, plazo de 20 sesiones → incluye NFP 4-dic, CPI 10-dic, FOMC 9-dic…
     msg = format_signal_alert(_trade(), setup_ts=pd.Timestamp("2026-11-30", tz="UTC"),
                               current_price=2650.0, now=pd.Timestamp("2026-11-30 22:30", tz="UTC"))
     line = [ln for ln in msg.splitlines() if "Evento de alto impacto" in ln]
     assert len(line) == 1
     assert line[0] == ("⚠️ <b>Evento de alto impacto dentro del plazo de la operación:</b> "
-                       "NFP 04-dic 13:30 UTC, FOMC 09-dic 19:00 UTC, CPI 10-dic 13:30 UTC")
+                       "NFP 04-dic 13:30 UTC, FOMC 09-dic 19:00 UTC, CPI 10-dic 13:30 UTC "
+                       "<i>(solo aviso: no es motivo para no entrar)</i>")
     # Más de 3 eventos: los 3 primeros y cuántos más.
     assert event_warning_line(_utc("2026-12-01 00:00"), _utc("2027-01-31 00:00")).endswith(
-        "NFP 04-dic 13:30 UTC, FOMC 09-dic 19:00 UTC, CPI 10-dic 13:30 UTC (y 3 más)")   # ene-2027: NFP 8, CPI 13, FOMC 27
+        "NFP 04-dic 13:30 UTC, FOMC 09-dic 19:00 UTC, CPI 10-dic 13:30 UTC (y 3 más) " + NOTE)   # ene-2027: NFP 8, CPI 13, FOMC 27
     assert msg.index("Cerrar a mercado") < msg.index("Evento de alto impacto")
     # BTC: plazo de 4 días sin eventos → sin línea.
     msg = format_signal_alert(_trade("BTCUSDT", "short", 90000.0, 91500.0, 87750.0),
@@ -232,7 +233,7 @@ def test_linea_de_eventos_en_el_mensaje():
     assert "FOMC 09-dic 19:00 UTC, CPI 10-dic 13:30 UTC</" not in msg   # el texto va escapado y sin etiqueta dentro
     assert "Evento de alto impacto dentro del plazo de la operación:</b> FOMC 09-dic 19:00 UTC, CPI 10-dic 13:30 UTC" in msg
     # Exactamente los eventos entre la entrada (ahora) y la fecha límite, ambos incluidos.
-    assert event_warning_line(_utc("2026-12-10 13:30"), _utc("2026-12-10 13:30")).endswith("CPI 10-dic 13:30 UTC")
+    assert event_warning_line(_utc("2026-12-10 13:30"), _utc("2026-12-10 13:30")).endswith("CPI 10-dic 13:30 UTC " + NOTE)
     assert event_warning_line(_utc("2026-12-10 13:31"), _utc("2026-12-30 00:00")) is None
 
 

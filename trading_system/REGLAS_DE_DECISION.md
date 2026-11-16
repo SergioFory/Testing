@@ -184,7 +184,12 @@ c) **PBO** de la rejilla con el candidato **< 0,20**.
 d) **DSR** del candidato **> 0,95**.
 e) Con `--final`: en la **reserva** y, en cripto, en el **histórico de OKX 2019-12→2022-04**, la
    diferencia candidato − actual **no es negativa**. Si no hay datos de OKX para comprobarlo,
-   cuenta como no cumplido.
+   cuenta como no cumplido. Solo cuentan las operaciones cuyo **plazo completo** (hasta la vela
+   límite de cierre por tiempo) ya está en los datos, **hayan salido antes o no** por SL/TP: si se
+   aceptaran las que tocaron SL/TP pronto y se dejaran fuera las aún abiertas, se elegirían
+   operaciones según su resultado (el SL está más cerca que el TP: sesgo hacia pérdidas). Regla
+   corregida el 16-nov-2026 tras la revisión; no cambió ninguna cifra del ejemplo de ETH de abajo
+   (en la reserva de BTC deja fuera 1 operación que entraba por un TP temprano).
 
 El informe empieza por una línea: **"APROBADO"**, **"NO APROBADO: falla b, d"** o, si a)–d) pasan
 pero aún no se hizo `--final`, **"PASA a)–d); FALTA e)"** (todavía no se adopta). Aprobar no
@@ -192,8 +197,10 @@ cambia nada solo: adoptar el candidato es decisión tuya y se anota aquí con fe
 SPRT, regla 1).
 
 Reglas de uso:
-- `--final` se usa **una sola vez por candidato**. Cada acceso queda en el registro; si un
-  candidato ya vio la reserva, el informe lo avisa en grande y su resultado ya no es independiente.
+- `--final` se usa **una sola vez por candidato**. Cada acceso queda en el registro, **también el
+  de la configuración actual**, porque el informe enseña siempre sus cifras de la reserva (y de
+  OKX) junto a las del candidato. Si el candidato o la configuración actual ya vieron la reserva,
+  el informe lo avisa en grande y ese resultado ya no es independiente.
 - Si el registro de pruebas no se puede leer o escribir, **no hay veredicto**.
 - Parámetros fijos: 6 grupos y 2 de prueba en la CPCV, purga de `forward_bars` velas a cada
   lado + embargo del 1 % de las velas, 16 bloques en el PBO, mínimo de 10 operaciones para que
@@ -211,6 +218,11 @@ referencia para comparar candidatos:
 | Oro | +0,31R (33) | +0,16R (2 de 14) | +0,45R | 0,55 | 0,39 (0,93) |
 | SPX (sombra) | +0,12R (41) | +0,09R (6 de 15) | +0,16R | 0,15 | 0,02 (0,73) |
 
+En el informe, la CPCV da la mediana y el rango "en 8 de cada 10 pruebas entre X e Y" (percentiles
+10 y 90), además del **peor** y el **mejor** caso (en el oro, por ejemplo, entre −0,08 y +1,26,
+pero el peor es −1,02R). En el oro una de las 15 pruebas no tiene operaciones y no cuenta: por eso
+pone "2 de 14".
+
 Cómo leerlo: **ninguna** configuración actual pasaría hoy c) y d) a la vez. Con ~30–55
 operaciones por activo y 460 pruebas hechas, el DSR no puede llegar a 0,95 salvo con una
 ventaja muy grande; el PBO de BTC, ETH y oro está en la zona de "elegir al azar" entre
@@ -225,13 +237,20 @@ a) OK (91 aprobados = 91 emitidos); b) falla: mediana CPCV −0,04R, periodos �
 (1 de 3); c) falla: PBO 0,86; d) falla: DSR 0,57; e) falla: reserva −0,15R (actual +0,42R con
 N=8, candidato +0,26R con N=14), OKX +0,20R (actual −0,18R N=19, candidato +0,02R N=25).
 Este candidato ya vio la reserva: si se vuelve a evaluar, su resultado ya no es independiente.
+**La ETH actual (umbral 0,55) también la vio** en ese mismo `--final` (sus cifras: reserva +0,42R
+N=8, OKX −0,18R N=19), así que para ella ya ningún tramo de la reserva ni de OKX es independiente.
+Ese acceso no se registró entonces (solo se apuntaba el del candidato) y se añadió al registro a
+posteriori el 16-nov-2026. El −0,18R de OKX se debe sobre todo al spread fijo de 5 USD aplicado a un
+ETH de 130–400 USD (0,29R por operación frente a 0,08R hoy); con los costes del validador da
++0,08R. La diferencia candidato − actual casi no cambia (+0,20R con XM, +0,21R con el validador).
 
 ## Monitor de datos (Fase 2, 16-nov-2026): qué avisa y propuesta PENDIENTE
 
 Desde la Fase 2 cada ciclo revisa las últimas 60 velas de cada activo (velas planas, duplicadas,
 con fecha de fin de semana, huecos, precio congelado, saltos absurdos y cambio de fuente) y cada
 noche compara BTC/ETH entre OKX y Gate.io y cuenta los setups de 30 días frente a lo normal.
-Lo grave llega por Telegram ("datos sospechosos", como mucho un aviso cada 6 h por activo); todo
+Lo grave llega por Telegram ("datos sospechosos", como mucho un aviso cada 6 h por activo; si el
+envío falla, se reintenta en los ciclos siguientes durante 24 h); todo
 va al resumen nocturno en "Calidad de datos". **Hoy NO bloquea ninguna señal.**
 
 Qué hacer si llega un aviso de "datos sospechosos": antes de operar una señal de ese activo,
@@ -287,8 +306,8 @@ contradicen.
 −0,10R y la diferencia es negativa en cripto y en oro/SPX. **No se cumple en ninguna ventana →
 recomendación: AVISAR, no bloquear.** Ya implementado (no cambia qué señales salen): el mensaje de
 cada señal añade "⚠️ Evento de alto impacto dentro del plazo de la operación: CPI 10-dic 13:30 UTC"
-(hasta 3 eventos entre la entrada y la hora límite de cierre por tiempo; saldrá en casi todas las de
-oro y SPX y en ~1 de cada 3 de cripto) y el resumen nocturno lista los eventos de las próximas 48 h.
+(hasta 3 eventos entre la entrada y la hora límite de cierre por tiempo, seguidos de "(solo aviso: no
+es motivo para no entrar)"; saldrá en casi todas las de oro y SPX y en ~1 de cada 3 de cripto) y el resumen nocturno lista los eventos de las próximas 48 h.
 
 **Decisión pendiente (tuya):** (1) dejar el filtro actual como está (no molesta, pero no protege de
 nada) o quitarlo para simplificar; (2) no se recomienda descartar setups por eventos. Cualquiera de

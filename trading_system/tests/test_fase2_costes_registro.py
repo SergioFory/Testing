@@ -407,14 +407,18 @@ def test_protocolo_final_registra_acceso_y_avisa(fake_detector, registry):
     assert rep["verdict"]["criteria"]["e"]["ok"] is not None
     entries = P.read_registry(registry)
     fa = [e for e in entries if e["kind"] == "final_access"]
-    assert len(fa) == 1 and fa[0]["symbol"] == "ETHUSDT" and fa[0]["okx"] is True
+    # Una línea por configuración enseñada: el candidato y la actual (referencia).
+    assert [e["role"] for e in fa] == ["candidate", "reference"]
+    assert all(e["symbol"] == "ETHUSDT" and e["okx"] is True for e in fa)
     assert fa[0]["hash"] == next(g for g in r["grid"] if g["is_candidate"])["hash"]
-    # Segundo acceso del mismo candidato → aviso en grande.
+    assert fa[1]["hash"] == r["current"]["hash"]
+    # Segundo acceso del mismo candidato → aviso en grande (candidato y actual).
     lines = []
     P.run_protocol(None, candidate_path=str(cand), final=True, registry=registry,
                    load_data=_loader, live_check=_live_ok, okx_loader=okx, echo=lines.append)
     assert "ESTE CANDIDATO YA VIO LA RESERVA" in "\n".join(lines)
-    assert len([e for e in P.read_registry(registry) if e["kind"] == "final_access"]) == 2
+    assert "LA CONFIGURACIÓN ACTUAL YA VIO LA RESERVA Y OKX" in "\n".join(lines)
+    assert len([e for e in P.read_registry(registry) if e["kind"] == "final_access"]) == 4
 
 
 def test_candidato_invalido(registry, tmp_path):

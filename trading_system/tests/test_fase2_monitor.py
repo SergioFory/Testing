@@ -65,6 +65,7 @@ def no_network(monkeypatch):
     # Estado de avisos en memoria limpio en cada prueba
     monkeypatch.setattr(dm, "_alert_state", {})
     monkeypatch.setattr(dm, "_alerted_keys", set())
+    monkeypatch.setattr(dm, "_pending", {})
 
 
 def _ohlcv(index, start=60000.0, seed=0, vol=100.0, step=0.004):

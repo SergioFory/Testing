@@ -25,6 +25,8 @@ from sqlalchemy import text
 from data.database import get_engine, init_db, _to_unix
 
 # Motivos posibles (ver también el comentario del DDL en data/database.py).
+# 'event_blackout' ya no se produce desde la Fase 3 (filtro de eventos quitado);
+# se mantiene para leer filas antiguas.
 MOTIVOS = ("emitted", "shadow_asset", "below_threshold", "not_fresh",
            "event_blackout", "risk_invalid", "duplicate", "not_best")
 # Motivos definitivos: una vez registrado como señal, no se sobrescribe.
@@ -54,8 +56,9 @@ def classify_window(window: pd.DataFrame, already, current_price: float,
         chosen_motivo: qué le pasó al elegido: emitted / shadow_asset /
                        risk_invalid / event_blackout / duplicate (None = sin decidir:
                        esa fila no se registra en este ciclo).
-        symbol_motivo: motivo que afecta a TODO el activo en este ciclo (hoy solo
-                       'event_blackout'); se aplica a los demás aprobados ejecutables.
+        symbol_motivo: motivo que afecta a TODO el activo en este ciclo (antes solo
+                       'event_blackout', que ya no se produce desde la Fase 3); se
+                       aplica a los demás aprobados ejecutables.
         asset_live:    False si el activo está en modo sombra (para los ya registrados).
 
     Returns:

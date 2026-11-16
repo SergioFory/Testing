@@ -3,7 +3,7 @@ Pruebas de la Fase 1 — registro sombra y comandos de Telegram (punto 1.10):
   - tablas shadow_setups / fills / kv (migración idempotente);
   - cada ciclo de cmd_signal registra TODOS los setups de las 2 últimas velas
     cerradas con su motivo (emitted, shadow_asset, below_threshold, not_fresh,
-    event_blackout, risk_invalid, duplicate, not_best);
+    event_blackout [ya no se produce desde la Fase 3], risk_invalid, duplicate, not_best);
   - el tracker los resuelve con check_outcome_detail reutilizando la caché;
   - /fill /skip /help por polling de getUpdates con offset persistido, solo del
     chat configurado, con respuesta que incluye el R:R efectivo.
@@ -267,13 +267,15 @@ def test_cmd_signal_risk_invalid_and_event_blackout(temp_db, fake_telegram, monk
     assert _shadow_by_key(temp_db)[(t1, "long")]["motivo"] == "risk_invalid"
     assert fake_telegram["sent"] == []
 
+    # Fase 3 (punto 0): el filtro de eventos se quitó. Aunque el calendario dijera
+    # "evento ahora", la señal de oro sale y ningún setup queda como 'event_blackout'.
     main, _ = _pipeline(monkeypatch, [_setup(t0, "short", raw=0.6, close=100.5),
                                       _setup(t1, "long", raw=0.9)], blackout=True, symbol="XAUUSD")
     main.cmd_signal("XAUUSD", notify=True)
     sh = _shadow_by_key(temp_db)
     xau = {k: v for k, v in sh.items() if v["symbol"] == "XAUUSD"}
-    assert {v["motivo"] for v in xau.values()} == {"event_blackout"} and len(xau) == 2
-    assert fake_telegram["sent"] == []
+    assert xau[(t1, "long")]["motivo"] == "emitted" and xau[(t0, "short")]["motivo"] == "not_best"
+    assert len(fake_telegram["sent"]) == 1
 
 
 def test_cmd_signal_duplicate_by_price(temp_db, fake_telegram, monkeypatch):

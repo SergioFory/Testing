@@ -143,9 +143,9 @@ def test_carga_del_csv_sin_red_cache_y_fail_open(tmp_path):
 
 
 def test_blackout_con_el_csv_ventanas_y_activos_sin_cambios(monkeypatch):
+    # Fase 3 (punto 0): EVENT_FILTER desapareció de settings y el vivo ya no bloquea
+    # (tests/test_fase3_eventos_riesgo.py); is_event_blackout queda como utilidad.
     import data.fetchers.econ_calendar as cal
-    from config.settings import EVENT_FILTER
-    assert (EVENT_FILTER["hours_before"], EVENT_FILTER["hours_after"], EVENT_FILTER["min_impact"]) == (2.0, 1.0, "High")
     assert cal.ASSET_CURRENCIES["BTCUSDT"] == set() and cal.ASSET_CURRENCIES["ETHUSDT"] == set()
     cpi = _utc("2026-12-10 13:30")
     kw = dict(hours_before=2.0, hours_after=1.0)

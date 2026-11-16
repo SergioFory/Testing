@@ -377,7 +377,7 @@ def _record_shadow_window(symbol, df_scored, min_setup_ts, last_bar_ts, already,
 def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_setup_ts,
                      last_bar_ts, already, data_source, notify, fate) -> None:
     """Parte final de cmd_signal: elige el mejor setup nuevo aprobado, lo valida
-    (riesgo, eventos, antiduplicado), lo registra y lo notifica. Anota en `fate`
+    (riesgo, antiduplicado), lo registra y lo notifica. Anota en `fate`
     el motivo del elegido para el registro sombra."""
     from ml.predictor              import get_best_setup
     from risk.position_sizer       import build_trade_setup
@@ -402,6 +402,7 @@ def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_se
     ml_score = float(best.get("ml_score", best.get("raw_score", 0)))
     # Capital REAL de la cuenta (variable TRADING_CAPITAL, por defecto 10.000 USD;
     # Fase 1, 1.1). Solo cambia el tamaño en USD/unidades, no qué setup se emite.
+    # Riesgo 0,25 % y apalancamiento máximo 1× (RISK; Fase 3, 3.2).
     trade = build_trade_setup(best, TRADING_CAPITAL, ml_score)
 
     if trade is None:
@@ -409,26 +410,9 @@ def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_se
         logger.info(f"[{symbol}] Setup detectado pero no pasa validaciones de riesgo.")
         return
 
-    # Filtro de eventos macro: no abrir operaciones cerca de NFP/CPI/FOMC, donde
-    # el precio salta de forma aleatoria. Fail-open: si el calendario no carga,
-    # no bloquea nada. Crypto está exento (ASSET_CURRENCIES vacío).
-    from config.settings import EVENT_FILTER
-    if EVENT_FILTER.get("enabled", True):
-        from data.fetchers.econ_calendar import is_event_blackout
-        blackout, motivo = is_event_blackout(
-            symbol,
-            hours_before=EVENT_FILTER.get("hours_before", 2.0),
-            hours_after=EVENT_FILTER.get("hours_after", 1.0),
-            min_impact=EVENT_FILTER.get("min_impact", "High"),
-        )
-        if blackout:
-            # El evento afecta a todo el activo: también a los demás aprobados.
-            fate["motivo"] = fate["symbol_motivo"] = "event_blackout"
-            logger.info(
-                f"[{symbol}] Señal {trade.direction.upper()} omitida por evento "
-                f"macro inminente: {motivo}"
-            )
-            return
+    # Fase 3 (punto 0, decisión del usuario del 16-nov-2026): ya NO hay bloqueo por
+    # eventos macro (nunca actuaba a las horas del vivo; REGLAS_DE_DECISION.md). El
+    # mensaje sigue avisando de los eventos dentro del plazo (event_warning_line).
 
     # Antiduplicado PERMANENTE por setup (símbolo, dirección, vela del setup) y,
     # como segunda barrera, el heredado por precio.
@@ -956,7 +940,7 @@ def _print_signal(trade, sentiment: dict = None) -> None:
     table.add_row("R:R Ratio",    f"{trade.rr_ratio:.2f}")
     table.add_row("",             "")
     table.add_row("Tamaño ($)",   f"${trade.position_size:,.0f}")
-    table.add_row("Riesgo ($)",   f"${trade.risk_usd:,.0f}")
+    table.add_row("Riesgo ($)",   f"${trade.risk_usd:,.2f}")
     table.add_row("Potencial ($)",f"${trade.reward_usd:,.0f}")
 
     if sentiment:   # None con SENTIMENT['enabled']=False (Fase 1)

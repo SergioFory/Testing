@@ -34,7 +34,7 @@ MOTIVO_TEXT = {
     "shadow_asset":    "activo en modo sombra",
     "below_threshold": "score bajo el umbral",
     "not_fresh":       "precio ya lejos de la entrada",
-    "event_blackout":  "evento macro cercano",
+    "event_blackout":  "evento macro cercano",   # ya no se produce (Fase 3); filas antiguas
     "risk_invalid":    "no pasa el control de riesgo",
     "duplicate":       "duplicado",
     "not_best":        "salió otro de mayor score",
@@ -297,6 +297,17 @@ EVENTS_AHEAD_HOURS = 48
 CALENDAR_UPDATE_WARN_DAYS = 60
 
 
+def risk_line(capital: float = None) -> str:
+    """Fase 3 (3.2): 'Riesgo por operación: 0.25 % del capital ($2.50 de $1,000);
+    nominal máx. 1× el capital' (RISK y TRADING_CAPITAL, como el mensaje de la señal)."""
+    from config.settings import RISK, TRADING_CAPITAL
+    cap = float(TRADING_CAPITAL if capital is None else capital)
+    r = float(RISK["risk_per_trade"])
+    lev = float(RISK.get("max_leverage", 1.0))
+    return (f"Riesgo por operación: {r * 100:.2f} % del capital (${cap * r:,.2f} de ${cap:,.0f}); "
+            f"nominal máx. {lev:g}× el capital")
+
+
 def events_block(now_unix: int, path=None) -> list[str]:
     """Fase 2 (2.4): FOMC/CPI/NFP de las próximas 48 h del calendario propio
     (data/econ_events.csv) y aviso si el calendario se acaba en < 60 días."""
@@ -337,6 +348,11 @@ def build_daily_summary(now=None, symbols: list | None = None) -> str:
             out.append("Último ciclo correcto: sin registro")
     except Exception:
         pass
+    # Fase 3 (3.2): el riesgo por operación que usan las señales (el mismo del mensaje).
+    try:
+        out.append(risk_line())
+    except Exception as exc:
+        logger.warning(f"Resumen: línea de riesgo falló: {exc}")
 
     with get_engine().connect() as conn:
         try:

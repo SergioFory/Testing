@@ -632,14 +632,22 @@ XM_CONTRACTS = {
 }
 
 # Tope de riesgo de la regla 3 de REGLAS_DE_DECISION.md ("el riesgo no sube del
-# 0,25 % hasta que el SPRT acepte el edge"). NO cambia el tamaño que calcula el
-# sistema (RISK + tope del 10 % de nominal; configuración congelada): el mensaje
-# avisa cuando el riesgo real lo supera y dice qué tamaño lo respetaría.
+# 0,25 % hasta que el SPRT acepte el edge"). Desde la Fase 3 (3.2) el sistema lo
+# cumple solo: RISK["risk_per_trade"] = este mismo valor. El mensaje solo avisa
+# (línea "Para respetar el 0,25 %") si algún día el riesgo calculado lo superase.
 RULES_MAX_RISK_PCT = 0.0025
 
 RISK = {
     "capital_inicial":  10_000,     # Capital inicial en USD (para backtest)
-    "risk_per_trade":   0.01,       # 1% del capital por operación
+    # Fase 3 (3.2, 16-nov-2026): 0,25 % explícito por operación (antes 1 % con un
+    # tope del 10 % de nominal que casi siempre mandaba y dejaba el riesgo real
+    # entre ~0,1 % y ~0,8 % según el stop). No cambia qué señales salen ni las
+    # estadísticas en R; solo el tamaño. Debe ser ≤ RULES_MAX_RISK_PCT.
+    "risk_per_trade":   0.0025,     # 0,25 % del capital por operación
+    # Nominal máximo = capital × max_leverage (sustituye al tope del 10 % de nominal).
+    # Con 0,25 % de riesgo solo actuaría con un stop a < 0,25 % del precio; si
+    # actúa, el riesgo baja y el mensaje lo dice.
+    "max_leverage":     1.0,
     "atr_stop_mult":    1.5,        # Stop loss = 1.5 × ATR
     "atr_target_mult":  3.0,        # Take profit = 3.0 × ATR (R:R 2:1)
     "max_positions":    3,          # Máximo de posiciones abiertas simultáneas
@@ -649,18 +657,20 @@ RISK = {
 }
 
 # =============================================================================
-# FILTRO DE EVENTOS ECONÓMICOS
+# FILTRO DE EVENTOS ECONÓMICOS — QUITADO (Fase 3, punto 0; decisión del usuario
+# del 16-nov-2026)
 # -----------------------------------------------------------------------------
-# No abrir operaciones cerca de eventos macro de alto impacto (NFP, CPI, FOMC…),
-# donde el precio salta de forma aleatoria y revienta stops. Filtro fail-open:
-# si el calendario no se puede leer, no bloquea nada. Crypto está exento.
+# Antes no se emitían señales de oro/SPX entre 2 h antes y 1 h después de un
+# evento de alto impacto (EVENT_FILTER). La Fase 2 midió que NUNCA actúa: el vivo
+# evalúa el oro y el SPX tras el cierre diario (22:15–23:00 o 04:00–07:00 UTC) y
+# los FOMC/CPI/NFP son a las 12:30/13:30 y 18:00/19:00 UTC (0 de 64 señales de
+# oro/SPX desde 2015 retrasadas o bloqueadas), y las operaciones con un evento
+# cerca no son peores de forma concluyente. Por eso se quitó el bloqueo (y la
+# configuración EVENT_FILTER). SE MANTIENEN: el calendario data/econ_events.csv,
+# la línea de aviso de eventos en el mensaje y los eventos de 48 h del resumen
+# nocturno. El motivo 'event_blackout' ya no se produce (las filas antiguas se
+# conservan). Ver REGLAS_DE_DECISION.md, "Filtro de eventos macro".
 # =============================================================================
-EVENT_FILTER = {
-    "enabled":      True,
-    "hours_before": 2.0,        # ventana antes del evento
-    "hours_after":  1.0,        # ventana después (whipsaw)
-    "min_impact":   "High",     # solo eventos de alto impacto
-}
 
 # =============================================================================
 # SENTIMENT

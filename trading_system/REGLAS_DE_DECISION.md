@@ -25,7 +25,8 @@ vez se cambia algo de este documento, se escribe aquí con fecha y motivo.
 - Son los R del seguimiento automático: **sin costes del bróker** (spread, comisión, swap)
   y con la entrada al precio del mensaje. Los costes reales se vigilan con los fills (regla 6).
 - **Versión con más datos (registro sombra)**: los setups APROBADOS que el sistema detectó
-  aunque no se enviaran (por frescura, evento macro, duplicado, etc.), resueltos con la misma
+  aunque no se enviaran (por frescura, duplicado, etc.; "evento macro" solo en filas anteriores
+  al 16-nov-2026, cuando se quitó ese filtro), resueltos con la misma
   regla. Sirve para tener una lectura antes, pero **las decisiones de riesgo usan las señales live**.
 
 ## Las dos alarmas
@@ -64,15 +65,16 @@ mala lo hace crecer. **Alarma si S llega a 20R.** Solo con las señales live.
    (datos, ejecución, mercado). No se "arregla" el sistema retocando filtros sobre los mismos
    datos. Tras la revisión, el CUSUM puede reiniciarse desde esa fecha (clave `cusum_desde`
    de la tabla `kv`, en segundos Unix), dejándolo escrito aquí.
-   **Cómo se aplica:** a mano, operando **la mitad de las unidades (o lotes)** que dice el
-   mensaje en la línea "Para respetar el 0.25 %" (o en "Tamaño" si esa línea no aparece).
-   Cambiar `risk_per_trade` en la configuración NO sirve: el tamaño casi siempre lo fija el
-   tope del 10 % de nominal (ver abajo) y bajarlo a la mitad solo cambia 10 de 212 setups.
+   **Cómo se aplica:** cambiando `RISK["risk_per_trade"]` de 0,0025 a 0,00125 en
+   `config/settings.py` (desde la Fase 3 el tamaño lo fija de verdad ese valor: ya no hay tope
+   de nominal que lo anule) o, mientras tanto, operando a mano **la mitad de las unidades (o
+   lotes)** de la línea "Tamaño" del mensaje.
 3. **El riesgo no sube del 0,25 %** por operación hasta que el SPRT con las señales live diga
    "edge aceptado". (En la práctica puede tardar años; esperar no cuesta rendimiento.)
-   **Ojo: hoy el sistema NO lo cumple solo** (ver "Riesgo real hoy"). Cada mensaje compara el
-   riesgo real con el 0,25 % y, si lo supera, añade la línea "Para respetar el 0.25 %: X
-   unidades": es el tamaño que hay que operar para cumplir esta regla.
+   **Desde el 16-nov-2026 (Fase 3) el sistema lo cumple solo:** cada señal arriesga
+   exactamente el 0,25 % del capital (2,50 USD con 1.000 USD; ver "Riesgo por operación").
+   La línea "Para respetar el 0.25 %" del mensaje solo saldría si algún día el riesgo
+   calculado lo superase (no debería ocurrir).
 4. **SPX vuelve a notificarse solo si** el E[R] neto con los costes reales de XM es
    ≥ +0,10R en al menos 2 de 3 épocas **y** pasa la puerta de validación (Fase 2).
    Si no, sigue en sombra (se registra y se mide, sin coste).
@@ -95,27 +97,38 @@ mala lo hace crecer. **Alarma si S llega a 20R.** Solo con las señales live.
    registro sombra y los fills antes de decidir nada (pausar, seguir en papel o seguir igual
    es decisión tuya; no se cambian filtros a la vista de ese resultado).
 
-## Riesgo real hoy (añadido en la revisión de la Fase 1, 15-nov-2026)
+## Riesgo por operación (Fase 3, 16-nov-2026): 0,25 % explícito
 
-El tamaño lo calcula el sistema con `risk_per_trade` = 1 % y un **tope de nominal del 10 % del
-capital**; casi siempre manda el tope, así que el riesgo real depende de lo lejos que esté el
-stop. Medido con los setups aprobados de la historia (capital 10.000 USD, script
-`G-correcciones/riesgo_real.py`):
+**Qué cambió.** Hasta el 16-nov-2026 el tamaño se calculaba con `risk_per_trade` = 1 % y un
+**tope de nominal del 10 % del capital** que mandaba siempre, así que el riesgo real dependía de lo
+lejos que estuviera el stop (de ~0,1 % a ~0,8 %) y la regla 3 no se cumplía en la mayoría de
+señales de ETH ni en muchas de oro. Ahora (`config/settings.py`):
 
-| Activo | Últimos 12 meses: riesgo mediano | máximo | señales por encima del 0,25 % |
-|---|---|---|---|
-| BTC | 0,21 % | 0,34 % | 1 de 13 (8 %) |
-| ETH | 0,27 % | 0,55 % | 5 de 8 (63 %) |
-| Oro | 0,40 % | 0,68 % | 6 de 6 (100 %) |
-| SPX (sombra) | 0,19 % | 0,22 % | 0 de 5 |
+- `RISK["risk_per_trade"]` = **0,0025** (0,25 %, el tope de la regla 3): cada señal arriesga
+  exactamente el 0,25 % del capital (`TRADING_CAPITAL`), sea cual sea el activo o el stop.
+- El tope del 10 % de nominal se sustituye por `RISK["max_leverage"]` = **1×** (nominal ≤ capital).
+  Con el 0,25 % solo actuaría con un stop a menos del 0,25 % del precio (el stop más corto de la
+  historia aprobada es 0,81 %); si actuara, el riesgo bajaría y el mensaje lo diría.
+- **No cambia qué señales salen** (check-live idéntico: BTC 64, ETH 63, oro 39, SPX 46) ni los
+  resultados en R (SPRT, CUSUM, estadísticas). Solo cambia el tamaño en USD/unidades. Por eso
+  **no se reinicia el SPRT** (`vigilancia_desde` no se toca). `pnl_usd` sigue siendo tamaño × %.
 
-En toda la historia el rango va de ~0,1 % a ~0,8 %. Es decir: con el tamaño del mensaje, la
-regla 3 no se cumple en el oro ni en la mayoría de señales de ETH. Para cumplirla hay dos
-caminos: (a) operar el tamaño de la línea "Para respetar el 0.25 %" del mensaje (lo que se
-recomienda mientras dure la congelación), o (b) cambiar la configuración a un tope de RIESGO
-del 0,25 % en lugar del tope de nominal, o `risk_per_trade` = 0,0025 (que cambia el tamaño en
-94 de 212 setups). La opción (b) es un cambio de configuración: no altera qué señales salen,
-pero se anota aquí con fecha si se hace.
+**Antes y después** con capital 1.000 USD y los 212 setups aprobados de la historia del arnés
+(cripto desde 2022-05, oro y SPX desde 2006; script `fase3/A-eventos-riesgo/riesgo_antes_despues.py`):
+
+| Activo | N | Stop (mediana) | Riesgo ANTES: mediana (mín–máx) | > 0,25 % antes | Nominal ANTES | Riesgo DESPUÉS | Nominal DESPUÉS: mediana (mín–máx) |
+|---|---|---|---|---|---|---|---|
+| BTC | 64 | 2,16 % | 0,22 % (0,11–0,47 %) | 17 de 64 | 10 % siempre | 0,25 % siempre | 11,6 % (5,3–22,2 %) |
+| ETH | 63 | 2,97 % | 0,30 % (0,14–0,82 %) | 46 de 63 | 10 % siempre | 0,25 % siempre | 8,4 % (3,0–17,7 %) |
+| Oro | 39 | 2,40 % | 0,24 % (0,13–0,68 %) | 18 de 39 | 10 % siempre | 0,25 % siempre | 10,4 % (3,7–19,9 %) |
+| SPX (sombra) | 46 | 1,97 % | 0,20 % (0,08–0,34 %) | 13 de 46 | 10 % siempre | 0,25 % siempre | 12,7 % (7,3–30,7 %) |
+
+El tope del 10 % actuaba en los 212 setups; el de apalancamiento 1× no actúa en ninguno. Con
+1.000 USD el nominal típico es de 70–130 USD por operación (p. ej. 0,0016 BTC u 0,016 oz).
+
+**Pendiente práctico (no cambia nada del sistema):** con 1.000 USD esos tamaños pueden quedar por
+debajo del lote mínimo de XM. En cuanto se rellene `XM_CONTRACTS` el mensaje lo dirá ("no llega al
+lote mínimo… con X lotes el riesgo sería Y %"); hasta entonces compruébalo en MT5 antes de operar.
 
 ## Qué esperar (medido antes de empezar)
 
@@ -270,11 +283,21 @@ Límites conocidos: oro y SPX no tienen una segunda fuente gratuita fiable para 
 oro y SPX la "deriva" solo puede avisar de demasiados setups (lo normal es 0 al mes); y si se
 cambia la estrategia o un umbral hay que recalcular `DRIFT_BASELINE` (si no, avisará en falso).
 
-## Filtro de eventos macro (Fase 2, 16-nov-2026): medición y decisión PENDIENTE
+## Filtro de eventos macro (Fase 2, 16-nov-2026): medición — QUITADO el 16-nov-2026 (Fase 3)
 
-**Qué hace hoy.** Antes de emitir una señal de oro o SPX, el sistema mira si hay un evento de alto
-impacto de EE. UU. entre 1 h antes y 2 h después de ese momento; si lo hay, no la emite en ese
-ciclo (lo vuelve a intentar al ciclo siguiente). Cripto está exento. Desde la Fase 2 los eventos
+**Decisión tomada (tú, 16-nov-2026: "Sí, quita el filtro si no aporta nada").** Con los números
+de abajo (0 señales bloqueadas o retrasadas por un FOMC/CPI/NFP desde 2015, y ninguna diferencia
+concluyente de resultado con un evento cerca), **el bloqueo por eventos se quitó** del vivo
+(`main._emit_best_setup` ya no llama a `is_event_blackout` y `EVENT_FILTER` desapareció de la
+configuración). El motivo "evento macro cercano" del registro sombra ya no se produce (las filas
+antiguas se conservan). **Se mantienen:** el calendario `data/econ_events.csv`, la línea de aviso
+"⚠️ Evento de alto impacto dentro del plazo de la operación…" en cada mensaje y los eventos de las
+próximas 48 h en el resumen nocturno. No cambia qué señales salen (check-live idéntico), así que
+no reinicia el SPRT.
+
+**Qué hacía (hasta el 16-nov-2026).** Antes de emitir una señal de oro o SPX, el sistema miraba si
+había un evento de alto impacto de EE. UU. entre 1 h antes y 2 h después de ese momento; si lo había,
+no la emitía en ese ciclo (lo volvía a intentar al ciclo siguiente). Cripto estaba exento. Desde la Fase 2 los eventos
 salen de un calendario propio (`data/econ_events.csv`: FOMC, CPI y empleo/NFP desde 2015 hasta
 2027, de federalreserve.gov y bls.gov) y el feed semanal de ForexFactory queda como complemento
 (funciona hoy: `thisweek` responde; `nextweek` da 404 pero el sistema no lo usa).
@@ -309,9 +332,8 @@ cada señal añade "⚠️ Evento de alto impacto dentro del plazo de la operaci
 (hasta 3 eventos entre la entrada y la hora límite de cierre por tiempo, seguidos de "(solo aviso: no
 es motivo para no entrar)"; saldrá en casi todas las de oro y SPX y en ~1 de cada 3 de cripto) y el resumen nocturno lista los eventos de las próximas 48 h.
 
-**Decisión pendiente (tuya):** (1) dejar el filtro actual como está (no molesta, pero no protege de
-nada) o quitarlo para simplificar; (2) no se recomienda descartar setups por eventos. Cualquiera de
-las dos cambia el vivo y necesita tu visto bueno. Qué hacer con el aviso: nada especial (los datos no
+**Decisión (16-nov-2026):** (1) filtro quitado (ver arriba); (2) no se descartan setups por
+eventos. Qué hacer con el aviso: nada especial (los datos no
 dicen que esas operaciones sean peores; saltarlas por el evento va contra la regla de no saltarse
 señales). Si aun así saltas una, apúntalo con `/skip ID evento` para que la medición siga siendo honesta. Mantenimiento: cuando la Fed o el BLS publiquen el calendario de 2028, añadirlo
 al CSV (el resumen nocturno avisa 60 días antes de que se acabe).

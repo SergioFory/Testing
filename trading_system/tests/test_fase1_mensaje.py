@@ -115,7 +115,7 @@ def test_message_crypto_full_content():
     # R:R efectivo a 68554.10: (68554.10-66516.29)/(70527.80-68554.10) = 1.03
     assert "R:R efectivo a ese precio:</b> 1.03" in msg
     assert "R:R a la entrada:</b> 1.50" in msg
-    # Riesgo real = risk_usd / capital (el tope del 10 % lo deja en ~0.23 %)
+    # Riesgo real = risk_usd / capital (Fase 3: 0,25 % exacto; antes el tope del 10 % lo dejaba en ~0.23 %)
     assert f"${t.risk_usd:,.2f} = {t.risk_usd / 10_000 * 100:.2f} %" in msg
     # Revisión de la Fase 1: sin "objetivo 1.00 %"; se compara con el tope de la regla 3.
     assert "objetivo" not in msg and "1.00 %" not in msg
@@ -268,8 +268,10 @@ def test_cmd_signal_sizes_with_trading_capital_and_sends_new_message(temp_db, mo
     _assert_valid_html(msg)
     with temp_db.get_engine().connect() as conn:
         row = conn.execute(text("SELECT * FROM signals")).mappings().fetchone()
-    # 1 % de 40.000 = 400 USD de riesgo → nominal 13.333 > tope 10 % (4.000)
-    assert row["position_size"] == pytest.approx(4_000.0)
+    # Fase 3 (3.2): 0,25 % de 40.000 = 100 USD de riesgo con stop al 3 % → nominal
+    # 3.333,33 (< 40.000 × apalancamiento 1×). Antes: 1 % con tope del 10 % → 4.000.
+    assert row["position_size"] == pytest.approx(3_333.33)
+    assert "Riesgo real:</b> $100.00 = 0.25 % del capital" in msg
     assert "Capital:</b> $40,000" in msg
     assert "Score del setup:</b> 0.70 (umbral 0.55)" in msg
     # vela del setup 2026-11-14 20:00 + 25 × 4h

@@ -8,6 +8,11 @@ Donde stop_distance = atr_stop_mult × ATR
 
 Esto asegura que en cada operación SIEMPRE arriesgas exactamente
 risk_per_trade % del capital, independientemente del activo o la volatilidad.
+
+Fase 3 (3.2, 16-nov-2026): risk_per_trade = 0,25 % (el tope de la regla 3 de
+REGLAS_DE_DECISION.md) y el antiguo tope del 10 % de nominal se sustituye por un
+apalancamiento máximo (RISK["max_leverage"], 1×): nominal ≤ capital × max_leverage.
+Si ese tope actúa, el riesgo queda por debajo del 0,25 % y el mensaje lo dice.
 """
 import pandas as pd
 import numpy as np
@@ -37,6 +42,9 @@ class TradeSetup:
     ml_score:      float        # Confianza del modelo (0-1)
     sentiment_score: Optional[float] = None
     notes:         str = ""
+    # Fase 3 (3.2): apalancamiento máximo que ha recortado el tamaño (None = no
+    # actuó; con el 0,25 % solo actuaría con un stop a menos del 0,25 % del precio).
+    leverage_cap:  Optional[float] = None
 
     @property
     def stop_distance_pct(self) -> float:
@@ -52,6 +60,8 @@ def calculate_position_size(
     entry_price:  float,
     stop_loss:    float,
     risk_per_trade: float = None,
+    max_leverage: float = None,
+    return_capped: bool = False,
 ) -> tuple:
     """
     Calcula el tamaño de posición basado en riesgo fijo.
@@ -60,35 +70,44 @@ def calculate_position_size(
         capital:       Capital total disponible en USD
         entry_price:   Precio de entrada
         stop_loss:     Precio del stop loss
-        risk_per_trade: Fracción del capital a arriesgar (default: RISK setting)
+        risk_per_trade: Fracción del capital a arriesgar (default: RISK["risk_per_trade"])
+        max_leverage:  Nominal máximo como múltiplo del capital (default: RISK["max_leverage"])
+        return_capped: si True, añade al final un bool "el tope de apalancamiento actuó"
 
     Returns:
-        (position_size_usd, position_qty, risk_usd)
+        (position_size_usd, position_qty, risk_usd) [+ capped si return_capped]
     """
     if risk_per_trade is None:
         risk_per_trade = RISK["risk_per_trade"]
+    if max_leverage is None:
+        max_leverage = RISK.get("max_leverage", 1.0)
 
     stop_distance = abs(entry_price - stop_loss)
     if stop_distance <= 0:
         logger.error("Stop loss igual al precio de entrada. Posición cancelada.")
-        return 0, 0, 0
+        return (0, 0, 0, False) if return_capped else (0, 0, 0)
 
     risk_usd       = capital * risk_per_trade
     position_size  = risk_usd / (stop_distance / entry_price)
     position_qty   = position_size / entry_price
 
-    # Nunca arriesgar más del 10% del capital en una sola operación (safety net)
-    max_position = capital * 0.10
-    if position_size > max_position:
+    # Tope de apalancamiento (Fase 3, 3.2; sustituye al antiguo "10 % del capital
+    # de nominal", que casi siempre mandaba y dejaba el riesgo real entre ~0,1 % y
+    # ~0,8 % según lo lejos que estuviera el stop). Si actúa, el riesgo baja.
+    capped = False
+    max_position = capital * float(max_leverage)
+    if max_leverage and max_leverage > 0 and position_size > max_position:
+        capped = True
         position_size = max_position
         position_qty  = position_size / entry_price
         risk_usd      = position_size * (stop_distance / entry_price)
         logger.warning(
-            f"Posición reducida al 10% del capital por safety net: "
-            f"${position_size:,.0f}"
+            f"Posición limitada por el apalancamiento máximo ({max_leverage:g}×): "
+            f"nominal ${position_size:,.2f}, riesgo ${risk_usd:,.2f}"
         )
 
-    return round(position_size, 2), round(position_qty, 6), round(risk_usd, 2)
+    out = (round(position_size, 2), round(position_qty, 6), round(risk_usd, 2))
+    return out + (capped,) if return_capped else out
 
 
 def build_trade_setup(
@@ -96,6 +115,8 @@ def build_trade_setup(
     capital:     float,
     ml_score:    float,
     sentiment_score: float = None,
+    risk_per_trade: float = None,
+    max_leverage: float = None,
 ) -> Optional[TradeSetup]:
     """
     Construye un TradeSetup completo desde una fila de setup detectado.
@@ -105,6 +126,8 @@ def build_trade_setup(
         capital:     Capital actual en USD
         ml_score:    Score del modelo ML (0-1)
         sentiment_score: Score de sentimiento (-1 a +1)
+        risk_per_trade / max_leverage: por defecto, los de RISK (el worker siempre
+                     usa los de RISK; el dashboard puede pasar otro riesgo).
 
     Returns:
         TradeSetup o None si el setup no es válido.
@@ -132,8 +155,11 @@ def build_trade_setup(
             return None
 
     # Calcular posición
-    pos_size, pos_qty, risk_usd = calculate_position_size(
-        capital, entry, stop_loss
+    if max_leverage is None:
+        max_leverage = RISK.get("max_leverage", 1.0)
+    pos_size, pos_qty, risk_usd, capped = calculate_position_size(
+        capital, entry, stop_loss, risk_per_trade=risk_per_trade,
+        max_leverage=max_leverage, return_capped=True,
     )
     if pos_size <= 0:
         return None
@@ -143,7 +169,7 @@ def build_trade_setup(
     # R:R desde la GEOMETRÍA de precios (target_dist / stop_dist). Es exacto y
     # no depende del redondeo del tamaño de posición. Antes se calculaba como
     # reward_usd / risk_usd, donde el redondeo a centavos de risk_usd (tras el
-    # safety net) empujaba el ratio por debajo de 1.5 y:
+    # antiguo tope de nominal) empujaba el ratio por debajo de 1.5 y:
     #   - rechazaba SIEMPRE a Gold (R:R 1.33) y Silver (R:R 1.0) → nunca emitían
     #   - rechazaba a BTC (R:R 1.5) ~6 de cada 10 ciclos por ruido de redondeo
     # El piso baja a 1.0 (reward ≥ risk): solo descarta geometría degenerada.
@@ -173,6 +199,7 @@ def build_trade_setup(
         rr_ratio      = round(rr_ratio, 2),
         ml_score      = ml_score,
         sentiment_score = sentiment_score,
+        leverage_cap  = float(max_leverage) if capped else None,
     )
 
 

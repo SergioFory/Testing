@@ -556,10 +556,12 @@ def test_fill_resultado_en_espanol_y_nota_del_oro(temp_db, fake_telegram):
 def test_mensaje_riesgo_por_encima_del_tope_de_las_reglas():
     from risk.position_sizer import build_trade_setup
     from notifications.telegram import format_signal_alert
-    # Oro real de la revisión: riesgo 0.37 % con 10.000 USD.
+    # Oro real de la revisión: riesgo 0.37 % con 10.000 USD. Fase 3 (3.2): el sistema
+    # ya arriesga el 0,25 %; se reproduce la configuración ANTERIOR (1 % con tope de
+    # nominal del 10 % = apalancamiento 0,1×) para seguir probando la línea de aviso.
     row = pd.Series({"close": 4168.40, "stop_loss": 4323.68, "take_profit": 3961.36,
                      "atr": 103.52, "direction": "short", "symbol": "XAUUSD", "setup_type": "breakout"})
-    t = build_trade_setup(row, 10_000.0, 0.23)
+    t = build_trade_setup(row, 10_000.0, 0.23, risk_per_trade=0.01, max_leverage=0.10)
     msg = format_signal_alert(t, setup_ts=pd.Timestamp("2026-09-28", tz="UTC"), capital=10_000,
                               now=pd.Timestamp("2026-09-28 22:20", tz="UTC"))
     assert "objetivo" not in msg and "1.00 %" not in msg
@@ -639,7 +641,8 @@ def test_lotes_pendientes_indican_el_tamano_reducido_si_supera_el_tope():
     from notifications.telegram import format_signal_alert
     row = pd.Series({"close": 4168.40, "stop_loss": 4323.68, "take_profit": 3961.36,
                      "atr": 103.52, "direction": "short", "symbol": "XAUUSD", "setup_type": "breakout"})
-    t = build_trade_setup(row, 10_000.0, 0.23)
+    # Configuración anterior a la Fase 3 (ver la prueba de arriba).
+    t = build_trade_setup(row, 10_000.0, 0.23, risk_per_trade=0.01, max_leverage=0.10)
     msg = format_signal_alert(t, setup_ts=pd.Timestamp("2026-09-28", tz="UTC"), capital=10_000,
                               now=pd.Timestamp("2026-09-28 22:20", tz="UTC"))
     lot_line = [l for l in msg.splitlines() if "Lotes XM" in l][0]

@@ -144,6 +144,9 @@ def run_backtest(
             if ml_score < 0.50:
                 continue
 
+            # Mismo tamaño que el vivo (Fase 3, 3.2): RISK["risk_per_trade"] = 0,25 %
+            # del capital del momento y nominal ≤ capital × RISK["max_leverage"]. Las
+            # métricas en USD dependen de ello; los resultados en R, no.
             trade_setup = build_trade_setup(
                 setup_row, portfolio.current_capital, ml_score
             )

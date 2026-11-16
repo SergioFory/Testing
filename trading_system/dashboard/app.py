@@ -83,9 +83,17 @@ with st.sidebar:
         "Capital (USD)", min_value=100, max_value=1_000_000,
         value=int(min(max(TRADING_CAPITAL, 100), 1_000_000)), step=500
     )
+    # Fase 3 (3.2): el riesgo por defecto es el del worker (RISK["risk_per_trade"],
+    # 0,25 %) y el slider SÍ cambia el tamaño de la señal de esta pestaña (antes era
+    # decorativo: el rango 0,5–3 % no admitía el 0,25 % y el tamaño ignoraba el
+    # valor). Máximo = tope de la regla 3 (RULES_MAX_RISK_PCT). Nominal ≤ capital ×
+    # RISK["max_leverage"], igual que en el worker.
+    from config.settings import RULES_MAX_RISK_PCT
+    _risk_max = float(RULES_MAX_RISK_PCT * 100)
     risk_pct = st.slider(
-        "Riesgo por trade (%)", 0.5, 3.0,
-        float(RISK["risk_per_trade"] * 100), 0.1
+        "Riesgo por trade (%)", 0.05, _risk_max,
+        float(min(max(RISK["risk_per_trade"] * 100, 0.05), _risk_max)), 0.01,
+        help="El worker usa siempre el valor de la configuración (0,25 %).",
     ) / 100
 
     _default_threshold = float(asset_cfg.get("ml_threshold", ML_PARAMS["prob_threshold"]))
@@ -223,7 +231,8 @@ with tab_signal:
                              "last_bar_ts": _df4h.index[-1]}
 
             if best is not None:
-                _trade = build_trade_setup(best, capital, float(best["ml_score"]))
+                _trade = build_trade_setup(best, capital, float(best["ml_score"]),
+                                           risk_per_trade=risk_pct)
 
         # Persistir en session_state para que los botones secundarios no borren la señal
         st.session_state["_sig_trade"]    = _trade
@@ -308,7 +317,7 @@ with tab_signal:
 
                 c5, c6, c7, c8 = st.columns(4)
                 c5.metric("Tamaño USD",    f"${_trade.position_size:,.0f}")
-                c6.metric("Riesgo USD",    f"${_trade.risk_usd:,.0f}")
+                c6.metric("Riesgo USD",    f"${_trade.risk_usd:,.2f}")
                 c7.metric("Reward USD",    f"${_trade.reward_usd:,.0f}")
                 c8.metric("ATR (14)",      f"{_trade.atr_pct*100:.2f}%")
 
@@ -340,7 +349,9 @@ with tab_signal:
             st.subheader("Gestión de Riesgo")
             st.info(
                 f"**Capital:** ${capital:,.0f}\n\n"
-                f"**Riesgo/trade:** {risk_pct*100:.1f}%\n\n"
+                f"**Riesgo/trade:** {risk_pct*100:.2f} %\n\n"
+                f"**Apalancamiento máx.:** {RISK.get('max_leverage', 1.0):g}× "
+                f"(nominal ≤ ${capital * RISK.get('max_leverage', 1.0):,.0f})\n\n"
                 f"**Max posiciones:** {RISK['max_positions']}\n\n"
                 f"**Stop:** {RISK['atr_stop_mult']}× ATR\n\n"
                 f"**Target:** {RISK['atr_target_mult']}× ATR"

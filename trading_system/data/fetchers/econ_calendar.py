@@ -1,7 +1,14 @@
 """
-Calendario económico — filtro de riesgo ante eventos macro de alto impacto.
+Calendario económico — eventos macro de alto impacto.
 
-Objetivo: NO abrir operaciones justo antes/después de eventos que mueven el
+Fase 3 (punto 0, decisión del usuario del 16-nov-2026): el BLOQUEO de señales por
+eventos se QUITÓ de la ruta de señales (main._emit_best_setup ya no llama a
+is_event_blackout; la Fase 2 midió que nunca actuaba a las horas del vivo). Este
+módulo se mantiene para: la línea de aviso del mensaje (events_between), los eventos
+de 48 h del resumen nocturno (upcoming_events) y el aviso de fin de calendario.
+is_event_blackout queda como utilidad (mediciones y pruebas), sin uso en el vivo.
+
+Objetivo original (histórico): NO abrir operaciones justo antes/después de eventos que mueven el
 mercado de forma aleatoria (NFP, CPI, decisiones de tasas FOMC/ECB/BoE/BoJ).
 En esas ventanas el precio salta y revienta stops sin relación con el setup
 técnico — es exactamente cuando el sistema pierde por azar.
@@ -215,6 +222,7 @@ def is_event_blackout(symbol: str,
                       min_impact: str = "High") -> tuple:
     """
     True si hay un evento macro relevante dentro de la ventana de blackout.
+    Fase 3: ya NO se usa en la ruta de señales (filtro quitado); solo mediciones/pruebas.
     Eventos = calendario propio (CSV) + feed semanal (complemento).
 
     La ventana cubre [now - hours_after, now + hours_before]: se evita operar

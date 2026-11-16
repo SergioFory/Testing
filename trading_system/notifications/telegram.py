@@ -115,8 +115,10 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
       - hora UTC de la vela del setup y cuánto hace que cerró;
       - entrada/SL/TP, precio actual (cierre de la última vela cerrada) y el R:R
         efectivo si se entra a ese precio;
-      - riesgo REAL en % del capital (risk_usd / capital, con el tope de tamaño)
-        frente al tope de la regla 3 (0,25 %); si lo supera, el tamaño que lo respeta;
+      - riesgo REAL en % del capital (risk_usd / capital). Desde la Fase 3 (3.2) el
+        sistema arriesga el 0,25 % (tope de la regla 3) y la línea "Para respetar el
+        0,25 %" solo sale si algún día se superase; si el tamaño lo recorta el
+        apalancamiento máximo (RISK["max_leverage"]), se dice y el riesgo es menor;
       - tamaño en unidades del activo y en LOTES de XM (XM_CONTRACTS; pendiente
         mientras no haya especificación del contrato);
       - "Cerrar a mercado si no toca SL/TP antes de: <fecha UTC>" = cierre de la
@@ -213,7 +215,9 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
         # compara con ese tope y, si se supera, se dice qué tamaño lo respeta.
         cap = float(RULES_MAX_RISK_PCT)
         lines.append(f"<b>Capital:</b> ${float(capital):,.0f}")
-        if risk_pct <= cap + 1e-9:
+        # Tolerancia de medio céntimo: risk_usd viene redondeado a céntimos y con
+        # capitales "raros" (p. ej. 1.234 USD) el redondeo puede pasar del 0,25 % exacto.
+        if risk_usd <= cap * float(capital) + 0.005 + 1e-9:
             nota = f" <i>(dentro del tope de las reglas: {_e(_fmt_pct(cap))})</i>"
             lines.append(f"<b>Riesgo real:</b> ${risk_usd:,.2f} = {_e(_fmt_pct(risk_pct))} del capital{nota}")
         else:
@@ -229,8 +233,16 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
     lots = xm_lot_size(trade.symbol, qty, entry=trade.entry_price,
                        stop_loss=trade.stop_loss, capital=capital)
     unit = lots["unit"]
-    lines.append(f"<b>Tamaño:</b> {_e(_fmt_qty(qty))} {_e(unit)} "
-                 f"(${float(trade.position_size):,.0f} de nominal)")
+    nominal_txt = f"${float(trade.position_size):,.0f} de nominal"
+    if capital and capital > 0:
+        nominal_txt += f", {_fmt_pct(float(trade.position_size) / float(capital))} del capital"
+    lines.append(f"<b>Tamaño:</b> {_e(_fmt_qty(qty))} {_e(unit)} ({_e(nominal_txt)})")
+    # Fase 3 (3.2): si el apalancamiento máximo recortó el tamaño, decirlo (el
+    # riesgo queda por debajo del 0,25 %). Con stops normales no debería ocurrir.
+    lev_cap = getattr(trade, "leverage_cap", None)
+    if lev_cap and rules_cap_line is None:
+        lines.append(f"ℹ️ <i>Tamaño limitado por el apalancamiento máximo ({_e(f'{float(lev_cap):g}')}×: "
+                     "nominal ≤ capital × apalancamiento); por eso el riesgo es menor del habitual.</i>")
     if rules_cap_line is not None:
         lines.append(f"<b>Para respetar el {_e(_fmt_pct(RULES_MAX_RISK_PCT))}:</b> "
                      f"{_e(_fmt_qty(qty * rules_cap_line))} {_e(unit)} "

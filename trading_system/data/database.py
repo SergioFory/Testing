@@ -168,7 +168,8 @@ _DDL = [
     #   shadow_asset     habría salido, pero el activo está en modo sombra (SPX)
     #   below_threshold  raw_score por debajo del umbral del activo
     #   not_fresh        aprobado, pero la entrada ya está a > max_dist × ATR
-    #   event_blackout   aprobado, bloqueado por un evento macro inminente
+    #   event_blackout   aprobado, bloqueado por un evento macro inminente (ya no
+    #                    se produce: filtro quitado en la Fase 3; filas antiguas)
     #   risk_invalid     aprobado, build_trade_setup lo rechazó
     #   duplicate        aprobado, bloqueado por el antiduplicado (precio/legado)
     #   not_best         aprobado y ejecutable, pero en ese ciclo salió otro de

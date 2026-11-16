@@ -204,7 +204,8 @@ def load_live_r(since_ts: int | None = None, phase0: bool = True) -> list[float]
 def load_shadow_approved_r(exclude_motivos=SHADOW_EXCLUDE_MOTIVOS,
                            since_ts: int | None = None) -> list[float]:
     """R de los setups APROBADOS del registro sombra (emitidos + bloqueados por
-    frescura, eventos, riesgo, duplicado o por no ser el mejor), resueltos, en
+    frescura, eventos [solo filas anteriores a la Fase 3], riesgo, duplicado o por
+    no ser el mejor), resueltos, en
     orden de resolución. Sin el activo en modo sombra por defecto."""
     from sqlalchemy import text
     from data.database import get_engine, init_db

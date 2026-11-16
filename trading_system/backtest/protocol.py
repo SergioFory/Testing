@@ -41,6 +41,13 @@ Robustez y veredicto (segunda mitad del 2.1):
     2026-11-16 (constantes CRIT_*; texto en REGLAS_DE_DECISION.md). Sin --final
     un candidato nunca sale "APROBADO" (falta e).
 
+Filtros candidatos (Fase 3, 3.3): el JSON del candidato puede llevar
+"filter": "sma200_with" (solo setups a favor de la SMA200 diaria, último diario
+cerrado: sin look-ahead; signals/context_features.py). Entra en el hash de la
+variante como extra["filter"] y se aplica re-detectando con la clave de
+configuración "setup_filter" (config_override), así que vivo = validador (a))
+y el holdout OKX lo ven igual.
+
 Rendimiento medido (local, TS_CACHE=1): ver LOG de la Fase 2.
 """
 from __future__ import annotations
@@ -448,8 +455,9 @@ def load_candidate(path: str | Path) -> dict:
          "ml_threshold": 0.45,                    (opcional; por defecto el actual)
          "directions": ["long", "short"],         (opcional; por defecto las actuales)
          "overrides": {...},                      (opcional: otras claves de ASSETS)
-         "params_override": {...}}                (opcional: parámetros de detectores)
-    Lanza ProtocolError si falta el símbolo o no existe.
+         "params_override": {...},                (opcional: parámetros de detectores)
+         "filter": "sma200_with"}                 (opcional, Fase 3: filtro candidato)
+    Lanza ProtocolError si falta el símbolo o no existe, o si el filtro no existe.
     """
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -464,17 +472,43 @@ def load_candidate(path: str | Path) -> dict:
     for k in ("overrides", "params_override"):
         if k in data and not isinstance(data[k], dict):
             raise ProtocolError(f"'{k}' del candidato debe ser un objeto JSON.")
+    flt = data.get("filter")
+    if flt is not None:
+        from signals.context_features import SUPPORTED_FILTERS
+        if flt not in SUPPORTED_FILTERS:
+            raise ProtocolError(f"'filter' del candidato debe ser uno de {', '.join(SUPPORTED_FILTERS)} "
+                                f"(tiene {flt!r}).")
+        if "setup_filter" in (data.get("overrides") or {}):
+            raise ProtocolError("Usa 'filter' o overrides.setup_filter, no los dos.")
     return data
 
 
 def candidate_extra(candidate: dict) -> dict:
-    """Cambios del candidato que NO son umbral/dirección (requieren re-detectar)."""
+    """Cambios del candidato que NO son umbral/dirección (requieren re-detectar).
+    El filtro (Fase 3) va en extra["filter"]: así entra en el hash de la variante
+    (un candidato sin filtro conserva su hash de siempre)."""
     extra = {}
     if candidate.get("overrides"):
         extra["overrides"] = candidate["overrides"]
     if candidate.get("params_override"):
         extra["params_override"] = candidate["params_override"]
+    if candidate.get("filter"):
+        extra["filter"] = candidate["filter"]
     return extra
+
+
+def extra_config(extra: dict | None) -> tuple[dict | None, dict | None]:
+    """(overrides, params_override) que hay que aplicar con config_override para
+    detectar como el candidato: sus overrides más, si lleva filtro, la clave de
+    ASSETS "setup_filter" que lee signals/detector.detect_all_setups."""
+    extra = extra or {}
+    ov = dict(extra.get("overrides") or {})
+    if extra.get("filter"):
+        ov["setup_filter"] = extra["filter"]
+    return (ov or None), extra.get("params_override")
+
+
+_FILTER_LABELS = {"sma200_with": "solo a favor de la SMA200"}
 
 
 def candidate_variant(symbol: str, candidate: dict) -> dict:
@@ -484,7 +518,10 @@ def candidate_variant(symbol: str, candidate: dict) -> dict:
     dirs = tuple(sorted(candidate.get("directions") or cur["directions"]))
     extra = candidate_extra(candidate)
     params = variant_params(symbol, thr, dirs, extra=extra)
-    return {"id": "candidato", "label": f"candidato: {candidate.get('label') or f'umbral {_thr_label(thr)}'}",
+    default = f"umbral {_thr_label(thr)}"
+    if extra.get("filter"):
+        default += f" · {_FILTER_LABELS.get(extra['filter'], extra['filter'])}"
+    return {"id": "candidato", "label": f"candidato: {candidate.get('label') or default}",
             "ml_threshold": thr, "directions": dirs, "is_current": False, "is_candidate": True,
             "extra": extra, "params": params, "hash": variant_hash(params)}
 
@@ -715,8 +752,7 @@ def _sim_params(symbol: str) -> tuple[float, float, int]:
 def universe_trades(symbol: str, df_4h: pd.DataFrame, df_daily: pd.DataFrame = None,
                     extra: dict | None = None) -> pd.DataFrame:
     """Detecta (todas las direcciones) y simula una vez. extra = overrides del candidato."""
-    extra = extra or {}
-    ov, po = extra.get("overrides"), extra.get("params_override")
+    ov, po = extra_config(extra)
     setups = detect_universe(symbol, df_4h, df_daily, ov, po)
     with config_override(symbol, ov, po):
         st, tg, fwd = _sim_params(symbol)
@@ -1391,10 +1427,11 @@ def run_protocol(symbol: str | None = None, candidate_path: str | None = None,
         if candidate:
             # Criterio a): vivo = validador también con la configuración del candidato.
             cv = res["candidate_variant"]
-            ov = dict(candidate.get("overrides") or {})
+            ov0, po0 = extra_config(candidate_extra(candidate))
+            ov = dict(ov0 or {})
             ov.update({"ml_threshold": cv["ml_threshold"], "directions": list(cv["directions"])})
             try:
-                with config_override(sym, ov, candidate.get("params_override")):
+                with config_override(sym, ov, po0):
                     lvc = live_check(sym, d4, d1)
             except Exception as exc:  # noqa: BLE001 — sin comprobación, a) falla
                 lvc = {"match": False, "error": str(exc)}

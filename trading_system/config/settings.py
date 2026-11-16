@@ -686,6 +686,23 @@ PORTFOLIO_RULES = {
 }
 
 # =============================================================================
+# VARIABLES DE CONTEXTO EN SOMBRA (Fase 3, punto 3.3) — signals/context_features.py
+# -----------------------------------------------------------------------------
+# Cada setup guardado en shadow_setups lleva la columna `features` (JSON) con
+# sma200_with, tsmom (21/63/252 d), atr_rank, dist_atr_now y, en BTC/ETH, dvol y
+# vrp (DVOL de Deribit / volatilidad realizada a 30 días). NO filtran nada: se
+# registran para decidir con datos propios (regla de activación del VRP en
+# REGLAS_DE_DECISION.md, "Candidatos evaluados"). Deribit: API pública, una
+# petición por moneda y ciclo, timeout 5 s, fail-silent (dvol/vrp = null).
+# "enabled": False apaga solo la petición a Deribit (el resto se sigue calculando).
+# =============================================================================
+DERIBIT_DVOL = {
+    "enabled":    True,
+    "timeout_s":  5,
+    "currencies": {"BTCUSDT": "BTC", "ETHUSDT": "ETH"},
+}
+
+# =============================================================================
 # FILTRO DE EVENTOS ECONÓMICOS — QUITADO (Fase 3, punto 0; decisión del usuario
 # del 16-nov-2026)
 # -----------------------------------------------------------------------------

@@ -347,11 +347,30 @@ def cmd_signal(symbol: str, notify: bool = False, ohlcv_cache: dict | None = Non
                          last_bar_ts, already, data_source, notify, fate)
     finally:
         _record_shadow_window(symbol, df_scored, min_setup_ts, last_bar_ts, already,
-                              current_price, max_dist_atr, fate)
+                              current_price, max_dist_atr, fate, df_4h=df_4h, df_daily=df_daily)
+
+
+def _shadow_features(symbol, window, df_4h, df_daily, current_price) -> dict | None:
+    """Variables de contexto de los setups de la ventana (Fase 3, 3.3): sma200_with,
+    tsmom, atr_rank, dist_atr_now y, en BTC/ETH, dvol y vrp (Deribit, una petición
+    por moneda y ciclo, timeout 5 s, fail-silent). Solo se registran: no cambian
+    ninguna señal. Nunca lanza (si falla, la fila sombra se guarda sin features)."""
+    if window is None or window.empty or df_4h is None:
+        return None
+    try:
+        from signals.context_features import compute_setup_features
+        from data.fetchers.deribit_fetcher import currency_for, dvol_for
+        with_vol = currency_for(symbol) is not None
+        dvol = dvol_for(symbol) if with_vol else None
+        return compute_setup_features(window, df_4h, df_daily, current_price,
+                                      dvol=dvol, with_vol=with_vol)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[{symbol}] Variables de contexto no disponibles (no afecta a nada): {exc}")
+        return None
 
 
 def _record_shadow_window(symbol, df_scored, min_setup_ts, last_bar_ts, already,
-                          current_price, max_dist_atr, fate) -> None:
+                          current_price, max_dist_atr, fate, df_4h=None, df_daily=None) -> None:
     """Guarda en shadow_setups los setups de la ventana del ciclo. Nunca lanza."""
     try:
         from data.shadow import classify_window, record_shadow_setups
@@ -361,11 +380,13 @@ def _record_shadow_window(symbol, df_scored, min_setup_ts, last_bar_ts, already,
         lo = lo.tz_localize("UTC") if lo.tzinfo is None else lo
         hi = hi.tz_localize("UTC") if hi.tzinfo is None else hi
         window = df_scored[((ts >= lo) & (ts <= hi)).to_numpy()]
+        features = _shadow_features(symbol, window, df_4h, df_daily, current_price)
         rows = classify_window(window, already, current_price, max_dist_atr,
                                chosen_key=fate.get("key"), chosen_motivo=fate.get("motivo"),
                                symbol_motivo=fate.get("symbol_motivo"),
                                asset_live=notify_enabled(symbol),
-                               chosen_portfolio_flag=fate.get("portfolio_flag"))
+                               chosen_portfolio_flag=fate.get("portfolio_flag"),
+                               features=features)
         if rows:
             n = record_shadow_setups(symbol, rows)
             resumen = ", ".join(f"{r['direction']}@{r['setup_ts']:%m-%d %H:%M}={r['motivo']}" for r in rows)
@@ -864,6 +885,12 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
         except Exception as exc:
             logger.warning(f"Registro sombra: error resolviendo ({exc}); el ciclo sigue.")
         ohlcv_cache.clear()
+        # Caché del DVOL de Deribit (Fase 3, 3.3): un valor por moneda y ciclo.
+        try:
+            from data.fetchers.deribit_fetcher import clear_cycle_cache
+            clear_cycle_cache()
+        except Exception:  # noqa: BLE001
+            pass
 
         # Copia de las últimas velas en la tabla ohlcv: al final, cuando todas
         # las señales ya se enviaron (fuera de la ruta crítica).

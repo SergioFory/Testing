@@ -138,6 +138,14 @@ def detect_all_setups(
     if _sessions and not df_setups.empty:
         _slot = (df_setups["ts"].dt.hour // 4) * 4
         df_setups = df_setups[_slot.isin(_sessions)]
+    #   "setup_filter":    "sma200_with"      (Fase 3, 3.3) filtro CANDIDATO: solo setups
+    #                      a favor de la SMA200 diaria (último diario cerrado, sin
+    #                      look-ahead). Hoy ningún activo lo tiene: solo lo activa la
+    #                      puerta `validate --protocol --candidate` con config_override.
+    _flt = _cfg.get("setup_filter")
+    if _flt and not df_setups.empty:
+        from signals.context_features import apply_setup_filter
+        df_setups = apply_setup_filter(df_setups, _flt, df_4h, df_daily)
     df_setups = df_setups.reset_index(drop=True)
     if df_setups.empty:
         return pd.DataFrame()

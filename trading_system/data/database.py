@@ -315,6 +315,11 @@ _OHLCV_COLUMNS = [
 # en el ciclo (mismos valores que signals.portfolio_flag; NULL en los demás).
 _SHADOW_COLUMNS = [
     ("portfolio_flag", "TEXT"),
+    # Fase 3 (3.3) — variables de contexto del setup en JSON compacto
+    # (signals/context_features.py): sma200_with, tsmom, atr_rank, dist_atr_now y,
+    # en BTC/ETH, dvol, rv30 y vrp. Las del primer ciclo en que se vio el setup
+    # (no se sobrescriben). NULL en filas anteriores o si el cálculo falló.
+    ("features", "TEXT"),
 ]
 
 

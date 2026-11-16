@@ -313,6 +313,79 @@ posteriori el 16-nov-2026. El −0,18R de OKX se debe sobre todo al spread fijo 
 ETH de 130–400 USD (0,29R por operación frente a 0,08R hoy); con los costes del validador da
 +0,08R. La diferencia candidato − actual casi no cambia (+0,20R con XM, +0,21R con el validador).
 
+## Candidatos evaluados (Fase 3, 16-nov-2026) — ninguno aprobado, NO se adopta nada
+
+Cinco ideas del informe (§7, 3.3) pasadas por la puerta **sin `--final`** (la reserva no se ha
+mirado). Sin `--final` lo máximo posible es "PASA a)–d); FALTA e)", y ni así se adoptaría: hace
+falta el examen final y tu decisión. Datos hasta el 15-nov-2026, selección antes de la reserva,
+costes XM con swap 5 %. "Solo a favor de la SMA200" = solo largos con el cierre diario por encima
+de su media de 200 días y solo cortos por debajo (con el último diario ya cerrado: en cripto, el del
+día anterior). Se evaluó como **filtro** (quitar los que van en contra); la versión "reducir el
+tamaño a la mitad" del informe no se evaluó.
+
+| Candidato | Operaciones y E[R] (actual → candidato) | b) mejora mediana CPCV; periodos | c) PBO | d) DSR | Veredicto |
+|---|---|---|---|---|---|
+| BTC solo a favor de la SMA200 | 51 / +0,50R → 30 / +0,31R | −0,17R; −0,28 / +0,13 / −0,05 | 0,50 | 0,12 | NO APROBADO (falla b, c, d) |
+| ETH solo a favor de la SMA200 | 55 / +0,30R → 26 / +0,48R | +0,16R; +0,26 / +0,29 / −0,04 (pasa) | 0,65 | 0,75 | NO APROBADO (falla c, d) |
+| Oro solo a favor de la SMA200 | 33 / +0,31R → 26 / +0,32R | +0,00R; +0,77 / +0,24 / −0,16 | 0,54 | 0,39 | NO APROBADO (falla b, c, d) |
+| SPX sin umbral (umbral 0, solo largos) | 41 / +0,12R → 101 / +0,08R | −0,01R; −0,01 / +0,12 / −0,35 | 0,15 (pasa) | 0,00 | NO APROBADO (falla b, d) |
+| ETH umbral 0,50 | 55 / +0,30R → 65 / +0,23R | −0,07R; −0,09 / +0,06 / −0,18 | 0,86 | 0,45 | NO APROBADO (falla b, c, d) |
+
+En los cinco, a) vivo = validador con la configuración del candidato: OK. Pruebas registradas al
+evaluarlos: 461 → 464 (los tres filtros y SPX umbral 0 son variantes nuevas; ETH 0,50 ya estaba en
+la rejilla y no cuenta otra vez).
+
+Cómo leerlo:
+- **SMA200:** confirma lo que ya decía la auditoría (F32). En ETH sube el E[R] por operación, pero
+  quita más de la mitad de las operaciones y el **R total baja** (de ~16,6R a ~12,5R); el PBO de 0,65
+  dice que elegirlo mirando la historia es casi como elegir al azar. En BTC empeora y en el oro no
+  cambia nada en la mediana. Que solo "funcione" en uno de los tres es justo lo que la regla de los
+  dos activos independientes pide no adoptar.
+- **SPX sin umbral:** más operaciones (101) con peor E[R] (+0,08R); no mejora. Sigue en sombra.
+- **ETH 0,50:** igual que el 0,45 del ejemplo anterior: más operaciones, peor E[R], PBO 0,86.
+- Ninguno se ha llevado al `--final`: no se gasta un acceso a la reserva sin un candidato que pase a)–d).
+
+### Variables registradas en sombra desde el 16-nov-2026 (columna `features` del registro sombra)
+
+Desde este despliegue, cada setup que el sistema detecta (emitido o no) se guarda con: si va a favor
+de la SMA200 diaria, el signo de la tendencia a 21/63/252 días, el percentil de volatilidad (ATR),
+lo lejos que está ya el precio de la entrada (en ATR, positivo = a favor) y, en BTC y ETH, el
+**DVOL** de Deribit (volatilidad implícita) y el **VRP** = DVOL / volatilidad realizada de 30 días.
+No cambian ninguna señal ni el mensaje. Si Deribit no responde (timeout de 5 s), DVOL y VRP quedan
+vacíos ese ciclo y todo sigue igual. Estas variables sirven para decidir más adelante con datos
+propios, sin volver a mirar la misma historia.
+
+### Regla de activación del VRP (fijada hoy; informe §7, 2.5; experimento E6)
+
+El VRP no se activa como filtro hasta que se cumpla TODO esto, contado **solo con setups registrados
+desde el 16-nov-2026** (el registro empieza hoy; lo anterior es la historia con la que se generó la
+idea y no cuenta):
+1. **≥ 30 señales cripto aprobadas** (BTC + ETH: emitidas o bloqueadas, del registro sombra) ya
+   resueltas y con VRP registrado (no vacío).
+2. Filtro evaluado = el del experimento E6, sin cambios: conservar el setup si su VRP es ≥ el
+   percentil 33 de los VRP de los setups ANTERIORES del mismo activo (con al menos 30 anteriores;
+   antes de eso no se filtra).
+3. **Mismo signo en BTC y en ETH:** E[R] de los conservados − E[R] de todos > 0 en los dos.
+4. **Mejora del total ≥ +0,10R** por operación (BTC + ETH juntos, conservados frente a todos).
+5. **Revisión obligatoria del mercado bajista:** si entre los setups con el diario por debajo de la
+   SMA200 el filtro descarta más del 60 %, NO se activa sin revisarlo antes (en el OOS de E6, con
+   mercado bajista, el VRP iba en contra).
+Si se cumple, el VRP pasa como candidato por la puerta (`validate --protocol`, con `--final`) y la
+activación es **decisión tuya**. Ritmo esperado: ~2 señales cripto aprobadas al mes → unos 14 meses.
+Nota técnica: en vivo se guarda el último valor horario del DVOL; E6 usaba velas de 12 h con un
+retraso prudente. La diferencia es pequeña, pero por eso solo cuenta lo registrado en vivo.
+
+### Pendiente (3.4): solo documentado, no implementado
+
+- Instrumento **sin swap** para SPX y oro (CFD sobre futuros con vencimiento, cuenta sin swap o
+  futuros micro MES/MGC en otro bróker). Necesita tus datos de XM; mientras, SPX sigue en sombra.
+- **RSI(2) en SPX**, solo si SPX revive con un instrumento sin swap.
+- **Datos de derivados** (interés abierto, funding, DVOL) como variables: revisar tras 9–12 meses de
+  registro propio.
+- Resolver la **vela de entrada con datos de 1 hora** (saber qué tocó antes, SL o TP, cuando una
+  vela 4H/diaria toca los dos).
+- **Umbral por percentil** cuando el SPRT haya decidido.
+
 ## Monitor de datos (Fase 2, 16-nov-2026): qué avisa y propuesta PENDIENTE
 
 Desde la Fase 2 cada ciclo revisa las últimas 60 velas de cada activo (velas planas, duplicadas,

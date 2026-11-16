@@ -532,3 +532,33 @@ Antes, el retraso dependía de la hora del último despliegue. Con un despliegue
 oro de invierno no se evaluaba esa noche, sino a las ~05:00 UTC del día siguiente: en la simulación con
 despliegue a las :07, la señal de oro del 11-nov-2024 llegó a las 05:14 UTC del 12-nov en vez de a las
 22:20 UTC del 11-nov.
+
+## Dashboard de solo lectura (Fase 4, 16-nov-2026)
+
+**Las señales oficiales llegan solo por Telegram**, con su ID para responder /fill y /skip. El
+dashboard ya no escribe en la base de datos ni envía nada:
+
+- **Quitado "Registrar señal en DB" y "Enviar a Telegram".** Si registrabas un setup desde el
+  dashboard antes que el worker, el worker lo descartaba como duplicado: no te llegaba por
+  Telegram ni tenía ID para /fill. El envío desde el dashboard mandaba una señal sin ID.
+- **Quitado el modelo ML** (pestaña, entrenamiento y descarga de datos macro). El ML está apagado
+  en todos los activos y entrenar en el dashboard podía agotar la memoria.
+- **"Ver lo que ve el worker"** (antes "Generar señal") es una vista. Usa las mismas velas que el
+  worker (historia corta del vivo, solo velas cerradas), el mismo detector, el mismo umbral, la misma
+  ventana y frescura, los mismos controles de duplicado y el mismo tamaño (TRADING_CAPITAL y riesgo del
+  0,25 %). Dice qué haría el worker con cada setup de la ventana. Ver la vista no cambia lo que emite el
+  worker. Comprobado con el worker real y un reloj simulado en los cinco periodos de arriba: la vista
+  coincide con lo emitido en todos los instantes y no escribió nada en la base de datos.
+- **Quitado "Resolver señales pendientes".** El worker ya cierra las señales en cada ciclo (cada hora),
+  con velas cerradas y la misma regla que la validación.
+- **Quitado el cierre a mano.** Sustituía el resultado del sistema por el tuyo en la vigilancia
+  (SPRT/CUSUM), y la vigilancia mide el sistema con la entrada del mensaje. Lo que ejecutas de verdad se
+  registra con /fill y /skip, y se compara aparte (regla 6). Las señales que ya cerraste a mano siguen
+  contando como antes (`resolved_by='manual'`).
+- **Nuevo en el dashboard**, todo solo leyendo la base de datos:
+  - vigilancia (SPRT live y del registro sombra, CUSUM y "configuración congelada N/150");
+  - cartera según el sistema y cuántas señales habría bloqueado cada regla;
+  - tus /fill y /skip por señal, con el R teórico y el R ejecutado (misma salida, entrando a tu precio);
+  - registro sombra: setups por motivo y activo, y resultados de los resueltos;
+  - la línea de riesgo por operación.
+- La prueba de Telegram se hace con `python trading_system/main.py telegram`.

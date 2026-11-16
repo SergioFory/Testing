@@ -625,9 +625,11 @@ def test_pre_fase0_solo_originales_desde_la_congelacion(temp_db):
 # ---------------------------------------------------------------------------
 
 def test_dashboard_capital_por_defecto_es_trading_capital():
-    src = (ROOT / "dashboard" / "app.py").read_text(encoding="utf-8")
-    block = src[src.index('"Capital (USD)"') - 200: src.index('"Capital (USD)"') + 200]
-    assert "TRADING_CAPITAL" in block and 'RISK["capital_inicial"]' not in block
+    # Fase 4 (grupo B): el dashboard ya no tiene campo de capital; su vista usa
+    # siempre TRADING_CAPITAL, igual que el worker (dashboard/views.py).
+    src = (ROOT / "dashboard" / "views.py").read_text(encoding="utf-8")
+    assert "build_trade_setup(best, _settings().TRADING_CAPITAL, ml_score)" in src
+    assert 'RISK["capital_inicial"]' not in src
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,24 @@
 """
-Dashboard v5.0 — Sistema de Trading ML
-Flujo: Setup Detection → ML Scoring → Risk Management → Señal Accionable
+Dashboard — vista de SOLO LECTURA del sistema de señales (Fase 4, grupo B).
+
+Qué cambió en la Fase 4 (decisión aprobada por el usuario el 16-nov-2026):
+  - Fuera los botones "Registrar señal en DB" y "Enviar a Telegram": registrar un
+    setup desde aquí antes que el worker hacía que el worker lo descartara como
+    duplicado (no llegaba por Telegram ni tenía ID para /fill) y el envío mandaba
+    una señal sin ID.
+  - Fuera la pestaña del modelo ML y cualquier entrenamiento o descarga de macro
+    desde el dashboard (el ML está apagado y entrenar aquí podía agotar los 512 MB).
+  - "Generar señal" pasa a ser una VISTA de lo que ve el worker (dashboard/views.py:
+    misma historia corta del vivo, velas cerradas, mismo detector, umbral, ventana,
+    frescura, antiduplicados y tamaño), sin escribir en la BD ni enviar nada.
+  - Fuera también "Resolver señales pendientes" (el worker lo hace en cada ciclo,
+    cada hora), el cierre manual (sustituía el resultado del sistema en la
+    vigilancia SPRT/CUSUM; tu ejecución real va con /fill y /skip) y la prueba de
+    Telegram (`python trading_system/main.py telegram`).
+  - Nuevo: vigilancia (SPRT/CUSUM, configuración congelada N/150), cartera según
+    el sistema, ejecuciones (/fill, /skip, R teórico frente a ejecutado), registro
+    sombra y la línea de riesgo por operación.
+Toda la lógica está en dashboard/views.py (sin Streamlit, probada con pytest).
 """
 import sys
 from pathlib import Path
@@ -8,512 +26,255 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime, timezone
-from loguru import logger
 
-from config.settings import ASSETS, RISK, ML_PARAMS, DAYS_HISTORY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, fmt_price
-from data.database        import init_db, load_signals
-from data.outcome_tracker import (save_signal_from_trade, resolve_open_signals, get_outcome_stats,
-                                  resolve_signal_manually, MANUAL_OUTCOMES)
-from notifications.telegram import send_signal_alert, test_connection as tg_test
-from data.fetchers   import fetch_ohlcv, fetch_multi_timeframe, fetch_gold, fetch_yfinance_asset, fetch_macro, fetch_funding_rates
-from signals.detector import detect_all_setups, get_current_setup
-from ml.features      import build_training_dataset, compute_base_features
-from ml.trainer       import train_model, load_model, get_model_importance
-from ml.predictor     import score_setups, get_best_setup
-from data.bars        import drop_unclosed_bars
-from config.settings  import notify_enabled, MAX_SETUP_AGE_BARS, MAX_ENTRY_DIST_ATR
-from risk.position_sizer import build_trade_setup, PortfolioRiskManager
-# Fase 1: sin pestaña de backtest (backtest/engine.py da 0 operaciones en los
-# diarios y no es el protocolo validado: usar `main.py validate`) y sin
-# sentimiento (SENTIMENT['enabled']=False; el veto contrarian se descartó con
-# datos: en BTC quitaría las mejores señales).
+from config.settings import ASSETS, fmt_price, active_assets, notify_enabled
+from data.database import init_db
+from data.outcome_tracker import get_outcome_stats
+from dashboard import views
 
 # =============================================================================
 # CONFIGURACIÓN
 # =============================================================================
 st.set_page_config(
-    page_title="Trading ML v5.0",
+    page_title="Señales de trading — vista",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# CSS personalizado
 st.markdown("""
 <style>
-.signal-long  { background:#d4edda; padding:16px; border-radius:8px; border-left:5px solid #28a745; }
-.signal-short { background:#f8d7da; padding:16px; border-radius:8px; border-left:5px solid #dc3545; }
-.signal-none  { background:#fff3cd; padding:16px; border-radius:8px; border-left:5px solid #ffc107; }
-.metric-box   { background:#f8f9fa; padding:12px; border-radius:6px; text-align:center; }
+.signal-long  { background:#d4edda; color:#111; padding:16px; border-radius:8px; border-left:5px solid #28a745; }
+.signal-short { background:#f8d7da; color:#111; padding:16px; border-radius:8px; border-left:5px solid #dc3545; }
+.signal-none  { background:#fff3cd; color:#111; padding:16px; border-radius:8px; border-left:5px solid #ffc107; }
 </style>
 """, unsafe_allow_html=True)
 
-# DB init
 init_db()
+
+
+def _safe(fn, *args, **kwargs):
+    """Ejecuta una función de lectura; si falla, muestra el error sin tumbar la página."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"No se pudo leer: {exc}")
+        return None
+
 
 # =============================================================================
 # SIDEBAR
 # =============================================================================
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/4/46/Bitcoin.svg", width=40)
-    st.title("Trading ML v5.0")
+    st.title("Señales de trading")
+    st.caption("Vista de solo lectura")
     st.markdown("---")
 
-    asset_key = st.selectbox(
+    _assets = active_assets() or list(ASSETS.keys())
+    symbol = st.selectbox(
         "Activo",
-        list(ASSETS.keys()),
+        _assets,
         format_func=lambda k: f"{ASSETS[k]['label']} — {k}"
+                              + ("" if notify_enabled(k) else " (modo sombra)"),
     )
-    asset_cfg = ASSETS[asset_key]
-    symbol    = asset_key
+    asset_cfg = ASSETS[symbol]
 
     st.markdown("---")
-    st.subheader("Parámetros")
-
-    # Capital por defecto = TRADING_CAPITAL (el mismo que usa el worker; revisión
-    # de la Fase 1: antes arrancaba siempre en 10.000 y un envío desde aquí salía
-    # con otro tamaño y otro % de riesgo que las señales del worker).
-    from config.settings import TRADING_CAPITAL
-    capital = st.number_input(
-        "Capital (USD)", min_value=100, max_value=1_000_000,
-        value=int(min(max(TRADING_CAPITAL, 100), 1_000_000)), step=500
-    )
-    # Fase 3 (3.2): el riesgo por defecto es el del worker (RISK["risk_per_trade"],
-    # 0,25 %) y el slider SÍ cambia el tamaño de la señal de esta pestaña (antes era
-    # decorativo: el rango 0,5–3 % no admitía el 0,25 % y el tamaño ignoraba el
-    # valor). Máximo = tope de la regla 3 (RULES_MAX_RISK_PCT). Nominal ≤ capital ×
-    # RISK["max_leverage"], igual que en el worker.
-    from config.settings import RULES_MAX_RISK_PCT
-    _risk_max = float(RULES_MAX_RISK_PCT * 100)
-    risk_pct = st.slider(
-        "Riesgo por trade (%)", 0.05, _risk_max,
-        float(min(max(RISK["risk_per_trade"] * 100, 0.05), _risk_max)), 0.01,
-        help="El worker usa siempre el valor de la configuración (0,25 %).",
-    ) / 100
-
-    _default_threshold = float(asset_cfg.get("ml_threshold", ML_PARAMS["prob_threshold"]))
-    # Rango 0–1: los umbrales de oro (0.20) y SPX (0.12) quedan por debajo del
-    # antiguo mínimo 0.50 (Streamlit movía el mínimo en silencio). Solo afecta a
-    # la pestaña de señal del dashboard; el worker usa ml_threshold de settings.
-    ml_threshold = st.slider(
-        "Umbral del score", 0.0, 1.0,
-        _default_threshold, 0.01
-    )
+    _rl = _safe(views.risk_line)
+    if _rl:
+        st.info(_rl)
+    st.caption("Capital (TRADING_CAPITAL), riesgo y umbral son los del worker; "
+               "aquí no se cambian.")
 
     st.markdown("---")
-    _tg_ready = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
-    tg_notify = st.checkbox(
-        "📲 Notificar por Telegram",
-        value=_tg_ready,
-        disabled=not _tg_ready,
-        help="Envía la señal a tu Telegram si hay resultado. Requiere TOKEN y CHAT_ID en .env",
-    )
-    if not _tg_ready:
-        st.caption("Telegram no configurado. Añade TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID al .env")
-    else:
-        if st.button("🔔 Test Telegram", help="Envía mensaje de prueba al bot"):
-            ok = tg_test()
-            if ok:
-                st.success("Telegram: conexión OK")
-            else:
-                st.error("Telegram: fallo — revisa el .env")
-
-    st.markdown("---")
-    run_btn = st.button("🔄 Generar señal", width="stretch", type="primary")
-    st.caption(f"v5.0 | Setup→ML→Risk | {datetime.now().strftime('%H:%M')}")
+    run_btn = st.button("🔍 Ver lo que ve el worker", width="stretch", type="primary")
+    st.caption(views.OFFICIAL_NOTE)
+    st.caption(f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC")
 
 # =============================================================================
-# TABS PRINCIPALES
+# PESTAÑAS
 # =============================================================================
-tab_signal, tab_model, tab_history = st.tabs([
-    "📡 Señal Actual",
-    "🧠 Modelo ML",
+tab_view, tab_vig, tab_port, tab_shadow, tab_history = st.tabs([
+    "📡 Vista del worker",
+    "🧭 Vigilancia",
+    "🧺 Cartera y ejecuciones",
+    "🗂️ Registro sombra",
     "📜 Historial",
 ])
 
 # =============================================================================
-# TAB 1: SEÑAL ACTUAL
+# 1) VISTA DEL WORKER (solo lectura)
 # =============================================================================
-with tab_signal:
-    st.header(f"Señal en Tiempo Real — {asset_cfg['label']}")
+with tab_view:
+    st.header(f"Lo que ve el worker — {asset_cfg['label']}")
+    st.caption(views.OFFICIAL_NOTE)
 
-    # Limpiar caché si el usuario cambia de activo en el selector
-    if st.session_state.get("_sig_symbol") != symbol:
-        for _k in ("_sig_trade", "_sig_sentiment", "_sig_df4h", "_sig_dfsetups", "_sig_lookback",
-                   "_sig_meta", "_sig_price"):
-            st.session_state.pop(_k, None)
-        st.session_state["_sig_symbol"] = symbol
-
-    # ---- Ejecutar análisis solo cuando se presiona "Generar señal" ----
+    # Solo se guarda la vista del activo elegido (pocas filas: gráfico y ventana).
     if run_btn:
-        _trade     = None
-        _df4h      = pd.DataFrame()
-        _dfsetups  = pd.DataFrame()
-        _sent      = None   # sentimiento apagado (Fase 1)
-        _lookback  = 72 if asset_cfg["source"] != "binance" else 12
+        with st.spinner("Cargando las mismas velas que el worker..."):
+            st.session_state["_view"] = views.preview_signal(symbol)
+    view = st.session_state.get("_view")
+    if view is not None and view.get("symbol") != symbol:
+        view = None
 
-        with st.spinner("Descargando datos..."):
-            yf_days = asset_cfg.get("days_history", 730)
-            if asset_cfg["source"] == "binance":
-                crypto_days = asset_cfg.get("days_history", DAYS_HISTORY)
-                data = fetch_multi_timeframe(symbol, ["4h", "1d"], days=crypto_days)
-                # Fase 0: solo velas CERRADAS, igual que el worker y el validador.
-                _df4h    = drop_unclosed_bars(data.get("4h",  pd.DataFrame()), "4h")
-                df_daily = drop_unclosed_bars(data.get("1d",  pd.DataFrame()), "1d")
-                funding  = fetch_funding_rates(symbol, days=90)
-            else:
-                df_daily = drop_unclosed_bars(fetch_yfinance_asset(symbol, days=yf_days), "1d", session=True)
-                _df4h    = df_daily.copy() if not df_daily.empty else pd.DataFrame()
-                if not _df4h.empty:
-                    _df4h.attrs = dict(df_daily.attrs)
-                funding  = pd.Series(dtype=float)
-
-            # Macro cubre el mismo período que los precios (sin cap)
-            macro_df = fetch_macro(days=yf_days)
-
-        if _df4h.empty:
-            st.error("No se pudieron obtener datos. Revisa tu conexión o las credenciales.")
-        else:
-            with st.spinner("Detectando setups técnicos..."):
-                _dfsetups = detect_all_setups(_df4h, df_daily, symbol=symbol)
-
-            with st.spinner("Preparando modelo ML..."):
-                model, feat_cols, medians, _ = load_model(symbol)
-                if model is None:
-                    st.info("Entrenando modelo por primera vez (puede tardar 1-2 min)...")
-                    _fwd_bars = asset_cfg.get("forward_bars", 12)
-                    dataset = build_training_dataset(
-                        _dfsetups, _df4h,
-                        forward_bars=_fwd_bars,
-                        macro_df=macro_df,
-                    )
-                    if not dataset.empty and len(dataset) >= ML_PARAMS["min_train_samples"]:
-                        model, feat_cols, wf = train_model(dataset, symbol=symbol)
-                        if wf:
-                            st.success(
-                                f"Modelo entrenado | AUC WF: {wf.get('auc',0):.3f} | "
-                                f"Precision: {wf.get('precision',0):.3f}"
-                            )
-                    else:
-                        st.warning(
-                            f"Pocos setups históricos ({len(dataset) if not dataset.empty else 0}). "
-                            "El modelo usará el score técnico como proxy."
-                        )
-
-            with st.spinner("Evaluando setups con ML..."):
-                if not _dfsetups.empty:
-                    _dfsetups = score_setups(_dfsetups, _df4h, symbol, macro_df, funding)
-
-            # Fase 0: misma selección que el worker (main.cmd_signal): ventana
-            # anclada a la última vela cerrada, frescura y sin setups ya emitidos.
-            best = None
-            _lookback = MAX_SETUP_AGE_BARS + 1
-            _meta = {}
-            if not _dfsetups.empty and "ml_score" in _dfsetups.columns:
-                from data.outcome_tracker import emitted_setup_keys
-                _dfsetups["ml_approved"] = _dfsetups["ml_score"] >= ml_threshold
-                _min_ts = _df4h.index[max(0, len(_df4h) - 1 - MAX_SETUP_AGE_BARS)]
-                best = get_best_setup(
-                    _dfsetups,
-                    current_price=float(_df4h["close"].iloc[-1]),
-                    max_dist_atr=asset_cfg.get("max_entry_dist_atr", MAX_ENTRY_DIST_ATR),
-                    min_setup_ts=_min_ts, max_setup_ts=_df4h.index[-1],
-                    exclude_keys=emitted_setup_keys(symbol, _min_ts),
-                )
-                if best is not None:
-                    _meta = {"setup_ts": pd.Timestamp(best["ts"]),
-                             "data_source": _df4h.attrs.get("source", asset_cfg["source"]),
-                             "last_bar_ts": _df4h.index[-1]}
-
-            if best is not None:
-                _trade = build_trade_setup(best, capital, float(best["ml_score"]),
-                                           risk_per_trade=risk_pct)
-
-        # Persistir en session_state para que los botones secundarios no borren la señal
-        st.session_state["_sig_trade"]    = _trade
-        st.session_state["_sig_sentiment"] = _sent
-        st.session_state["_sig_df4h"]     = _df4h
-        st.session_state["_sig_dfsetups"] = _dfsetups
-        st.session_state["_sig_lookback"] = _lookback
-        st.session_state["_sig_meta"]     = _meta if not _df4h.empty else {}
-        st.session_state["_sig_price"]    = (float(_df4h["close"].iloc[-1])
-                                             if not _df4h.empty else None)
-
-    # =========================================================================
-    # DISPLAY — siempre lee de session_state (persiste cuando se pulsan botones)
-    # =========================================================================
-    _trade    = st.session_state.get("_sig_trade")
-    _sent     = st.session_state.get("_sig_sentiment")
-    _df4h     = st.session_state.get("_sig_df4h",    pd.DataFrame())
-    _dfsetups = st.session_state.get("_sig_dfsetups", pd.DataFrame())
-    _lookback = st.session_state.get("_sig_lookback", 12)
-
-    if "_sig_trade" not in st.session_state:
-        # Primera visita — análisis nunca ejecutado
-        st.info("Presiona **Generar señal** en el sidebar para ejecutar el análisis.")
-        hist_df = load_signals(symbol=symbol, limit=1)
-        if not hist_df.empty:
-            st.markdown("**Última señal guardada:**")
-            last = hist_df.iloc[0]
-            _dir = last.get("direction", "")
-            if _dir == "long":
-                st.success(f"LONG | Score: {last.get('ml_score',0):.2f} | "
-                           f"Entry: ${fmt_price(last.get('entry_price',0))} | "
-                           f"SL: ${fmt_price(last.get('stop_loss',0))} | "
-                           f"TP: ${fmt_price(last.get('take_profit',0))}")
-            elif _dir == "short":
-                st.error(f"SHORT | Score: {last.get('ml_score',0):.2f} | "
-                         f"Entry: ${fmt_price(last.get('entry_price',0))} | "
-                         f"SL: ${fmt_price(last.get('stop_loss',0))} | "
-                         f"TP: ${fmt_price(last.get('take_profit',0))}")
+    if view is None:
+        st.info("Pulsa **Ver lo que ve el worker** en la barra lateral.")
     else:
-        # Análisis ya ejecutado — mostrar resultado (y los botones de acción)
-        col_signal, col_risk = st.columns([3, 2])
+        trade = view["trade"]
+        if trade is not None:
+            css = "signal-long" if trade.direction == "long" else "signal-short"
+            icon = "🟢 LONG" if trade.direction == "long" else "🔴 SHORT"
+            st.markdown(
+                f'<div class="{css}"><h3>{icon} — {asset_cfg["label"]} (vista, no es una señal)</h3>'
+                f'<p>Setup <b>{trade.setup_type}</b> de la vela {view["setup_ts"]} | '
+                f'score {trade.ml_score:.2f} (umbral {view["threshold"]:.2f})</p></div>',
+                unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="signal-none"><h3>⚪ Sin señal nueva</h3></div>',
+                        unsafe_allow_html=True)
+        st.write(view["message"])
+        for line in view.get("portfolio_lines") or []:
+            st.warning(f"Control de cartera: {line}")
 
-        with col_signal:
-            if _trade is not None:
-                if _trade.direction == "long":
-                    st.markdown(f"""
-                    <div class="signal-long">
-                    <h2>🟢 LONG — {asset_cfg['label']}</h2>
-                    <p>Setup: <b>{_trade.setup_type.upper()}</b> |
-                       Timeframe: 4H |
-                       Score del setup: <b>{_trade.ml_score:.2f}</b> (umbral {ml_threshold:.2f})</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                    <div class="signal-short">
-                    <h2>🔴 SHORT — {asset_cfg['label']}</h2>
-                    <p>Setup: <b>{_trade.setup_type.upper()}</b> |
-                       Timeframe: 4H |
-                       Score del setup: <b>{_trade.ml_score:.2f}</b> (umbral {ml_threshold:.2f})</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                window_label = f"{_lookback} horas" if _lookback < 48 else f"{_lookback // 24} días"
-                st.markdown(f"""
-                <div class="signal-none">
-                <h2>⚪ SIN SEÑAL</h2>
-                <p>No hay setups de alta probabilidad en las últimas {window_label}.</p>
-                </div>
-                """, unsafe_allow_html=True)
+        st.caption(
+            f"Fuente {view['data_source'] or '—'} · {view['history_bars']} velas {view['timeframe']} "
+            f"cerradas (historia del vivo) · última vela {view['last_bar_ts']} · "
+            f"precio {fmt_price(view['current_price']) if view['current_price'] else '—'} · "
+            f"{'modo sombra' if view['mode'] == 'shadow' else 'activo live'}")
 
-            if _trade is not None:
-                st.markdown("---")
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Entrada",      f"${fmt_price(_trade.entry_price)}")
-                c2.metric("Stop Loss",    f"${fmt_price(_trade.stop_loss)}",
-                          delta=f"-{_trade.stop_distance_pct*100:.1f}%",
-                          delta_color="inverse")
-                c3.metric("Take Profit",  f"${fmt_price(_trade.take_profit)}",
-                          delta=f"+{_trade.target_distance_pct*100:.1f}%")
-                c4.metric("R:R",          f"{_trade.rr_ratio:.1f}:1")
+        if trade is not None:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Entrada", f"${fmt_price(trade.entry_price)}")
+            c2.metric("Stop Loss", f"${fmt_price(trade.stop_loss)}",
+                      delta=f"-{trade.stop_distance_pct*100:.2f}%", delta_color="inverse")
+            c3.metric("Take Profit", f"${fmt_price(trade.take_profit)}",
+                      delta=f"+{trade.target_distance_pct*100:.2f}%")
+            c4.metric("R:R", f"{trade.rr_ratio:.2f}:1")
+            c5, c6, c7, c8 = st.columns(4)
+            c5.metric("Nominal USD", f"${trade.position_size:,.0f}")
+            c6.metric("Riesgo USD", f"${trade.risk_usd:,.2f}")
+            c7.metric("Beneficio USD en TP", f"${trade.reward_usd:,.2f}")
+            c8.metric("ATR (14)", f"{trade.atr_pct*100:.2f}%")
 
-                c5, c6, c7, c8 = st.columns(4)
-                c5.metric("Tamaño USD",    f"${_trade.position_size:,.0f}")
-                c6.metric("Riesgo USD",    f"${_trade.risk_usd:,.2f}")
-                c7.metric("Reward USD",    f"${_trade.reward_usd:,.0f}")
-                c8.metric("ATR (14)",      f"{_trade.atr_pct*100:.2f}%")
+        w = view.get("window")
+        if w is not None and not w.empty:
+            st.subheader("Setups de la ventana del worker")
+            st.dataframe(w, width="stretch", hide_index=True)
 
-                col_btns = st.columns(2)
-                with col_btns[0]:
-                    if st.button("💾 Registrar señal en DB", type="secondary"):
-                        sig_id = save_signal_from_trade(
-                            _trade, _sent, **st.session_state.get("_sig_meta", {}))
-                        if sig_id > 0:
-                            st.success(f"Señal guardada (ID #{sig_id}). El resultado se resolverá automáticamente.")
-                        else:
-                            st.error("No se guardó: el setup ya estaba registrado o hubo un error.")
-                with col_btns[1]:
-                    if not notify_enabled(symbol):
-                        st.caption("Activo en modo sombra: no se envía a Telegram.")
-                    elif tg_notify:
-                        if st.button("📲 Enviar a Telegram", type="secondary"):
-                            _m = st.session_state.get("_sig_meta", {})
-                            ok = send_signal_alert(
-                                _trade, None, setup_ts=_m.get("setup_ts"),
-                                current_price=st.session_state.get("_sig_price"),
-                                threshold=ml_threshold, capital=capital)
-                            if ok:
-                                st.success("Notificación enviada a Telegram.")
-                            else:
-                                st.error("No se pudo enviar. Verifica TOKEN y CHAT_ID en .env")
-
-        with col_risk:
-            st.subheader("Gestión de Riesgo")
-            st.info(
-                f"**Capital:** ${capital:,.0f}\n\n"
-                f"**Riesgo/trade:** {risk_pct*100:.2f} %\n\n"
-                f"**Apalancamiento máx.:** {RISK.get('max_leverage', 1.0):g}× "
-                f"(nominal ≤ ${capital * RISK.get('max_leverage', 1.0):,.0f})\n\n"
-                f"**Max posiciones:** {RISK['max_positions']}\n\n"
-                f"**Stop:** {RISK['atr_stop_mult']}× ATR\n\n"
-                f"**Target:** {RISK['atr_target_mult']}× ATR"
-            )
-
-        st.markdown("---")
-        if not _df4h.empty and len(_df4h) > 50:
-            st.subheader(f"📈 {asset_cfg['label']} — Últimas 120 barras 4H")
-            last_n = _df4h.iloc[-120:].copy()
-            last_n["ema_21"] = last_n["close"].ewm(span=21).mean()
-            last_n["ema_55"] = last_n["close"].ewm(span=55).mean()
-
-            fig = make_subplots(
-                rows=2, cols=1,
-                shared_xaxes=True,
-                vertical_spacing=0.05,
-                row_heights=[0.75, 0.25],
-            )
+        chart = view.get("chart")
+        if chart is not None and len(chart) > 10:
+            tf = view["timeframe"]
+            st.subheader(f"Últimas {len(chart)} velas {tf} cerradas")
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+                                row_heights=[0.75, 0.25])
             fig.add_trace(go.Candlestick(
-                x=last_n.index,
-                open=last_n["open"], high=last_n["high"],
-                low=last_n["low"],   close=last_n["close"],
-                name="OHLC",
-                increasing_line_color="#26a69a",
-                decreasing_line_color="#ef5350",
-            ), row=1, col=1)
-            fig.add_trace(go.Scatter(
-                x=last_n.index, y=last_n["ema_21"],
-                name="EMA 21", line=dict(color="orange", width=1.5)
-            ), row=1, col=1)
-            fig.add_trace(go.Scatter(
-                x=last_n.index, y=last_n["ema_55"],
-                name="EMA 55", line=dict(color="royalblue", width=1.5, dash="dash")
-            ), row=1, col=1)
-
-            if not _dfsetups.empty:
-                recent_setups = _dfsetups[_dfsetups["ts"] >= last_n.index[0]]
-                longs  = recent_setups[recent_setups["direction"] == "long"]
-                shorts = recent_setups[recent_setups["direction"] == "short"]
-                if not longs.empty:
-                    fig.add_trace(go.Scatter(
-                        x=longs["ts"], y=longs["close"] * 0.998,
-                        mode="markers",
-                        marker=dict(symbol="triangle-up", size=10, color="lime"),
-                        name="Setup LONG",
-                    ), row=1, col=1)
-                if not shorts.empty:
-                    fig.add_trace(go.Scatter(
-                        x=shorts["ts"], y=shorts["close"] * 1.002,
-                        mode="markers",
-                        marker=dict(symbol="triangle-down", size=10, color="red"),
-                        name="Setup SHORT",
-                    ), row=1, col=1)
-
-            if _trade is not None:
-                fig.add_hline(
-                    y=_trade.entry_price, line_color="white",
-                    line_dash="dash", line_width=1,
-                    annotation_text="Entry", row=1, col=1
-                )
-                fig.add_hline(
-                    y=_trade.stop_loss, line_color="red",
-                    line_dash="dot", line_width=1.5,
-                    annotation_text="Stop Loss", row=1, col=1
-                )
-                fig.add_hline(
-                    y=_trade.take_profit, line_color="lime",
-                    line_dash="dot", line_width=1.5,
-                    annotation_text="Take Profit", row=1, col=1
-                )
-
-            colors = ["#26a69a" if last_n["close"].iloc[i] >= last_n["open"].iloc[i]
-                      else "#ef5350" for i in range(len(last_n))]
-            fig.add_trace(go.Bar(
-                x=last_n.index, y=last_n["volume"],
-                name="Volumen", marker_color=colors, opacity=0.6,
-            ), row=2, col=1)
-
-            fig.update_layout(
-                template="plotly_dark",
-                xaxis_rangeslider_visible=False,
-                height=550,
-                margin=dict(l=0, r=0, t=10, b=0),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            )
+                x=chart.index, open=chart["open"], high=chart["high"], low=chart["low"],
+                close=chart["close"], name="OHLC",
+                increasing_line_color="#26a69a", decreasing_line_color="#ef5350"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=chart.index, y=chart["close"].ewm(span=21).mean(),
+                                     name="EMA 21", line=dict(color="orange", width=1.5)),
+                          row=1, col=1)
+            cs = view.get("chart_setups")
+            if cs is not None and not cs.empty:
+                for d, sym_, col, k in (("long", "triangle-up", "lime", 0.998),
+                                        ("short", "triangle-down", "red", 1.002)):
+                    sub = cs[cs["direction"] == d]
+                    if not sub.empty:
+                        fig.add_trace(go.Scatter(x=sub["ts"], y=sub["close"] * k, mode="markers",
+                                                 marker=dict(symbol=sym_, size=10, color=col),
+                                                 name=f"Setup {d.upper()}"), row=1, col=1)
+            if trade is not None:
+                for y, colr, lab in ((trade.entry_price, "white", "Entrada"),
+                                     (trade.stop_loss, "red", "SL"),
+                                     (trade.take_profit, "lime", "TP")):
+                    fig.add_hline(y=y, line_color=colr, line_dash="dot", line_width=1.2,
+                                  annotation_text=lab, row=1, col=1)
+            fig.add_trace(go.Bar(x=chart.index, y=chart["volume"], name="Volumen",
+                                 marker_color="#888", opacity=0.6), row=2, col=1)
+            fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=520,
+                              margin=dict(l=0, r=0, t=10, b=0),
+                              legend=dict(orientation="h", yanchor="bottom", y=1.02))
             st.plotly_chart(fig, width="stretch")
 
-        if not _dfsetups.empty:
-            with st.expander(f"🔍 Todos los setups detectados ({len(_dfsetups)})"):
-                show = _dfsetups[["ts","setup_type","direction","raw_score",
-                                   "ml_score","close","atr","rr_ratio"]].tail(30)
-                st.dataframe(show.sort_values("ts", ascending=False), use_container_width=True)
-
+# =============================================================================
+# 2) VIGILANCIA (SPRT / CUSUM)
+# =============================================================================
+with tab_vig:
+    st.header("Vigilancia (reglas escritas de antemano)")
+    vig = _safe(views.vigilance)
+    if vig is not None:
+        st.metric("Configuración congelada", vig["frozen"],
+                  help="Señales live resueltas que cuentan para el SPRT; la congelación acaba "
+                       "cuando el SPRT decide o al llegar a 150.")
+        st.dataframe(vig["rows"], width="stretch", hide_index=True)
+        st.markdown(vig["text"])
 
 # =============================================================================
-# TAB 2: MODELO ML
+# 3) CARTERA Y EJECUCIONES
 # =============================================================================
-with tab_model:
-    st.header("Análisis del Modelo ML")
+with tab_port:
+    st.header("Cartera según el sistema")
+    pv = _safe(views.portfolio_view)
+    if pv is not None:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Posiciones abiertas", len(pv["positions"]))
+        c2.metric("Riesgo abierto", f"{pv['risk_pct']:.2f} % del capital")
+        c3.metric("Pérdida realizada hoy (UTC)", f"{pv['day_loss_pct']:.2f} %")
+        if not pv["positions"].empty:
+            st.dataframe(pv["positions"], width="stretch", hide_index=True)
+        st.markdown(pv["text"])
 
-    model_loaded, feat_cols, medians, _ = load_model(symbol)
-    if model_loaded is None:
-        st.info("Aún no hay modelo entrenado para este activo. Genera una señal primero.")
-    else:
-        # Feature importance
-        imp = get_model_importance(symbol, top_n=20)
-        if not imp.empty:
-            st.subheader("Top 20 Features (Importancia)")
-            fig_imp = px.bar(
-                x=imp.values, y=imp.index,
-                orientation="h",
-                labels={"x": "Importancia", "y": "Feature"},
-                template="plotly_dark",
-                color=imp.values,
-                color_continuous_scale="Blues",
-            )
-            fig_imp.update_layout(height=500, showlegend=False)
-            st.plotly_chart(fig_imp, width="stretch")
-
-        st.subheader("Parámetros del Modelo")
-        params_data = {
-            "Estimadores":    ML_PARAMS["n_estimators"],
-            "Learning Rate":  ML_PARAMS["learning_rate"],
-            "Max Leaves":     ML_PARAMS["num_leaves"],
-            "Max Depth":      ML_PARAMS["max_depth"],
-            "Min Samples":    ML_PARAMS["min_child_samples"],
-            "Subsample":      ML_PARAMS["subsample"],
-            "Umbral señal":   ML_PARAMS["prob_threshold"],
-        }
-        st.dataframe(
-            pd.DataFrame(list(params_data.items()), columns=["Parámetro", "Valor"]),
-            use_container_width=True, hide_index=True,
-        )
-
-        st.subheader("Guía de Interpretación")
-        st.markdown("""
-        | ML Score | Interpretación | Acción |
-        |----------|---------------|--------|
-        | > 0.70   | Setup de muy alta calidad | Operar con tamaño completo |
-        | 0.58–0.70 | Setup sólido | Operar con tamaño normal |
-        | 0.50–0.58 | Setup marginal | Reducir tamaño o esperar |
-        | < 0.50   | Setup débil | No operar |
-        """)
-
+    st.header("Tus ejecuciones (/fill y /skip)")
+    ex = _safe(views.executions)
+    if ex is not None:
+        s = ex["summary"]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Ejecutadas (/fill)", s["n_fill"])
+        c2.metric("No ejecutadas (/skip)", s["n_skip"])
+        c3.metric("R ejecutado − R teórico (media)",
+                  f"{s['mean_diff_r']:+.3f}R" if s.get("mean_diff_r") is not None else "—",
+                  help=f"Sobre {s['n_resolved']} señal(es) con /fill ya resueltas. Diferencia "
+                       "por la entrada: el sistema no conoce tu precio de salida.")
+        if ex["table"].empty:
+            st.caption("Sin registros. Responde a cada señal en Telegram con /fill ID PRECIO "
+                       "o /skip ID motivo.")
+        else:
+            st.dataframe(ex["table"], width="stretch", hide_index=True)
 
 # =============================================================================
-# TAB 3: HISTORIAL
+# 4) REGISTRO SOMBRA
+# =============================================================================
+with tab_shadow:
+    st.header("Registro sombra")
+    st.caption("Todos los setups que vio el worker en su ventana, emitidos o no, con el motivo. "
+               "Sirve para medir también lo que NO se emitió. R sin costes del bróker.")
+    sh = _safe(views.shadow_summary)
+    if sh is not None:
+        if sh["total"] == 0:
+            st.info("El registro sombra está vacío.")
+        else:
+            st.caption(f"{sh['total']} setups registrados; {sh['resolved']} resueltos.")
+            st.subheader("Setups por motivo y activo")
+            st.dataframe(sh["counts"], width="stretch")
+            if not sh["results"].empty:
+                st.subheader("Resultados de los resueltos, por motivo")
+                st.dataframe(sh["results"], width="stretch")
+
+# =============================================================================
+# 5) HISTORIAL (solo lectura)
 # =============================================================================
 with tab_history:
-    st.header("Historial de Señales")
+    st.header("Historial de señales")
+    st.caption("El worker resuelve las señales abiertas en cada ciclo (cada hora) con velas "
+               "cerradas, con la misma regla que la validación. Tu ejecución real se registra "
+               "con /fill y /skip en Telegram.")
 
-    col_refresh, col_resolve = st.columns([1, 1])
-    with col_refresh:
-        if st.button("🔄 Resolver señales pendientes ahora"):
-            with st.spinner("Consultando precios y resolviendo..."):
-                n = resolve_open_signals()
-            st.success(f"{n} señal(es) resuelta(s).") if n else st.info("No hay señales pendientes por resolver.")
-
-    # Estadísticas en R (Fase 1, 1.3 / 1.9): solo señales LIVE (las que recibes
-    # por Telegram) sin marca de calidad, sin límite de filas.
+    # Estadísticas en R (Fase 1, 1.3 / 1.9): solo señales LIVE sin marca de calidad.
     _all_assets = st.checkbox("Estadísticas de todos los activos", value=False)
-    stats = get_outcome_stats(symbol=None if _all_assets else symbol)
+    stats = _safe(get_outcome_stats, symbol=None if _all_assets else symbol)
     _ambito = "todos los activos" if _all_assets else asset_cfg["label"]
     if not stats:
         st.info(f"Sin señales live registradas ({_ambito}).")
@@ -550,45 +311,8 @@ with tab_history:
             st.caption("El intervalo incluye el 0: con tan pocas operaciones todavía no se puede "
                        "distinguir un sistema ganador de uno que no gana.")
 
-    hist_df = load_signals(symbol=symbol, limit=200)
-    if hist_df.empty:
-        st.info("No hay señales guardadas para este activo aún. Genera una señal y pulsa 'Registrar señal en DB'.")
+    hist_df = _safe(views.last_signals, symbol=symbol, limit=200)
+    if hist_df is None or hist_df.empty:
+        st.info("No hay señales guardadas para este activo aún (las guarda el worker).")
     else:
-        st.dataframe(
-            hist_df.sort_values("ts", ascending=False),
-            use_container_width=True,
-        )
-
-        # Cerrar a mano una señal abierta (resolved_by='manual'; el tracker escribe 'auto').
-        st.subheader("Cerrar una señal a mano")
-        pend = hist_df[hist_df["resultado_real"].isna()]
-        if not pend.empty:
-            sel_id  = st.selectbox("ID de señal abierta", pend["id"].tolist())
-            row     = pend[pend["id"] == sel_id].iloc[0]
-            _labels = {"win": "Ganada (TP)", "loss": "Perdida (SL)",
-                       "be": "Break-even", "expired": "Cerrada por tiempo"}
-            outcome = st.radio("Resultado", list(MANUAL_OUTCOMES),
-                               format_func=lambda k: _labels.get(k, k), horizontal=True)
-            # Precio sugerido según el resultado (TP, SL o entrada); edítalo si
-            # cerraste a otro precio. Con él se calcula el R.
-            _default = {"win": row["take_profit"], "loss": row["stop_loss"]}.get(
-                outcome, row["entry_price"])
-            exit_px = st.number_input("Precio de salida", min_value=0.0,
-                                      value=float(_default), format="%.5f",
-                                      key=f"exit_{sel_id}_{outcome}")
-            if st.button("Guardar resultado"):
-                try:
-                    res = resolve_signal_manually(int(sel_id), outcome,
-                                                  exit_price=exit_px if exit_px > 0 else None)
-                except ValueError as exc:
-                    st.error(str(exc))
-                else:
-                    if res["updated"]:
-                        _r = res.get("pnl_r")
-                        st.success("Resultado guardado" +
-                                   (f": {_r:+.2f}R." if _r is not None else " (sin R: falta el precio)."))
-                        st.rerun()
-                    else:
-                        st.warning(f"No se guardó: {res.get('motivo')}.")
-        else:
-            st.caption("Todas las señales tienen resultado registrado.")
+        st.dataframe(hist_df, width="stretch", hide_index=True)

@@ -233,11 +233,13 @@ def test_resultado_en_usd_sigue_siendo_tamano_por_porcentaje():
 
 
 def test_dashboard_usa_el_riesgo_de_la_configuracion():
+    # Fase 4 (grupo B): sin slider de riesgo. La vista del dashboard llama a
+    # build_trade_setup sin riesgo propio → RISK["risk_per_trade"] (0,25 %), como el worker.
     src = (ROOT / "dashboard" / "app.py").read_text(encoding="utf-8")
-    block = src[src.index('"Riesgo por trade (%)"') - 300: src.index('"Riesgo por trade (%)"') + 300]
-    assert "RULES_MAX_RISK_PCT" in block and 'RISK["risk_per_trade"]' in block
+    assert '"Riesgo por trade (%)"' not in src
     assert "0.5, 3.0" not in src                     # el rango antiguo no admitía el 0,25 %
-    assert "risk_per_trade=risk_pct" in src           # el slider cambia el tamaño de verdad
+    views = (ROOT / "dashboard" / "views.py").read_text(encoding="utf-8")
+    assert "risk_per_trade=" not in views and "views.risk_line" in src
 
 
 def test_resumen_nocturno_muestra_el_riesgo_por_operacion(monkeypatch):

@@ -693,3 +693,45 @@ BACKTEST = {
     "slippage":         0.0002,         # 0.02% slippage estimado
     "initial_capital":  10_000,
 }
+
+# =============================================================================
+# COSTES POR BRÓKER Y PUERTA DE VALIDACIÓN (Fase 2, punto 2.1)
+# -----------------------------------------------------------------------------
+# Solo los usa el comando OFFLINE `python main.py validate --protocol`
+# (backtest/costs.py y backtest/protocol.py). El ciclo vivo NO los lee: no
+# cambian qué señales se emiten ni cuándo.
+#
+# Por activo, en la cuenta XM Standard del usuario:
+#   spread:        en UNIDADES DE PRECIO (USD por BTC/ETH/oz, puntos del índice).
+#                  Se cobra 1 spread por operación: medio a la entrada y medio a la
+#                  salida, sobre los precios medios del histórico (no cambia qué
+#                  vela toca el SL o el TP, igual que el slippage del validador).
+#   commission:    fracción del precio por lado (0 en XM Standard).
+#   swap_pct_year: swap anual sobre el nominal; None = DESCONOCIDO → el informe da
+#                  siempre los escenarios de SWAP_SCENARIOS_PCT_YEAR. Siempre en
+#                  contra (largos y cortos), por noche de rollover.
+#   swap_nights:   "crypto"  → 7 noches por semana (todas las medianoches);
+#                  "session" → 5 noches con triple el miércoles (oro, SPX).
+#   origen:        de dónde sale cada cifra (los SUPUESTOS van marcados).
+# =============================================================================
+BROKER_COSTS = {
+    "xm": {
+        "BTCUSDT": {"spread": 5.0, "commission": 0.0, "swap_pct_year": None, "swap_nights": "crypto",
+                    "origen": "spread que reporta el usuario (3–5 USD en el precio de entrada; cota alta)"},
+        "ETHUSDT": {"spread": 5.0, "commission": 0.0, "swap_pct_year": None, "swap_nights": "crypto",
+                    "origen": "spread que reporta el usuario (3–5 USD en el precio de entrada; cota alta)"},
+        "XAUUSD":  {"spread": 0.45, "commission": 0.0, "swap_pct_year": None, "swap_nights": "session",
+                    "origen": "SUPUESTO del informe final (0,45 USD/oz); no verificado con XM"},
+        "SPX500":  {"spread": 1.0, "commission": 0.0, "swap_pct_year": None, "swap_nights": "session",
+                    "origen": "SUPUESTO del informe final (1 punto); no verificado con XM"},
+    },
+}
+# Swap desconocido: escenarios del 0 %, 5 % y 10 % anual sobre el nominal.
+SWAP_SCENARIOS_PCT_YEAR = (0.0, 0.05, 0.10)
+# Escenario con el que se decide (E[R] de decisión): XM con swap del 5 % anual.
+COST_DECISION_SCENARIO = "xm_swap5"
+
+# Reserva INTOCABLE (UTC, los 4 activos): ningún setup con fecha >= esta entra en
+# la selección, la CPCV, el PBO ni el DSR. Solo `validate --protocol --final` la
+# evalúa y cada acceso queda en backtest/trials_registry.jsonl.
+PROTOCOL_RESERVE_START = "2025-11-15"

@@ -8,6 +8,7 @@ Modos de uso:
   python main.py update                         # Actualizar todos los datos
   python main.py schedule                       # Modo daemon (señales cada hora)
   python main.py check-live                     # Regresión "vivo = validador"
+  python main.py validate --protocol            # Puerta de validación (Fase 2, offline)
   python main.py history-stats                  # Cobertura de la copia OHLCV (backfill_history.py)
 """
 import argparse
@@ -562,6 +563,21 @@ def cmd_validate(symbol: str = None):
     return results
 
 
+def cmd_validate_protocol(symbol: str = None, candidate: str = None, final: bool = False,
+                          okx: bool = False, out: str = None) -> int:
+    """
+    Puerta de validación de la Fase 2 (backtest/protocol.py). Comando OFFLINE:
+    nunca lo llama el worker. Devuelve el código de salida (0 informe completo,
+    1 detenido, 2 sin registro de pruebas → sin veredicto).
+    """
+    from backtest.protocol import run_protocol
+    if okx and not final:
+        logger.warning("--okx solo se usa con --final (el holdout OKX solo se mira en la evaluación final).")
+    code, _ = run_protocol(symbol, candidate_path=candidate, final=final, okx=okx, out=out)
+    sys.stdout.flush()
+    return code
+
+
 def cmd_check_live(symbol: str = None) -> bool:
     """Prueba de regresión 'vivo = validador' (ver backtest/live_emulation.py).
     Retorna True si todos los activos revisados coinciden."""
@@ -962,6 +978,8 @@ Ejemplos:
   python main.py telegram                           # test de conexión
   python main.py summary                            # resumen diario (vista previa)
   python main.py history-stats                      # cobertura de la tabla ohlcv
+  python main.py validate --protocol                # puerta de validación (línea base)
+  python main.py validate --protocol --candidate cand.json [--final [--okx]] [--out informe.json]
         """,
     )
     sub = p.add_subparsers(dest="command", required=True)
@@ -985,6 +1003,17 @@ Ejemplos:
     pv = sub.add_parser("validate", help="Validar expectativa de los setups tras costos")
     pv.add_argument("--symbol", default=None, choices=list(ASSETS.keys()),
                     help="Un activo; omitir para validar todos")
+    # Fase 2 (2.1): puerta de validación fija (backtest/protocol.py). Offline.
+    pv.add_argument("--protocol", action="store_true",
+                    help="Puerta de validación: costes por bróker, reserva intocable, registro de pruebas")
+    pv.add_argument("--candidate", default=None, metavar="RUTA.json",
+                    help="(--protocol) candidato a evaluar frente a la configuración actual")
+    pv.add_argument("--final", action="store_true",
+                    help="(--protocol) evaluar también la reserva y el holdout OKX (queda registrado)")
+    pv.add_argument("--okx", action="store_true",
+                    help="(--protocol --final) descargar OKX en memoria si la tabla ohlcv no lo tiene")
+    pv.add_argument("--out", default=None, metavar="RUTA.json",
+                    help="(--protocol) guardar además el informe en JSON")
 
     # check-live — regresión "vivo = validador"
     pcl = sub.add_parser("check-live", help="Comprobar que el vivo emite lo mismo que valida el validador")
@@ -1045,6 +1074,11 @@ def main():
         cmd_backtest(args.symbol, args.start, args.end, args.capital)
 
     elif args.command == "validate":
+        if args.protocol:
+            sys.exit(cmd_validate_protocol(args.symbol, args.candidate, args.final,
+                                           args.okx, args.out))
+        if args.candidate or args.final or args.okx or args.out:
+            parser.error("--candidate, --final, --okx y --out solo valen con --protocol")
         cmd_validate(args.symbol)
 
     elif args.command == "check-live":

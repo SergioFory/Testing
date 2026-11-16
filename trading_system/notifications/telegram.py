@@ -63,6 +63,59 @@ def _send(text: str, parse_mode: str = "HTML", retries: int = 3) -> bool:
     return False
 
 
+# Documentos (Fase 4, grupo D: copia de seguridad mensual).
+TELEGRAM_DOC_MAX_BYTES = 50 * 1024 * 1024   # límite de la Bot API para sendDocument
+DOCUMENT_DEADLINE_S = 10.0                  # límite de tiempo TOTAL del envío
+
+
+def send_document(path, caption: str = "", filename: str | None = None,
+                  deadline_s: float = DOCUMENT_DEADLINE_S) -> tuple[bool, str]:
+    """Envía un fichero al chat configurado (sendDocument). Devuelve (ok, detalle).
+
+    - Un solo intento (un reintento tras un corte podría duplicar el documento).
+    - Límite de tiempo TOTAL `deadline_s`: la petición va en un hilo daemon; si no
+      termina a tiempo se da por fallida y su resultado se descarta.
+    - Ficheros > 50 MB no se envían (límite de Telegram).
+    Nunca lanza."""
+    import os
+    import threading
+    try:
+        if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+            return False, "Telegram no configurado (TOKEN o CHAT_ID ausentes)"
+        size = os.path.getsize(path)
+        if size > TELEGRAM_DOC_MAX_BYTES:
+            return False, (f"el fichero ocupa {size / 1024 ** 2:.1f} MB y Telegram admite como máximo "
+                           f"{TELEGRAM_DOC_MAX_BYTES // 1024 ** 2} MB")
+        with open(path, "rb") as f:
+            data = f.read()
+        name = filename or os.path.basename(str(path))
+        url = _BASE_URL.format(token=TELEGRAM_TOKEN, method="sendDocument")
+        box: dict = {}
+
+        def _run():
+            try:
+                box["resp"] = requests.post(
+                    url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": (caption or "")[:1024]},
+                    files={"document": (name, data, "application/gzip")},
+                    timeout=(5, deadline_s))
+            except BaseException as exc:  # noqa: BLE001 — se informa en el hilo principal
+                box["exc"] = exc
+
+        th = threading.Thread(target=_run, name="tg-sendDocument", daemon=True)
+        th.start()
+        th.join(deadline_s)
+        if th.is_alive():
+            return False, f"Telegram no respondió en {deadline_s:g} s"
+        if "exc" in box:
+            return False, f"error de red: {type(box['exc']).__name__}"
+        resp = box["resp"]
+        if resp.status_code == 200:
+            return True, f"enviado ({size} bytes)"
+        return False, f"Telegram respondió {resp.status_code}: {resp.text[:150]}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def _e(value) -> str:
     """Escapa HTML de cualquier texto dinámico (Telegram rechaza el mensaje
     entero si aparece un '<' o '&' sin escapar)."""

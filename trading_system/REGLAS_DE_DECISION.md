@@ -593,3 +593,67 @@ dashboard ya no escribe en la base de datos ni envía nada:
   siguiente es el 25-26 de enero de 2028: **no se añade todavía** para que el aviso del resumen ("el
   calendario se acaba en < 60 días") siga saltando a tiempo por el CPI/empleo de 2028, que el BLS aún no
   ha publicado. **Pendiente: añadir el calendario de 2028 (Fed y BLS) antes de octubre de 2027.**
+
+## Copia de seguridad e histórico propio (Fase 4, 16-nov-2026; no cambia qué señales salen)
+
+**Qué guarda la copia.** Todas las tablas con valor que no se puede reconstruir: señales
+(`signals`), tus /fill y /skip (`fills`), `kv` (offset de Telegram, estado de datos, avisos
+pendientes…), registro sombra (`shadow_setups`), incidencias de datos (`data_quality`),
+`retrain_log` y cualquier otra tabla que haya (p. ej. `signals_backup_fase0`). **No** guarda la
+tabla `ohlcv` (velas): se reconstruye con `backfill_history.py --apply`. Formato: un JSON
+comprimido con gzip (`.json.gz`), sin la URL de la BD ni tokens. Con ~300 señales y 6.000 filas
+sombra ocupa ~0,6 MB.
+
+**Hacer una copia a mano** (Shell de Render o local, con `DATABASE_URL` apuntando a la BD):
+
+    python trading_system/main.py backup                         # backups/trading_backup_<fecha UTC>.json.gz
+    python trading_system/main.py backup --out copia.json.gz     # otro nombre
+    python trading_system/main.py backup --send                  # además te la envía por Telegram
+
+El disco del Shell de Render se borra en cada despliegue: guarda la copia fuera (por eso existe
+`--send` y la copia mensual).
+
+**Copia automática mensual.** El **día 1 de cada mes**, en la tarea nocturna (03:00 UTC), el
+worker te envía la copia por Telegram como documento (límite de Telegram: 50 MB; límite de
+tiempo total del envío: 10 s). Si falla, queda una línea en el log y en el resumen nocturno de
+esa noche ("💾 ⚠️ Copia de seguridad mensual NO enviada: motivo") y se reintenta las noches
+siguientes hasta el día 7. Nunca tumba la tarea nocturna ni el ciclo. Guarda el fichero que te
+llega fuera de Telegram si quieres conservarlo años.
+
+**Restaurar** (p. ej. si la BD de Render se perdió o se recreó):
+
+    python trading_system/main.py restore --file copia.json.gz            # VISTA PREVIA: no escribe nada
+    python trading_system/main.py restore --file copia.json.gz --apply    # inserta lo que falte
+
+- Solo **inserta filas que no existan**; nunca modifica ni borra. Conserva los id originales (los
+  /fill usan el id de la señal) y deja el contador de id por encima del mayor restaurado.
+- Si en la BD ya hay una fila con el mismo id y **otro** contenido (p. ej. la BD se recreó y el
+  worker ya guardó señales nuevas con esos id), es un **conflicto**: no se toca y el informe lo
+  dice (esas filas siguen en el fichero). Lo mismo con el offset de Telegram ya guardado.
+- Todo en una sola transacción: o entra todo lo nuevo o nada. Probado en SQLite; en PostgreSQL usa
+  la misma vía y ajusta además las secuencias de los id (no probado contra un servidor real).
+- Después de restaurar, reconstruye las velas: `python trading_system/backfill_history.py --apply`.
+
+**Histórico propio de velas (backfill).** Gate.io solo sirve las últimas ~10.000 velas 4H
+(~4,5 años) y esa ventana avanza cada día: el primer tramo fijo de la puerta (may-2022) se va
+perdiendo. `backfill_history.py --apply` guarda en la tabla `ohlcv` todo lo que sirve hoy Gate.io
+(y OKX para lo anterior, solo para el holdout de `--final`):
+
+- **Basta con ejecutarlo una vez.** Después, el worker añade las últimas 50 velas de cada activo
+  en cada ciclo (≈ 8 días de velas 4H), así que la copia se mantiene sola.
+- **Repítelo solo tras una caída del worker de más de ~8 días** (si el worker estuvo parado más
+  de 50 velas 4H, quedaría un hueco). Hazlo pronto: Gate.io solo sirve esas fechas mientras sigan
+  dentro de su ventana. `python trading_system/main.py history-stats` enseña la cobertura y los
+  huecos.
+
+**Uso en la validación.** `validate`, `check-live` y `validate --protocol` usan, en BTC y ETH,
+las velas 4H/1D de la tabla `ohlcv` con `source='gateio'` (cerradas y con precios coherentes)
+**anteriores** a la primera que sirve hoy Gate.io; lo que sirve Gate.io tiene siempre prioridad.
+El diario se amplía hacia atrás lo mismo que el 4H (no más). Si la copia no coincide con Gate.io
+en el empalme, no se usa (aviso en el log); si tiene huecos, se usa y se avisa. Cuando se usa, el
+informe lo dice en una línea: "Histórico propio (tabla ohlcv, source='gateio'): +N velas 4H desde
+…". **Si la BD no tiene velas más antiguas, todo da exactamente lo mismo que antes.** El ciclo
+vivo no cambia: sigue con los 300 días de 4H que pide a Gate.io (LIVE_HISTORY_DAYS).
+Medido con el arnés (16-nov-2026): simulando que Gate.io sirviera 240 días menos, sin la copia
+BTC pierde 13 de 64 aprobados y la puerta pasa de N=51 a N=38 operaciones (el tramo
+may-2022→2023 de 31 a 18); con la copia el resultado es idéntico al de hoy.

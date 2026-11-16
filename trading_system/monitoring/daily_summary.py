@@ -17,6 +17,8 @@ control de cartera y cuántas señales de las últimas 24 h / 30 días habría
 bloqueado (o bloqueó, en modo enforce) cada regla R1–R4.
 Fase 4 (grupo C; F21): bloque "Últimos 12 meses": nº de señales live resueltas y
 R medio (por activo), con una explicación en texto llano.
+Fase 4 (grupo D): una línea con el resultado de la copia de seguridad mensual la
+noche en que se intenta (data/backup.py).
 
 Solo lee la BD (consultas pequeñas, sin descargas). Cada bloque va en su propio
 try: si uno falla, el resto del resumen sale igual.
@@ -482,6 +484,15 @@ def build_daily_summary(now=None, symbols: list | None = None) -> str:
         out.append(risk_line())
     except Exception as exc:
         logger.warning(f"Resumen: línea de riesgo falló: {exc}")
+    # Fase 4 (grupo D): resultado de la copia de seguridad mensual, solo la noche en
+    # que se intentó (arriba, para que el recorte de 4.000 caracteres no la quite).
+    try:
+        from data.backup import summary_line
+        line = summary_line(now_unix)
+        if line:
+            out.append(line)
+    except Exception as exc:
+        logger.warning(f"Resumen: línea de la copia de seguridad falló: {exc}")
 
     with get_engine().connect() as conn:
         try:

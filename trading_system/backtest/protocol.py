@@ -1305,8 +1305,11 @@ def _default_live_check(symbol, df_4h, df_daily):
 
 
 def _default_load_data(symbol):
-    from main import _load_data
-    d4, d1, _ = _load_data(symbol)
+    # Fase 4 (grupo D): historia de Gate.io y, delante, la copia propia de la
+    # tabla ohlcv (source='gateio') para las velas que Gate.io ya no sirve; así el
+    # primer periodo fijo (may-2022) no se pierde cuando la ventana de Gate.io avanza.
+    from main import _load_validation_data
+    d4, d1, _ = _load_validation_data(symbol)
     return d4, d1
 
 
@@ -1403,6 +1406,10 @@ def run_protocol(symbol: str | None = None, candidate_path: str | None = None,
         if d4 is None or len(d4) == 0:
             echo(f"ERROR: sin datos para {sym}; el protocolo se detiene.")
             return 1, report
+        db_meta = (getattr(d4, "attrs", None) or {}).get("db_history")
+        if db_meta:   # Fase 4 (grupo D): velas de la copia propia delante de Gate.io
+            from data.db_history import describe
+            echo(f"[{sym}] {describe(db_meta)}")
         lv = live_check(sym, d4, d1)
         if not lv.get("match"):
             echo(f"\n[{sym}] PROTOCOLO DETENIDO: el vivo NO emite lo mismo que valida el validador con la "
@@ -1424,6 +1431,8 @@ def run_protocol(symbol: str | None = None, candidate_path: str | None = None,
             echo(f"ERROR: {exc}")
             return 1, report
         res["live_check"] = {"approved": lv.get("approved"), "emitted": lv.get("emitted")}
+        if db_meta:
+            res["db_history"] = dict(db_meta)
         if candidate:
             # Criterio a): vivo = validador también con la configuración del candidato.
             cv = res["candidate_variant"]

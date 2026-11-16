@@ -9,3 +9,5 @@ data/raw/
 data/cache/
 *.log
 .vscode/settings.json
+backups/
+trading_backup_*.json.gz

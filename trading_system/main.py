@@ -10,6 +10,8 @@ Modos de uso:
   python main.py check-live                     # Regresión "vivo = validador"
   python main.py validate --protocol            # Puerta de validación (Fase 2, offline)
   python main.py history-stats                  # Cobertura de la copia OHLCV (backfill_history.py)
+  python main.py backup [--out F] [--send]      # Copia de seguridad de la BD (gzip JSON, sin ohlcv)
+  python main.py restore --file F [--apply]     # Restaurar (vista previa; --apply inserta lo que falte)
 """
 import argparse
 import sys
@@ -205,6 +207,32 @@ def _load_data(symbol: str, closed_only: bool = True, history: str = "full"):
     _queue_ohlcv_copy(symbol, "1d", df_daily)
 
     return df_4h, df_daily, macro_df
+
+
+def _load_validation_data(symbol: str):
+    """Datos para validate, check-live y validate --protocol (Fase 4, grupo D).
+
+    Igual que _load_data (historia completa de Gate.io, velas cerradas) y, en
+    BTC/ETH, delante las velas 4H/1D de la copia propia (tabla ohlcv,
+    source='gateio') ANTERIORES a la primera que sirve hoy Gate.io
+    (data/db_history.py). Si la BD no tiene velas más antiguas, devuelve
+    exactamente lo mismo que _load_data. El ciclo vivo NO usa esto."""
+    df_4h, df_daily, macro_df = _load_data(symbol)
+    if df_4h is not None:
+        from data.db_history import extend_with_db_history
+        df_4h, df_daily, _info = extend_with_db_history(symbol, df_4h, df_daily)
+    return df_4h, df_daily, macro_df
+
+
+def _print_db_history(df_4h) -> None:
+    """Línea informativa si la validación usa velas de la copia propia."""
+    try:
+        from data.db_history import describe_frame
+        line = describe_frame(df_4h)
+        if line:
+            print(line)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -592,10 +620,11 @@ def cmd_validate(symbol: str = None):
     results = []
     for sym in symbols:
         try:
-            df_4h, df_daily, macro_df = _load_data(sym)
+            df_4h, df_daily, macro_df = _load_validation_data(sym)
             if df_4h is None:
                 logger.warning(f"[{sym}] Sin datos; se omite de la validación.")
                 continue
+            _print_db_history(df_4h)
             results.append(validate_symbol(sym, df_4h, df_daily))
             # Con un solo activo, además probar variantes de estrategia (dirección,
             # tipo, sesión, régimen) y estimadores de volatilidad para el stop.
@@ -638,11 +667,12 @@ def cmd_check_live(symbol: str = None) -> bool:
     symbols = [symbol] if symbol else active_assets()
     all_ok = True
     for sym in symbols:
-        df_4h, df_daily, _ = _load_data(sym)
+        df_4h, df_daily, _ = _load_validation_data(sym)
         if df_4h is None:
             logger.warning(f"[{sym}] Sin datos; se omite.")
             all_ok = False
             continue
+        _print_db_history(df_4h)
         res = compare_with_validator(sym, df_4h, df_daily)
         print_comparison(res)
         sys.stdout.flush()
@@ -1058,6 +1088,17 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
         except Exception as exc:
             logger.warning(f"Monitor de datos nocturno falló: {exc}")
 
+        # Copia de seguridad mensual (Fase 4, grupo D): el día 1 de cada mes (si
+        # falla, las noches siguientes hasta el día 7) se envía la BD por Telegram
+        # como documento gzip JSON (límite total 10 s). Va antes del resumen para
+        # que este diga si salió. Nunca lanza.
+        if notify:
+            try:
+                from data.backup import run_monthly_backup
+                run_monthly_backup(now=datetime.now(timezone.utc))
+            except Exception as exc:
+                logger.warning(f"Copia de seguridad mensual falló: {exc}")
+
         # Resumen diario por Telegram, construido desde la BD (Fase 1, punto 1.4;
         # antes PortfolioRiskManager, que no veía la BD y siempre decía "Sin
         # operaciones"). Nunca lanza.
@@ -1184,6 +1225,8 @@ Ejemplos:
   python main.py telegram                           # test de conexión
   python main.py summary                            # resumen diario (vista previa)
   python main.py history-stats                      # cobertura de la tabla ohlcv
+  python main.py backup [--out copia.json.gz] [--send]   # copia de seguridad de la BD
+  python main.py restore --file copia.json.gz [--apply]  # restaurar (vista previa por defecto)
   python main.py validate --protocol                # puerta de validación (línea base)
   python main.py validate --protocol --candidate cand.json [--final [--okx]] [--out informe.json]
         """,
@@ -1263,6 +1306,17 @@ Ejemplos:
     sub.add_parser("history-stats",
                    help="Cobertura de la tabla ohlcv por símbolo/timeframe/fuente (ver backfill_history.py)")
 
+    # backup / restore — copia de seguridad de la BD (Fase 4, grupo D; data/backup.py)
+    pbk = sub.add_parser("backup", help="Copia de seguridad de la BD (gzip JSON; sin la tabla ohlcv)")
+    pbk.add_argument("--out", default=None, metavar="FICHERO",
+                     help="Fichero de salida (por defecto backups/trading_backup_<fecha UTC>.json.gz)")
+    pbk.add_argument("--send", action="store_true",
+                     help="Enviarla además por Telegram como documento (máx. 50 MB)")
+    prs = sub.add_parser("restore", help="Restaurar una copia (vista previa; --apply para insertar)")
+    prs.add_argument("--file", required=True, metavar="FICHERO", help="Copia .json.gz creada con 'backup'")
+    prs.add_argument("--apply", action="store_true",
+                     help="Insertar las filas que no existan (sin esto solo se informa)")
+
     return p
 
 
@@ -1337,6 +1391,27 @@ def main():
     elif args.command == "history-stats":
         from backfill_history import format_history_stats
         print(format_history_stats())
+
+    elif args.command == "backup":
+        from data.backup import export_backup, format_export, backup_caption
+        info = export_backup(args.out)
+        print(format_export(info))
+        if args.send:
+            from notifications.telegram import send_document
+            name = Path(info["path"]).name
+            ok, detail = send_document(info["path"], backup_caption(info, name, monthly=False), filename=name)
+            print(f"Telegram: {'enviada' if ok else 'NO enviada'} ({detail}).")
+            if not ok:
+                sys.exit(1)
+
+    elif args.command == "restore":
+        from data.backup import restore_backup, format_restore, BackupError
+        try:
+            report = restore_backup(args.file, apply=args.apply)
+        except BackupError as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+        print(format_restore(report))
 
 
 if __name__ == "__main__":

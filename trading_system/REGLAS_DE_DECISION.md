@@ -225,3 +225,28 @@ a) OK (91 aprobados = 91 emitidos); b) falla: mediana CPCV −0,04R, periodos �
 (1 de 3); c) falla: PBO 0,86; d) falla: DSR 0,57; e) falla: reserva −0,15R (actual +0,42R con
 N=8, candidato +0,26R con N=14), OKX +0,20R (actual −0,18R N=19, candidato +0,02R N=25).
 Este candidato ya vio la reserva: si se vuelve a evaluar, su resultado ya no es independiente.
+
+## Monitor de datos (Fase 2, 16-nov-2026): qué avisa y propuesta PENDIENTE
+
+Desde la Fase 2 cada ciclo revisa las últimas 60 velas de cada activo (velas planas, duplicadas,
+con fecha de fin de semana, huecos, precio congelado, saltos absurdos y cambio de fuente) y cada
+noche compara BTC/ETH entre OKX y Gate.io y cuenta los setups de 30 días frente a lo normal.
+Lo grave llega por Telegram ("datos sospechosos", como mucho un aviso cada 6 h por activo); todo
+va al resumen nocturno en "Calidad de datos". **Hoy NO bloquea ninguna señal.**
+
+Qué hacer si llega un aviso de "datos sospechosos": antes de operar una señal de ese activo,
+compara la última vela con TradingView o con XM. Si no cuadra, no entres.
+
+**Propuesta pendiente de tu decisión (no implementada):** no emitir la señal de un activo si en
+ese mismo ciclo hay una incidencia GRAVE en sus 2 últimas velas (vela plana, duplicada o en fin de
+semana) o un salto absurdo en la última. Cuánto quitaría (medido sobre el histórico con el
+monitor): en cripto, las 8 velas planas por serie que dejaba el fallo de Gate.io (ya corregido);
+desde 2020, en oro 1 aviso (caída real del −10,8 % del 30-ene-2026) y en SPX 1 (−12 % del
+16-mar-2020): días de mercado de verdad, en los que bloquear sería discutible. Antes de 2020
+habría habido además 56 avisos de velas planas del oro (datos raros de Yahoo en 2006–2019) y 2
+saltos del SPX (octubre de 2008). Si la quieres,
+dilo y se implementa como cambio de configuración (cambia el vivo: necesita tu visto bueno).
+
+Límites conocidos: oro y SPX no tienen una segunda fuente gratuita fiable para contrastar; en
+oro y SPX la "deriva" solo puede avisar de demasiados setups (lo normal es 0 al mes); y si se
+cambia la estrategia o un umbral hay que recalcular `DRIFT_BASELINE` (si no, avisará en falso).

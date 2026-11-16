@@ -228,6 +228,30 @@ _DDL = [
         updated_ts BIGINT
     )
     """,
+
+    # Fase 2 (punto 2.3) — incidencias de calidad de datos que detecta cada ciclo
+    # (monitoring/data_monitor.py): velas planas, duplicadas, en fin de semana,
+    # huecos, precio congelado, saltos absurdos y cambios de fuente.
+    #   ts          hora (Unix) de la vela afectada.
+    #   check_name  código de la comprobación (flat, duplicate, weekend, gap,
+    #               frozen, jump, source, unsorted; ':1d' = diario de cripto).
+    #               No se llama "check" porque es palabra reservada en SQL.
+    #   grave       1 = de las que avisan al momento por Telegram.
+    # UNIQUE: la misma incidencia vista en varios ciclos es UNA fila. Solo se
+    # escribe cuando hay incidencias (casi nunca) y se purga a los 90 días.
+    """
+    CREATE TABLE IF NOT EXISTS data_quality (
+        id          SERIAL PRIMARY KEY,
+        symbol      TEXT   NOT NULL,
+        ts          BIGINT NOT NULL,
+        check_name  TEXT   NOT NULL,
+        detalle     TEXT,
+        grave       INTEGER,
+        created_ts  BIGINT NOT NULL,
+        UNIQUE(symbol, check_name, ts)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dq_created ON data_quality(created_ts)",
 ]
 
 # ---------------------------------------------------------------------------

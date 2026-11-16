@@ -10,6 +10,7 @@ operaciones cerradas hoy". Por activo operativo:
   - señales abiertas (con la hora límite de cierre por tiempo).
 Y en conjunto: resultados de las últimas 24 h en R, estado de la vigilancia
 SPRT/CUSUM (monitoring/sequential.py) y fills frente a lo teórico.
+Fase 2 (2.3): bloque "Calidad de datos" por activo (monitoring/data_monitor.py).
 
 Solo lee la BD (consultas pequeñas, sin descargas). Cada bloque va en su propio
 try: si uno falla, el resto del resumen sale igual.
@@ -324,6 +325,16 @@ def build_daily_summary(now=None, symbols: list | None = None) -> str:
             except Exception as exc:
                 logger.warning(f"Resumen: bloque de {sym} falló: {exc}")
                 out.append(f"<b>{_e(sym)}</b>: no disponible ({_e(type(exc).__name__)})")
+        # Calidad de datos (Fase 2, 2.3): incidencias de 24 h, contraste OKX vs
+        # Gate.io (lo calcula la tarea nocturna justo antes) y deriva del detector.
+        if symbols:
+            out.append("")
+            try:
+                from monitoring.data_monitor import quality_block
+                out.extend(quality_block(conn, symbols, now_unix))
+            except Exception as exc:
+                logger.warning(f"Resumen: bloque de calidad de datos falló: {exc}")
+                out.append(f"<b>Calidad de datos</b>: no disponible ({_e(type(exc).__name__)})")
         out.append("")
         try:
             out.extend(_results_block(conn, since))

@@ -118,6 +118,12 @@ def _pipeline(monkeypatch, setups, close_last=100.0, trade_factory=None, blackou
                       entry=float(row["close"]), sl=float(row["stop_loss"]), tp=float(row["take_profit"]))
     monkeypatch.setattr(ps, "build_trade_setup", _build)
     monkeypatch.setattr(cal, "is_event_blackout", lambda *a, **k: (blackout, "NFP" if blackout else ""))
+    # Fase 2: estas velas sintéticas (constantes, 4H con sábados también para el
+    # oro, fuente "test") disparan con razón el monitor de datos; aquí se prueba
+    # el registro sombra, así que se neutraliza (tiene sus pruebas en
+    # test_fase2_monitor.py, incluida la de que no cambia la señal).
+    import monitoring.data_monitor as dm
+    monkeypatch.setattr(dm, "run_cycle_checks", lambda *a, **k: [])
     return main, df
 
 

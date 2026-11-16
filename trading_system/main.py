@@ -302,6 +302,15 @@ def cmd_signal(symbol: str, notify: bool = False, ohlcv_cache: dict | None = Non
         if prev is None or prev.empty:
             ohlcv_cache[symbol] = df_4h
 
+    # Monitor de calidad de datos (Fase 2, 2.3): sobre las velas ya cargadas, sin
+    # descargas extra (< 50 ms). Solo registra y avisa; NO cambia ni bloquea la
+    # señal. Nunca lanza.
+    try:
+        from monitoring.data_monitor import run_cycle_checks
+        run_cycle_checks(symbol, df_4h, df_daily, notify=notify_asset)
+    except Exception as exc:
+        logger.warning(f"[{symbol}] Monitor de datos no disponible: {exc}")
+
     data_source = df_4h.attrs.get("source", source)
     last_bar_ts = df_4h.index[-1]
 
@@ -885,6 +894,15 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
                 # Liberar memoria entre activos: con 8 modelos en un solo Worker,
                 # acumular el dataset + folds de cada uno provoca el OOM en Render.
                 gc.collect()
+
+        # Monitor de datos nocturno (Fase 2, 2.3): contraste OKX vs Gate.io en
+        # cripto (una petición, timeout 10 s) y deriva del detector. Va antes del
+        # resumen para que este muestre el contraste de hoy. Nunca lanza.
+        try:
+            from monitoring.data_monitor import run_nightly_checks
+            run_nightly_checks(notify=notify)
+        except Exception as exc:
+            logger.warning(f"Monitor de datos nocturno falló: {exc}")
 
         # Resumen diario por Telegram, construido desde la BD (Fase 1, punto 1.4;
         # antes PortfolioRiskManager, que no veía la BD y siempre decía "Sin

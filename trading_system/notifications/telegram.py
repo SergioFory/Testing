@@ -478,6 +478,23 @@ def send_data_alert(symbol: str, motivo: str, since=None) -> bool:
     return _send(msg)
 
 
+def send_data_quality_alert(symbol: str, items: list) -> bool:
+    """Aviso de datos SOSPECHOSOS (Fase 2, monitoring/data_monitor.py): vela
+    plana, duplicada o en fin de semana en las últimas velas, salto absurdo,
+    fuentes que no coinciden o detector fuera de lo normal. NO bloquea señales:
+    solo pide revisar el gráfico antes de operar."""
+    cuerpo = "\n".join(f"• {html.escape(str(i))}" for i in list(items)[:5])
+    if len(items) > 5:
+        cuerpo += f"\n• … y {len(items) - 5} más"
+    msg = (
+        f"⚠️ <b>{html.escape(symbol)}: datos sospechosos</b>\n"
+        f"{cuerpo}\n"
+        "<i>Las señales NO se bloquean por esto. Antes de operar una señal de este "
+        "activo, compara el precio con TradingView o tu bróker.</i>"
+    )
+    return _send(msg)
+
+
 def send_data_recovered(symbol: str, since=None) -> bool:
     """Aviso de que la fuente de datos de un activo volvió a funcionar."""
     desde = f" (fallaba desde {since:%Y-%m-%d %H:%M} UTC)" if since else ""

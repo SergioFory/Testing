@@ -735,3 +735,33 @@ COST_DECISION_SCENARIO = "xm_swap5"
 # la selección, la CPCV, el PBO ni el DSR. Solo `validate --protocol --final` la
 # evalúa y cada acceso queda en backtest/trials_registry.jsonl.
 PROTOCOL_RESERVE_START = "2025-11-15"
+
+# =============================================================================
+# MONITOR DE DATOS — DERIVA DEL DETECTOR (Fase 2, punto 2.3)
+# =============================================================================
+# Línea base de cuántos setups detecta y aprueba cada activo en 30 días, para
+# comparar con lo que registra el vivo en shadow_setups (monitoring/data_monitor).
+# Solo la lee el monitor (nota en el resumen / aviso): NO cambia ninguna señal.
+#
+# Cómo se calculó (2026-11-16, arnés local, snapshot congelado al 2026-11-15:
+# Gate.io 4H 2022-05-10 → 2026-11-15; yfinance diario 2006-11-20 → 2026-11-13;
+# script scratchpad/fase2/C-monitor/drift_baseline.py): detect_all_setups +
+# score_setups con la configuración ACTUAL sobre todo el histórico; setups =
+# claves únicas (vela, dirección) con entrada/SL/TP válidos (lo mismo que guarda
+# shadow_setups); aprobados = raw_score >= umbral. Conteos en ventanas MÓVILES
+# de 30 días (paso 1 día, tras 90 días de calentamiento: 1.531 ventanas en
+# cripto, 7.179 en diarios); se guardan los percentiles p1, p5, p50, p95, p99.
+# Fuera de [p5, p95] → nota en el resumen; fuera de [p1, p99] → aviso.
+# OJO: en oro y SPX los setups son raros (mediana 0 por mes): la deriva solo
+# puede avisar de "demasiados", nunca de "ninguno". Si cambia la estrategia o el
+# umbral hay que recalcularla con el script (si no, avisará en falso).
+DRIFT_BASELINE: dict = {
+    "BTCUSDT": {"setups":   {"p1": 0.0, "p5": 1.0, "p50": 4.0, "p95": 10.0, "p99": 12.0},
+                "approved": {"p1": 0.0, "p5": 0.0, "p50": 1.0, "p95": 4.0,  "p99": 6.0}},
+    "ETHUSDT": {"setups":   {"p1": 0.0, "p5": 1.0, "p50": 4.0, "p95": 9.0,  "p99": 11.0},
+                "approved": {"p1": 0.0, "p5": 0.0, "p50": 1.0, "p95": 3.0,  "p99": 3.0}},
+    "XAUUSD":  {"setups":   {"p1": 0.0, "p5": 0.0, "p50": 0.0, "p95": 3.0,  "p99": 5.0},
+                "approved": {"p1": 0.0, "p5": 0.0, "p50": 0.0, "p95": 1.0,  "p99": 2.0}},
+    "SPX500":  {"setups":   {"p1": 0.0, "p5": 0.0, "p50": 0.0, "p95": 2.0,  "p99": 4.0},
+                "approved": {"p1": 0.0, "p5": 0.0, "p50": 0.0, "p95": 1.0,  "p99": 2.0}},
+}

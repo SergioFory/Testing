@@ -3,7 +3,8 @@ Outcome Tracker — registra señales y resuelve resultados automáticamente.
 
 Flujo:
   1. Cuando se genera una señal → save_signal_from_trade() la persiste en DB
-  2. Periódicamente (cada hora en el scheduler) → resolve_open_signals() revisa
+  2. Periódicamente (en cada ciclo del scheduler: cada hora en HH:01 UTC y a las
+     22:20 UTC, Fase 4) → resolve_open_signals() revisa
      cada señal abierta contra los precios actuales y marca win/loss/expired
   3. Los resultados resueltos alimentan el reentrenamiento del modelo ML
 """

@@ -6,7 +6,7 @@ Modos de uso:
   python main.py backtest --symbol BTCUSDT     # Backtest completo
   python main.py train    --symbol BTCUSDT     # Entrenar modelo
   python main.py update                         # Actualizar todos los datos
-  python main.py schedule                       # Modo daemon (señales cada hora)
+  python main.py schedule                       # Modo daemon (señales cada hora en HH:01 UTC + 22:20)
   python main.py check-live                     # Regresión "vivo = validador"
   python main.py validate --protocol            # Puerta de validación (Fase 2, offline)
   python main.py history-stats                  # Cobertura de la copia OHLCV (backfill_history.py)
@@ -809,31 +809,137 @@ def _nightly_retrain_symbols() -> list:
     return [s for s in active_assets() if ASSETS.get(s, {}).get("use_ml", True)]
 
 
+# ---------------------------------------------------------------------------
+# Ciclo alineado a hora fija UTC (Fase 4). Ver CYCLE_SCHEDULE en settings.
+# ---------------------------------------------------------------------------
+
+def _fmt_hhmm(minute_of_day: int) -> str:
+    m = int(minute_of_day) % 1440
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def extra_cycle_times() -> list:
+    """Ciclo(s) extra "HH:MM" UTC tras el cierre de la vela diaria de sesión
+    (DAILY_BAR_CLOSE_UTC + after_daily_close_min = 22:20): en invierno el oro se
+    evalúa esa misma noche (ver CYCLE_SCHEDULE)."""
+    from config.settings import CYCLE_SCHEDULE, DAILY_BAR_CLOSE_UTC
+    after = CYCLE_SCHEDULE.get("after_daily_close_min")
+    if after is None or int(after) < 0:
+        return []
+    h, m = DAILY_BAR_CLOSE_UTC
+    return [_fmt_hhmm(int(h) * 60 + int(m) + int(after))]
+
+
+def cycle_slot_times(interval_minutes: int = 60, minute: int | None = None,
+                     extra: list | None = None) -> list | None:
+    """Horas "HH:MM" (UTC, ordenadas y sin repetir) a las que corre el ciclo de
+    señales cada día: minuto `minute` (CYCLE_SCHEDULE, :01) + k·intervalo desde
+    las 00:00 UTC, más las horas `extra` (por defecto extra_cycle_times()).
+
+    None si el intervalo no divide el día (1.440 min): el llamador usa entonces
+    el modo antiguo (cada N minutos desde el arranque) más las horas extra."""
+    from config.settings import CYCLE_SCHEDULE
+    if minute is None:
+        minute = int(CYCLE_SCHEDULE.get("minute", 1))
+    if extra is None:
+        extra = extra_cycle_times()
+    interval = int(interval_minutes)
+    if interval <= 0 or 1440 % interval != 0:
+        return None
+    mins = {(int(minute) + k * interval) % 1440 for k in range(1440 // interval)}
+    for hhmm in extra:
+        hh, mm = str(hhmm).split(":")
+        mins.add((int(hh) * 60 + int(mm)) % 1440)
+    return [_fmt_hhmm(m) for m in sorted(mins)]
+
+
+def _last_slot_start(hhmm: str, now_utc: datetime) -> datetime:
+    """Última vez (≤ now_utc) que tocó la hora diaria `hhmm` UTC."""
+    hh, mm = (int(x) for x in hhmm.split(":"))
+    t = now_utc.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if t > now_utc:
+        t -= timedelta(days=1)
+    return t
+
+
+def _describe_slots(slots: list, interval_minutes: int, minute: int, extra: list) -> str:
+    """Texto del log de arranque con las horas del ciclo."""
+    if int(interval_minutes) == 60:
+        txt = f"cada hora en :{int(minute) % 60:02d}"
+        rest = [x for x in extra if not x.endswith(f":{int(minute) % 60:02d}")]
+        if rest:
+            txt += " y a las " + ", ".join(rest) + " (cierre de la vela diaria de oro/SPX)"
+        return txt + " UTC"
+    if len(slots) <= 12:
+        return "a las " + ", ".join(slots) + " UTC"
+    return f"{len(slots)} veces al día (" + ", ".join(slots[:4]) + ", ...) UTC"
+
+
+def _at_utc(job, hhmm: str):
+    """job.at(hhmm) en UTC (schedule usa pytz, dependencia ya instalada). Si no se
+    pudiera, en hora local (el contenedor de Render está en UTC)."""
+    try:
+        return job.at(hhmm, "UTC")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Planificador: sin zona horaria UTC ({exc}); {hhmm} en hora local.")
+        return job.at(hhmm)
+
+
 def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
     """
-    Modo daemon: genera señales en un intervalo fijo.
+    Modo daemon: genera señales a horas FIJAS en UTC (Fase 4, CYCLE_SCHEDULE).
+
+    Trabajos (todos en el mismo hilo, uno tras otro; `schedule` nunca los solapa):
+      - ciclo de señales: cada hora en HH:01 UTC (con --interval 60; otros
+        intervalos: ver CYCLE_SCHEDULE) y un ciclo extra a las 22:20 UTC para la
+        vela diaria del oro; además una vez nada más arrancar;
+      - comandos de Telegram: cada TELEGRAM_POLL_MINUTES (2) min solo se leen
+        /fill /skip /help (sin descargar velas);
+      - tarea nocturna a `retrain_hour` UTC (03:00): va antes que el ciclo de las
+        03:01 y, si se alarga, este corre en cuanto termina.
     Envía notificaciones por Telegram si está configurado.
-    Reentrena los modelos automáticamente según ML_PARAMS['retrain_every'].
     """
     import time
     import schedule as sched
     from notifications.telegram  import test_connection
-    from config.settings         import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+    from config.settings         import (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, CYCLE_SCHEDULE,
+                                         TELEGRAM_POLL_MINUTES)
 
     notify = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
     if notify:
         test_connection()
 
+    try:
+        interval_minutes = int(interval_minutes)
+    except (TypeError, ValueError):
+        interval_minutes = 60
+    if interval_minutes <= 0:
+        logger.warning(f"--interval {interval_minutes} no válido: se usa 60.")
+        interval_minutes = 60
+    minute = int(CYCLE_SCHEDULE.get("minute", 1)) % 60
+    extra = extra_cycle_times()
+    slots = cycle_slot_times(interval_minutes, minute=minute, extra=extra)
+    poll_minutes = int(TELEGRAM_POLL_MINUTES or 0) if notify else 0
+    if slots is None:
+        when = f"cada {interval_minutes} min desde el arranque (modo antiguo) y a las {', '.join(extra)} UTC"
+    else:
+        when = _describe_slots(slots, interval_minutes, minute, extra)
+
     logger.info(
-        f"Iniciando modo daemon — señales cada {interval_minutes} min | "
+        f"Iniciando modo daemon — señales {when} | "
+        f"comandos de Telegram: {f'cada {poll_minutes} min' if poll_minutes > 0 else 'al inicio de cada ciclo'} | "
         f"Reentrenamiento diario a las {retrain_hour} UTC | "
         f"Telegram: {'ON' if notify else 'OFF'}. "
         "Ctrl+C para detener."
     )
 
+    # Hora (UTC) a la que empezó el último ciclo de señales.
+    state = {"last_cycle_start": None}
+
     def _run_all_signals():
         import gc
         from monitoring import cycle_health
+        state["last_cycle_start"] = datetime.now(timezone.utc)
         _cycle_fresh.clear()
         cycle_health.reset()
         failed = []
@@ -873,7 +979,7 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
                 failed.append(symbol)
                 logger.error(f"Error generando señal para {symbol}: {exc}")
             finally:
-                # Cada ciclo horario carga datos de los activos activos; liberar
+                # Cada ciclo carga datos de los activos activos; liberar
                 # entre cada uno evita que la RAM crezca de forma sostenida.
                 gc.collect()
 
@@ -958,17 +1064,51 @@ def cmd_schedule(interval_minutes: int = 60, retrain_hour: str = "03:00"):
             if send_daily_report():
                 logger.info("Resumen diario enviado a Telegram.")
 
-    # Señales recurrentes
-    sched.every(interval_minutes).minutes.do(_run_all_signals)
+    def _run_slot(hhmm: str):
+        """Ciclo de la hora fija `hhmm`. Si ya empezó otro ciclo después de esa
+        hora (p. ej. el proceso estuvo bloqueado y se juntaron varias horas
+        pendientes), no se repite: ese ciclo ya vio las mismas velas."""
+        last = state["last_cycle_start"]
+        if last is not None and last >= _last_slot_start(hhmm, datetime.now(timezone.utc)):
+            logger.info(f"Ciclo de las {hhmm} UTC omitido: ya corrió uno después ({last:%H:%M:%S} UTC).")
+            return
+        _run_all_signals()
+
+    def _poll_commands_job():
+        """Solo lee /fill /skip /help (Fase 4). Sin velas, sin latido. Nunca lanza."""
+        try:
+            from notifications.telegram_commands import poll_commands
+            poll_commands(log_failures=False)
+        except Exception as exc:
+            logger.warning(f"Comandos Telegram (sondeo): error ({exc}).")
+
+    # Ciclo de señales a horas fijas (UTC). Cada hora es un trabajo diario: si un
+    # ciclo se alarga y pisa la hora siguiente, esa corre en cuanto termina (tarde,
+    # nunca dos veces ni en paralelo).
+    if slots is None:
+        logger.warning(f"--interval {interval_minutes} no divide el día (1.440 min): ciclo cada "
+                       f"{interval_minutes} min contado desde el arranque (no alineado al cierre de "
+                       f"vela), más el ciclo extra de las {', '.join(extra)} UTC.")
+        sched.every(interval_minutes).minutes.do(_run_all_signals)
+        slot_jobs = extra
+    else:
+        slot_jobs = slots
+    for hhmm in slot_jobs:
+        _at_utc(sched.every().day, hhmm).do(_run_slot, hhmm)
 
     # Tarea nocturna a hora fija (UTC)
-    sched.every().day.at(retrain_hour).do(_run_nightly)
+    _at_utc(sched.every().day, retrain_hour).do(_run_nightly)
+
+    # Comandos de Telegram entre ciclos (el ciclo también los lee al empezar).
+    if poll_minutes > 0:
+        sched.every(poll_minutes).minutes.do(_poll_commands_job)
 
     _run_all_signals()   # Ejecución inmediata al arrancar
 
+    sleep_s = max(1.0, float(CYCLE_SCHEDULE.get("loop_sleep_s", 5)))
     while True:
         sched.run_pending()
-        time.sleep(30)
+        time.sleep(sleep_s)
 
 
 # ---------------------------------------------------------------------------
@@ -1104,7 +1244,9 @@ Ejemplos:
     # schedule (daemon)
     psc = sub.add_parser("schedule", help="Modo daemon con señales periódicas")
     psc.add_argument("--interval", default=60, type=int,
-                     help="Intervalo en minutos (default: 60)")
+                     help="Intervalo en minutos (default: 60 = cada hora en HH:01 UTC). Si divide "
+                          "el día (15, 30, 120, 240...) se alinea a las 00:01 UTC; si no, cada N min "
+                          "desde el arranque. Siempre se añade el ciclo de las 22:20 UTC (oro).")
     psc.add_argument("--retrain-hour", default="03:00", dest="retrain_hour",
                      help="Hora UTC para la tarea nocturna de reentrenamiento (HH:MM, default: 03:00)")
 

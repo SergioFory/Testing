@@ -7,6 +7,12 @@ GET a esa URL. Si los pings dejan de llegar (worker caído, colgado o sin datos)
 el servicio te avisa por su cuenta (email/Telegram), aunque el propio worker ya
 no pueda enviar nada.
 
+Cuándo llega (Fase 4, ciclo alineado): al final de cada ciclo, es decir, cada hora
+unos segundos después de HH:01 UTC, más uno a las ~22:20 UTC y otro al arrancar.
+El hueco normal entre dos pings es ≤ 60 min (más lo que tarde un ciclo). En el
+servicio externo: periodo 1 hora y margen (grace) de 30 min o más. El sondeo de
+comandos de cada 2 minutos NO hace ping (no comprueba datos ni señales).
+
 Nunca lanza ni bloquea más de `timeout` segundos. La URL no se escribe en el log
 (suele llevar un identificador secreto).
 """

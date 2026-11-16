@@ -44,7 +44,8 @@ TELEGRAM_CHAT_ID   = _clean_env("TELEGRAM_CHAT_ID")
 # Latido opcional (Fase 1, punto 1.4): URL de un servicio externo gratuito tipo
 # healthchecks.io. Al final de cada ciclo correcto el worker hace un GET (5 s,
 # sin fallar si no responde); si los pings dejan de llegar, el servicio avisa.
-# Vacía = desactivado. Ver monitoring/heartbeat.py.
+# Con el ciclo alineado (Fase 4) llega cada hora tras HH:01 UTC (+ 22:20): en el
+# servicio, periodo 1 h y margen ≥ 30 min. Vacía = desactivado. Ver monitoring/heartbeat.py.
 HEARTBEAT_URL      = _clean_env("HEARTBEAT_URL")
 
 # CryptoPanic discontinuó su plan gratuito el 01-Apr-2026.
@@ -362,12 +363,63 @@ LIVE_HISTORY_DAYS = {"4h": 300, "1d": 900}
 # ciclo mientras tengan menos de estas horas; las más antiguas se quedan sin
 # notificar y solo se registran en el log (una señal vieja ya no es ejecutable).
 NOTIFY_RETRY_MAX_AGE_HOURS = 2.0
-# Margen sobre ese límite (revisión de la Fase 1): `schedule` programa el ciclo
-# siguiente 60 min después de TERMINAR el anterior, así que en el segundo
-# reintento la señal ya tiene 2 h + lo que duraron los ciclos (siempre > 2 h) y
-# en la práctica solo había UN reintento. Con 15 min de margen hay dos (a ~1 h y
-# a ~2 h); una señal más vieja ya no se reenvía y se avisa de que no llegó.
+# Margen sobre ese límite (revisión de la Fase 1): hasta la Fase 4 `schedule`
+# programaba el ciclo siguiente 60 min después de TERMINAR el anterior, así que
+# en el segundo reintento la señal ya tenía 2 h + lo que duraron los ciclos y en
+# la práctica solo había UN reintento. Con 15 min de margen hay dos (a ~1 h y a
+# ~2 h). Con el ciclo alineado (Fase 4, CYCLE_SCHEDULE) la señal se guarda unos
+# segundos después de HH:01 y los reintentos llegan a las (HH+1):01 y (HH+2):01,
+# es decir, con algo MENOS de 1 h y 2 h: el margen ya no es imprescindible pero
+# se mantiene (cubre un ciclo que tarde más de lo normal). Una señal emitida en
+# el ciclo extra de las 22:20 se reintenta a las 23:01 y a las 00:01 (con 2,7 h
+# a la 01:01 ya no). Una señal más vieja ya no se reenvía y se avisa de que no llegó.
 NOTIFY_RETRY_GRACE_MINUTES = 15
+
+# =============================================================================
+# CICLO ALINEADO AL CIERRE DE VELA (Fase 4, 2026-11)
+# -----------------------------------------------------------------------------
+# Antes el ciclo corría "cada 60 min desde el arranque" (schedule.every(60)):
+# tras el último despliegue, a las :40, y derivando unos segundos por hora. La
+# alerta llegaba de media ~30 min y hasta ~60 min después del cierre de la vela
+# 4H, y la hora cambiaba con cada despliegue. Ahora el ciclo de señales corre a
+# una hora FIJA en UTC:
+#   - cada hora en el minuto `minute` (:01): la vela 4H de Gate.io cierra en punto
+#     (00/04/08/12/16/20 UTC) y el minuto de margen deja que la cierre;
+#   - un ciclo extra `after_daily_close_min` minutos después de
+#     DAILY_BAR_CLOSE_UTC (22:15 + 5 = 22:20 UTC) para los activos de SESIÓN (oro
+#     GC=F; SPX en sombra). data/bars._session_rows_trustworthy rechaza la vela
+#     del día desde las 18:00 de Nueva York hasta medianoche de NY:
+#       * INVIERNO (18:00 NY = 23:00 UTC): la vela del día se acepta entre las
+#         22:15 y las 23:00 UTC. Sin el ciclo de las 22:20, con ciclos en :01 el
+#         oro pasaría a evaluarse a las 05:01 UTC del día siguiente; con él se
+#         evalúa esa misma noche a las 22:20 (como antes con el despliegue a las
+#         :40, que lo hacía a las 22:40).
+#       * VERANO (18:00 NY = 22:00 UTC, antes de las 22:15): no hay hueco; la vela
+#         se acepta desde medianoche de NY (04:00 UTC) y se evalúa a las 04:01
+#         UTC (antes: en el primer ciclo después de las 04:00, p. ej. 04:40). El
+#         ciclo de las 22:20 no hace nada nuevo en verano (no molesta).
+#     Las señales son las mismas (misma vela, entrada, SL y TP); solo cambia CUÁNDO
+#     llegan.
+#   - `loop_sleep_s`: el bucle principal duerme como mucho esto entre
+#     comprobaciones (precisión de la hora de disparo).
+# main.py schedule --interval 60 (el startCommand de Render) = cada hora en :01.
+# Otro --interval que divida 1.440 (15, 30, 120, 240...) también se alinea:
+# ciclos en :01 + k·intervalo contados desde las 00:00 UTC (240 → 00:01, 04:01,
+# ...). Un intervalo que no divide el día (p. ej. 50 o 70) usa el modo antiguo
+# (cada N min desde el arranque) con un aviso en el log. En todos los casos se
+# añade el ciclo extra de las 22:20 y se mantiene la ejecución inmediata al arrancar.
+CYCLE_SCHEDULE = {
+    "minute": 1,
+    "after_daily_close_min": 5,
+    "loop_sleep_s": 5,
+}
+
+# Comandos de Telegram (/fill /skip /help): además de leerlos al inicio de cada
+# ciclo, un trabajo ligero cada TELEGRAM_POLL_MINUTES minutos SOLO pregunta a
+# Telegram por mensajes nuevos (getUpdates sin espera; no descarga velas). La
+# respuesta tarda como mucho ~2 min (más lo que quede del ciclo en curso: los
+# trabajos van en serie, en el mismo hilo). 0 = desactivado (solo en cada ciclo).
+TELEGRAM_POLL_MINUTES = 2
 # Durante cuántas horas se intenta avisar (una vez) de una señal que NUNCA llegó
 # ("no te llegó la señal #N…"), por si Telegram vuelve tarde.
 UNDELIVERED_NOTICE_MAX_AGE_HOURS = 48

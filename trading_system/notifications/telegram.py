@@ -390,8 +390,11 @@ def retry_failed_signal_alerts(max_age_hours: float = None, now=None) -> dict:
     Reintenta las señales live cuyo envío falló (signals.notified = 0).
 
       - Menos de `max_age_hours` (NOTIFY_RETRY_MAX_AGE_HOURS, 2 h) más el margen
-        NOTIFY_RETRY_GRACE_MINUTES (15 min: el ciclo se programa 60 min después
-        de TERMINAR el anterior, así que sin margen solo cabía un reintento)
+        NOTIFY_RETRY_GRACE_MINUTES (15 min: hasta la Fase 4 el ciclo se
+        programaba 60 min después de TERMINAR el anterior y sin margen solo
+        cabía un reintento; con el ciclo alineado a HH:01 los reintentos llegan
+        con algo menos de 1 h y 2 h y el margen cubre un ciclo lento; se
+        reintenta en los CICLOS, no en el sondeo de comandos de cada 2 min)
         desde que se registró: se reenvía el MISMO texto con la nota "Reenvío
         tras fallo de Telegram" y, si Telegram confirma, se marca notified = 1.
       - Más antigua: no se reenvía como señal (el precio ya se movió) y se deja

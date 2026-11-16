@@ -37,7 +37,10 @@ services:
       - key: TRADING_CAPITAL
         sync: false
 
-  # Worker: corre el scheduler (señales cada 60 min + tarea nocturna 03:00 UTC).
+  # Worker: corre el scheduler. Fase 4: ciclo de señales a hora FIJA UTC (cada hora
+  # en HH:01, justo tras el cierre de la vela 4H, + 22:20 UTC para la vela diaria del
+  # oro), comandos /fill /skip /help cada 2 min y tarea nocturna 03:00 UTC.
+  # "--interval 60" = cada hora en HH:01 (ver CYCLE_SCHEDULE en config/settings.py).
   # Fase 1: sin "retrain --all" al arrancar. El ML está apagado en todos los
   # activos (use_ml=False): reentrenar retrasaba la primera señal ~4-6 min tras
   # cada reinicio, gastaba RAM y enviaba alertas de "modelo actualizado" sin uso.

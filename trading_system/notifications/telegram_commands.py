@@ -6,10 +6,13 @@ con cada señal, para comparar más adelante el R EJECUTADO con el R teórico.
     /skip <id> <motivo>   no la ejecuté            (p. ej. /skip 123 llegué tarde)
     /help                 ayuda
 
-Cómo funciona: no hay servidor web. Al INICIO de cada ciclo el worker pregunta a
-Telegram por mensajes nuevos (getUpdates con timeout 0, no espera) a partir del
-último offset guardado en la tabla kv, procesa los comandos y guarda el offset
-nuevo. Solo se aceptan mensajes del chat configurado (TELEGRAM_CHAT_ID); los
+Cómo funciona: no hay servidor web. Al INICIO de cada ciclo y, además, cada
+TELEGRAM_POLL_MINUTES (2) minutos en un trabajo ligero del scheduler (Fase 4), el
+worker pregunta a Telegram por mensajes nuevos (getUpdates con timeout 0, no
+espera; límite de tiempo TOTAL de GETUPDATES_DEADLINE_S) a partir del último
+offset guardado en la tabla kv, procesa los comandos y guarda el offset nuevo.
+Los trabajos del scheduler van en serie en el mismo hilo: dos sondeos nunca se
+solapan y cada uno lee el offset que guardó el anterior. Solo se aceptan mensajes del chat configurado (TELEGRAM_CHAT_ID); los
 demás se ignoran sin responder. Cada fill/skip va a la tabla fills con el
 update_id de Telegram (UNIQUE): si un mensaje se procesa dos veces (p. ej. el
 worker se reinicia antes de guardar el offset) no se duplica ni se responde dos
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import html
 import re
+import threading
 
 import requests
 from loguru import logger
@@ -29,10 +33,31 @@ import notifications.telegram as tg
 from config.settings import fmt_price
 
 KV_OFFSET = "telegram_update_offset"
+# Límite de tiempo TOTAL de una consulta getUpdates (Fase 4: ahora se consulta
+# cada 2 min; `requests` solo limita cada operación de red, no el total).
+GETUPDATES_DEADLINE_S = 10.0
+# Hilo de la última consulta: si sigue vivo (Telegram colgado), no se lanza otra
+# (como mucho un hilo colgado a la vez; sin crecimiento de memoria).
+_inflight: dict = {"thread": None}
 # Intentos por comando antes de darlo por perdido y avisar (el contador vive en
 # memoria del proceso: si la BD está caída tampoco se podría guardar en ella).
 MAX_UPDATE_ATTEMPTS = 3
 _update_failures: dict = {}
+
+def _when_read_text() -> str:
+    """Cuándo se leen los comandos (Fase 4: cada TELEGRAM_POLL_MINUTES minutos)."""
+    try:
+        from config.settings import TELEGRAM_POLL_MINUTES
+        n = int(TELEGRAM_POLL_MINUTES or 0)
+    except Exception:  # noqa: BLE001
+        n = 0
+    if n > 0:
+        return (f"Los comandos se leen cada {n} minuto{'s' if n != 1 else ''} más o menos, así que "
+                f"la respuesta suele tardar como mucho {n} minuto{'s' if n != 1 else ''} (algo más "
+                "si en ese momento el sistema está revisando los mercados).")
+    return ("Los comandos se leen al principio de cada ciclo (cada hora), así que la respuesta "
+            "puede tardar hasta una hora.")
+
 
 HELP_TEXT = (
     "🤖 <b>Comandos</b>\n\n"
@@ -45,8 +70,8 @@ HELP_TEXT = (
     "cuenta el control de cartera: máx. 3 abiertas, no LONG y SHORT a la vez, riesgo BTC+ETH). "
     "Si luego la ejecutas, un <code>/fill</code> la vuelve a meter.\n"
     "<code>/help</code> — esta ayuda.\n\n"
-    "<i>El número de la señal (ID) aparece en el mensaje de la señal. Los comandos se leen "
-    "al principio de cada ciclo (cada hora), así que la respuesta puede tardar hasta una hora.</i>"
+    "<i>El número de la señal (ID) aparece en el mensaje de la señal. "
+    + _when_read_text() + "</i>"
 )
 
 
@@ -288,36 +313,72 @@ def handle_command(cmd: str, args: list[str], update_id: int | None = None, ts=N
 # Polling
 # ---------------------------------------------------------------------------
 
-def _get_updates(offset: int | None) -> list[dict] | None:
-    """getUpdates sin espera (timeout 0). None si falla."""
+def _get_with_deadline(url: str, params: dict, deadline_s: float):
+    """requests.get con límite de tiempo TOTAL (Fase 4).
+
+    La petición va en un hilo daemon; si no termina en `deadline_s` se lanza
+    TimeoutError y su resultado se descarta (getUpdates no cambia nada en
+    Telegram: el offset solo avanza cuando se guarda en la BD). Si la consulta
+    anterior sigue colgada no se lanza otra."""
+    prev = _inflight.get("thread")
+    if prev is not None and prev.is_alive():
+        raise TimeoutError("la consulta anterior a Telegram sigue sin terminar")
+    box: dict = {}
+
+    def _run():
+        try:
+            box["resp"] = requests.get(url, params=params, timeout=10)
+        except BaseException as exc:  # noqa: BLE001 — se relanza en el hilo principal
+            box["exc"] = exc
+
+    th = threading.Thread(target=_run, name="tg-getUpdates", daemon=True)
+    _inflight["thread"] = th
+    th.start()
+    th.join(deadline_s)
+    if th.is_alive():
+        raise TimeoutError(f"getUpdates sin respuesta completa en {deadline_s:g} s")
+    if "exc" in box:
+        raise box["exc"]
+    return box["resp"]
+
+
+def _get_updates(offset: int | None, log_failures: bool = True) -> list[dict] | None:
+    """getUpdates sin espera (timeout 0). None si falla.
+
+    log_failures=False (sondeo de cada 2 min): los fallos de red van al log en
+    DEBUG para no repetir el mismo aviso 30 veces por hora; el sondeo del inicio
+    de cada ciclo los sigue registrando como WARNING."""
+    warn = logger.warning if log_failures else logger.debug
     url = tg._BASE_URL.format(token=tg.TELEGRAM_TOKEN, method="getUpdates")
     params = {"timeout": 0, "allowed_updates": '["message","channel_post"]'}
     if offset is not None:
         params["offset"] = int(offset)
     try:
-        resp = requests.get(url, params=params, timeout=10)
-    except requests.RequestException as exc:
-        logger.warning(f"Comandos Telegram: getUpdates falló ({exc}).")
+        resp = _get_with_deadline(url, params, GETUPDATES_DEADLINE_S)
+    except (requests.RequestException, TimeoutError) as exc:
+        warn(f"Comandos Telegram: getUpdates falló ({exc}).")
         return None
     if resp.status_code != 200:
         # 409 = hay un webhook configurado o se está usando el bot en otro sitio.
-        logger.warning(f"Comandos Telegram: getUpdates respondió {resp.status_code}: {resp.text[:200]}")
+        warn(f"Comandos Telegram: getUpdates respondió {resp.status_code}: {resp.text[:200]}")
         if resp.status_code in (401, 404):
             # Token revocado o erróneo: tampoco saldrán las señales → sin latido.
             tg._mark_cycle("telegram", f"getUpdates {resp.status_code} (token no válido)")
         return None
     data = resp.json()
     if not data.get("ok"):
-        logger.warning(f"Comandos Telegram: respuesta no OK: {str(data)[:200]}")
+        warn(f"Comandos Telegram: respuesta no OK: {str(data)[:200]}")
         return None
     return data.get("result") or []
 
 
-def poll_commands() -> dict:
+def poll_commands(log_failures: bool = True) -> dict:
     """
     Lee los mensajes nuevos de Telegram, procesa /fill /skip /help del chat
     configurado, responde y guarda el offset. Nunca lanza.
     Devuelve {"updates": n, "commands": n, "ignored": n, "errors": n}.
+    log_failures=False: fallos de red de getUpdates solo en DEBUG (sondeo de
+    cada 2 min del scheduler, Fase 4).
     """
     out = {"updates": 0, "commands": 0, "ignored": 0, "errors": 0}
     try:
@@ -334,7 +395,7 @@ def poll_commands() -> dict:
             tg._mark_cycle("bd", f"offset de comandos: {exc}")
             return out
 
-        updates = _get_updates(offset)
+        updates = _get_updates(offset, log_failures=log_failures)
         if not updates:
             return out
         out["updates"] = len(updates)

@@ -485,3 +485,50 @@ eventos. Qué hacer con el aviso: nada especial (los datos no
 dicen que esas operaciones sean peores; saltarlas por el evento va contra la regla de no saltarse
 señales). Si aun así saltas una, apúntalo con `/skip ID evento` para que la medición siga siendo honesta. Mantenimiento: cuando la Fed o el BLS publiquen el calendario de 2028, añadirlo
 al CSV (el resumen nocturno avisa 60 días antes de que se acabe).
+
+## Cuándo llegan las señales (Fase 4, 16-nov-2026): ciclo a hora fija
+
+**Qué cambió.** Antes el worker revisaba los mercados "cada 60 minutos desde que arrancó": tras el
+último despliegue, a las :40 de cada hora (y unos segundos más tarde cada hora). Desde la Fase 4
+revisa a horas **fijas en UTC** (`CYCLE_SCHEDULE` en `config/settings.py`):
+
+- **Cada hora en HH:01 UTC.** La vela 4H de BTC y ETH cierra en punto (00, 04, 08, 12, 16 y 20 UTC);
+  el minuto de margen deja que Gate.io la cierre. La señal llega ~1 minuto después del cierre.
+- **Un ciclo extra a las 22:20 UTC** para la vela diaria del oro (y del SPX en sombra), que se da por
+  cerrada a las 22:15 UTC. El sistema no acepta la vela del día desde las 18:00 de Nueva York hasta
+  medianoche de Nueva York (en ese rato Yahoo puede estar mostrando ya la sesión siguiente). Por eso:
+  - **Invierno** (horario estándar de EE. UU., de noviembre a marzo): la señal de oro llega a las
+    **22:20 UTC** de ese mismo día.
+  - **Verano** (de marzo a noviembre): las 18:00 de Nueva York son las 22:00 UTC, antes de las 22:15.
+    La vela se acepta desde medianoche de Nueva York y la señal llega a las **04:01 UTC** del día
+    siguiente. Antes llegaba en el primer ciclo después de las 04:00, por ejemplo a las 04:40.
+- **Comandos /fill /skip /help:** se leen cada 2 minutos (antes, una vez por hora). La respuesta llega en
+  1–2 minutos, o algo más si en ese momento el sistema está revisando los mercados.
+- Sigue igual: una revisión nada más arrancar, el resumen nocturno de las 03:00 UTC (va justo antes del
+  ciclo de las 03:01) y los reintentos de señales que no llegaron (a la hora y a las 2 horas).
+- El startCommand de Render (`--interval 60`) no hay que tocarlo: 60 = cada hora en HH:01. Otro
+  intervalo que divida el día (15, 30, 120, 240…) también se alinea a las 00:01 UTC. Uno que no lo divida
+  (por ejemplo 50) vuelve al modo antiguo (cada N minutos desde el arranque) y el log lo avisa. En todos
+  los casos se añade el ciclo de las 22:20.
+- Latido (HEARTBEAT_URL): llega cada hora tras HH:01 (y a las 22:20). En el servicio externo pon un
+  periodo de 1 hora y un margen de 30 minutos o más.
+
+**Las señales son las mismas.** Cambia CUÁNDO llegan, no QUÉ llega. Comprobado con el worker real
+(`main.cmd_schedule` con su planificador) y un reloj simulado sobre el snapshot del 15-nov-2026, sin red y
+sin Telegram. Se comparó el código anterior (3518d41, despliegue a las :40) con el nuevo en cinco periodos:
+8–16 jul 2025, 8–23 oct 2025, 27 sep–3 oct 2026 (verano, con oro), 8–15 nov 2024 y 29 nov–5 dic 2023
+(invierno, con oro). Resultado: **13 de 13 señales iguales** (activo, vela, dirección, entrada, SL, TP y
+modo) y los mismos motivos en el registro sombra (43 filas). Con un despliegue a las :07 (8–15 nov 2024)
+también salen las mismas señales.
+
+| Retraso desde el cierre de la vela | Antes (despliegue a las :40) | Ahora |
+|---|---|---|
+| Vela 4H (BTC/ETH), 277 cierres: mediana / máximo | 46 / 60 min | 1 / 1 min |
+| Señales cripto emitidas (7): mediana / máximo | 45 / 51 min | 1 / 1 min |
+| Oro, invierno (9 velas): mediana / máximo | 32 / 37 min | 5 / 5 min (22:20) |
+| Oro, verano (22 velas): mediana / máximo | 6 h 31 min / 6 h 43 min | 5 h 46 min (04:01) |
+
+Antes, el retraso dependía de la hora del último despliegue. Con un despliegue entre las :00 y las :15, el
+oro de invierno no se evaluaba esa noche, sino a las ~05:00 UTC del día siguiente: en la simulación con
+despliegue a las :07, la señal de oro del 11-nov-2024 llegó a las 05:14 UTC del 12-nov en vez de a las
+22:20 UTC del 11-nov.

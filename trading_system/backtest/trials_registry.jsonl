@@ -59,3 +59,4 @@
 {"kind": "variant", "hash": "f27e0eb53150219c", "symbol": "SPX500", "params": {"symbol": "SPX500", "ml_threshold": 0.22, "directions": ["long", "short"], "strategy": "2ca3a5a1f2d6", "extra": {}}, "label": "umbral 0,22 · ambas", "run": "2026-11-16T00:45:44Z"}
 {"kind": "variant", "hash": "534915ddad8b6108", "symbol": "SPX500", "params": {"symbol": "SPX500", "ml_threshold": 0.22, "directions": ["long"], "strategy": "2ca3a5a1f2d6", "extra": {}}, "label": "umbral 0,22 · solo long", "run": "2026-11-16T00:45:44Z"}
 {"kind": "variant", "hash": "8fc6686b1e4e1b30", "symbol": "SPX500", "params": {"symbol": "SPX500", "ml_threshold": 0.22, "directions": ["short"], "strategy": "2ca3a5a1f2d6", "extra": {}}, "label": "umbral 0,22 · solo short", "run": "2026-11-16T00:45:44Z"}
+{"kind": "final_access", "hash": "95198bb3a9fcd374", "symbol": "ETHUSDT", "label": "umbral 0,45 · ambas (candidato: ETH umbral 0,45 (informe final §7, 3.3))", "run": "2026-11-16T00:57:10Z", "okx": true}

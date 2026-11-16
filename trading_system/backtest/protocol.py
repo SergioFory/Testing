@@ -28,16 +28,18 @@ Qué hace este módulo (orquestación, informe y registro):
   7. Holdout OKX (cripto, 2019-12 → 2022-04), solo con --final: de la tabla
      ohlcv (source='okx') si hay suficiente o, con --okx, descargado en memoria.
 
-Interfaces para el grupo B (CPCV purgada, PBO, DSR y criterios de aprobado):
+Robustez y veredicto (segunda mitad del 2.1):
   - analyze_symbol(...) devuelve, además de las cifras, las claves privadas
-    "_trades" (DataFrame de operaciones de la selección, todas las direcciones),
-    "_masks" (id de variante → máscara booleana sobre "_trades") y "_R"
-    (escenario → R netos sobre "_trades"). Con ellas se arman la matriz
-    (bloque × variante) del PBO y la re-selección interna de la CPCV.
-  - total_trials(entries) = número de pruebas para el DSR (semilla de 400 + todas
-    las variantes registradas).
-  - El hueco para la robustez es result["robustness"] (hoy None) y
-    evaluate_criteria() decide el veredicto (hoy solo distingue línea base).
+    "_trades" (operaciones de la selección, todas las direcciones), "_masks" (id
+    de variante → máscara sobre "_trades"), "_R" (escenario → R netos), "_bounds"
+    (velas [p0, p1) de la selección) y "_fwd" (horizonte). robustness_for() arma
+    con ellas la rejilla para backtest/robustness.py: CPCV purgada con
+    re-selección interna, PBO por CSCV (S=16) y DSR (con N = total_trials() del
+    registro, que incluye la semilla de 400). Se calcula DESPUÉS de escribir el
+    registro, para que N cuente también las variantes de esta ejecución.
+  - evaluate_criteria() aplica los criterios de APROBADO a)–e) fijados el
+    2026-11-16 (constantes CRIT_*; texto en REGLAS_DE_DECISION.md). Sin --final
+    un candidato nunca sale "APROBADO" (falta e).
 
 Rendimiento medido (local, TS_CACHE=1): ver LOG de la Fase 2.
 """
@@ -523,7 +525,7 @@ def assign_folds(ts, symbol: str) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Estadística básica (la robustez —CPCV, PBO, DSR— va en backtest/robustness.py)
+# Estadística básica (la robustez —CPCV, PBO, DSR— está en backtest/robustness.py)
 # ---------------------------------------------------------------------------
 
 def bootstrap_ci(x, level: float = CI_LEVEL, n_boot: int = BOOT_N,
@@ -719,10 +721,10 @@ def analyze_symbol(symbol: str, df_4h: pd.DataFrame, df_daily: pd.DataFrame = No
       "baseline": cost_table de la configuración actual en la selección;
       "candidate": ídem del candidato (si lo hay);
       "reserve" / "okx": solo con final=True (tablas en la reserva y en OKX);
-      "robustness": None (CPCV/PBO/DSR: grupo B).
-    Claves privadas para el grupo B: "_trades", "_masks", "_R" (ver docstring del
-    módulo) y "_cand_trades" si el candidato necesitó re-detección (sus R se
-    calculan con costs.net_returns y su máscara con variant_mask).
+      "robustness": None (la rellena run_protocol con robustness_for, tras el registro).
+    Claves privadas: "_trades", "_masks", "_R", "_dec", "_bounds", "_fwd" (ver
+    docstring del módulo) y "_cand_trades"/"_cand_R" si el candidato necesitó
+    re-detección (su máscara se calcula con variant_mask).
     """
     trades = universe_trades(symbol, df_4h, df_daily)
     sel, rsv = split_reserve(trades, symbol)
@@ -751,19 +753,23 @@ def analyze_symbol(symbol: str, df_4h: pd.DataFrame, df_daily: pd.DataFrame = No
                           "eligible": int(m.sum()) >= MIN_TRADES_SELECT}
 
     cur = next(v for v in grid if v["is_current"])
+    _, _, fwd = _sim_params(symbol)
     out = {"symbol": symbol, "fold_kind": fold_kind(symbol),
            "selection_period": [str(selection_start(symbol).date()), str(reserve_start().date())],
            "n_setups_selection": int(len(sel)), "n_setups_reserve": int(len(rsv)),
            "current": _public_variant(cur), "grid": [_public_variant(v) for v in grid],
            "baseline": cost_table(sel[variant_mask(sel, cur)], symbol),
            "candidate": None, "reserve": None, "okx": None, "robustness": None,
-           "_trades": sel, "_masks": masks, "_R": R_sel}
+           "_trades": sel, "_masks": masks, "_R": R_sel, "_dec": dec["name"],
+           # Velas [p0, p1) de la muestra de selección y horizonte (CPCV/PBO).
+           "_bounds": _selection_bounds(df_4h, symbol), "_fwd": int(fwd)}
     if cand is not None:
         base = cand_sel if cand_sel is not None else sel
         out["candidate_variant"] = _public_variant(cand)
         out["candidate"] = cost_table(base[variant_mask(base, cand)], symbol)
         if cand_sel is not None:
             out["_cand_trades"] = cand_sel
+            out["_cand_R"] = net_returns(cand_sel, dec)
 
     if final:
         res = {"current": cost_table(rsv[variant_mask(rsv, cur)], symbol, with_folds=False)}
@@ -799,22 +805,164 @@ def _public_variant(v: dict) -> dict:
     return {k: (list(val) if isinstance(val, tuple) else val) for k, val in v.items()}
 
 
+def _selection_bounds(df: pd.DataFrame, symbol: str) -> tuple[int, int]:
+    """Posiciones [p0, p1) de las velas de la muestra de selección en df."""
+    idx = pd.DatetimeIndex(df.index)
+    idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+    return (int(idx.searchsorted(selection_start(symbol))),
+            int(idx.searchsorted(reserve_start())))
+
+
 # ---------------------------------------------------------------------------
-# Veredicto (criterios de aprobado: grupo B)
+# Robustez (CPCV purgada con re-selección, PBO, DSR): backtest/robustness.py
 # ---------------------------------------------------------------------------
 
-def evaluate_criteria(results: list[dict], candidate: dict | None) -> dict:
+def robustness_variants(res: dict) -> tuple[list[dict], int, int | None]:
     """
-    Veredicto del protocolo: {"status", "failed", "text"}.
+    Variantes de la rejilla (en su orden) como {"id", "label", "pos", "r"} con los R
+    del escenario de decisión en la SELECCIÓN, más los índices de la configuración
+    actual y del candidato. Si el candidato re-detectó, usa su universo propio.
+    """
+    sel, masks, R = res["_trades"], res["_masks"], res["_R"][res["_dec"]]
+    pos_all = sel["pos"].to_numpy(dtype=int) if len(sel) else np.zeros(0, dtype=int)
+    out, cur_i, cand_i = [], None, None
+    for g in res["grid"]:
+        if g["id"] in masks:
+            m = masks[g["id"]]
+            pos, r = pos_all[m], np.asarray(R)[m]
+        else:                                   # candidato con universo propio
+            ct = res["_cand_trades"]
+            m = variant_mask(ct, g)
+            pos, r = ct["pos"].to_numpy(dtype=int)[m], np.asarray(res["_cand_R"])[m]
+        if g["is_current"]:
+            cur_i = len(out)
+        if g["is_candidate"]:
+            cand_i = len(out)
+        out.append({"id": g["id"], "label": g["label"], "pos": pos, "r": r})
+    return out, cur_i, cand_i
+
+
+def robustness_for(res: dict, n_trials: int) -> dict:
+    """CPCV purgada con re-selección, PBO (S=16) y DSR de un activo analizado."""
+    from backtest.robustness import compute_robustness
+    variants, cur_i, cand_i = robustness_variants(res)
+    p0, p1 = res["_bounds"]
+    rob = compute_robustness(variants, cur_i, cand_i, p0, p1, res["_fwd"], n_trials,
+                             min_trades=MIN_TRADES_SELECT)
+    rob["labels"] = {v["id"]: v["label"] for v in variants}
+    return rob
+
+
+# ---------------------------------------------------------------------------
+# Veredicto: criterios de APROBADO a)–e) (fijados el 2026-11-16; REGLAS_DE_DECISION.md)
+# ---------------------------------------------------------------------------
+CRIT_MIN_IMPROVEMENT = 0.10   # b) mejora mínima del E[R] (R) en la mediana de la CPCV y por fold
+CRIT_MIN_FOLDS = 2            # b) folds (de 3) con mejora >= CRIT_MIN_IMPROVEMENT
+CRIT_MAX_PBO = 0.20           # c) PBO de la rejilla con el candidato < 0,20
+CRIT_MIN_DSR = 0.95           # d) DSR del candidato > 0,95
+CRIT_MIN_FINAL_DELTA = 0.0    # e) candidato − actual en la reserva y en OKX >= 0
+
+
+def _dec_er(table) -> float | None:
+    row = decision_row(table) if table else None
+    return None if row is None else row.get("er")
+
+
+def _crit(ok, text: str) -> dict:
+    return {"ok": ok, "text": text}
+
+
+def criteria_for_symbol(res: dict, final: bool) -> dict:
+    """Criterios a)–e) de un activo con candidato: {letra: {"ok": True/False/None, "text"}}.
+    ok=None = pendiente (solo e) sin --final)."""
+    c = {}
+    lv = res.get("candidate_live_check") or {}
+    c["a"] = _crit(bool(lv.get("match")),
+                   f"vivo = validador con la config del candidato: "
+                   f"{'OK' if lv.get('match') else 'FALLA'} ({lv.get('approved', '—')} aprobados, "
+                   f"{lv.get('emitted', '—')} emitidos)" if lv else
+                   "vivo = validador con la config del candidato: no comprobado")
+    rob = res.get("robustness") or {}
+    if rob.get("error") or not rob:
+        why = rob.get("error", "no calculada")
+        for k in ("b", "c", "d"):
+            c[k] = _crit(False, f"robustez no evaluable ({why})")
+    else:
+        d = (rob["cpcv"].get("delta_cand_cur") or {})
+        med = d.get("median")
+        cur_f = (decision_row(res["baseline"]) or {}).get("folds") or []
+        cand_f = (decision_row(res["candidate"]) or {}).get("folds") or []
+        deltas = []
+        for fc, fk in zip(cur_f, cand_f):
+            deltas.append(None if fc["er"] is None or fk["er"] is None else fk["er"] - fc["er"])
+        good = sum(1 for x in deltas if x is not None and x >= CRIT_MIN_IMPROVEMENT - 1e-12)
+        ok_b = med is not None and med >= CRIT_MIN_IMPROVEMENT - 1e-12 and good >= CRIT_MIN_FOLDS
+        c["b"] = _crit(ok_b, f"mejora del E[R] (XM swap 5 %) frente a la actual: mediana CPCV "
+                       f"{_f(med, 2)}R (pide ≥ +{CRIT_MIN_IMPROVEMENT:.2f}R); folds "
+                       + " | ".join(_f(x, 2) for x in deltas)
+                       + f" → {good} de {len(deltas)} con ≥ +{CRIT_MIN_IMPROVEMENT:.2f}R "
+                       f"(pide {CRIT_MIN_FOLDS})")
+        pbo = rob["pbo"].get("pbo")
+        c["c"] = _crit(pbo is not None and pbo < CRIT_MAX_PBO,
+                       f"PBO de la rejilla con el candidato = {_f(pbo, 2, False)} (pide < {CRIT_MAX_PBO:.2f})")
+        dsr = (rob.get("dsr_candidate") or {}).get("dsr")
+        c["d"] = _crit(dsr is not None and dsr > CRIT_MIN_DSR,
+                       f"DSR del candidato = {_f(dsr, 2, False)} (pide > {CRIT_MIN_DSR:.2f}; "
+                       f"{rob['n_trials']} pruebas registradas)")
+    if not final:
+        c["e"] = _crit(None, "reserva y OKX: pendiente (solo con --final, una única vez)")
+    else:
+        parts, ok_e = [], True
+        rsv = res.get("reserve") or {}
+        dr = None
+        if rsv.get("current") is not None and rsv.get("candidate") is not None:
+            a, b = _dec_er(rsv["candidate"]), _dec_er(rsv["current"])
+            dr = None if a is None or b is None else a - b
+        parts.append(f"reserva {_f(dr, 2)}R" if dr is not None else "reserva no evaluable")
+        ok_e &= dr is not None and dr >= CRIT_MIN_FINAL_DELTA
+        if res.get("fold_kind") == "crypto":
+            ok = res.get("okx") or {}
+            do = None
+            if not ok.get("error") and ok.get("current") is not None and ok.get("candidate") is not None:
+                a, b = _dec_er(ok["candidate"]), _dec_er(ok["current"])
+                do = None if a is None or b is None else a - b
+            parts.append(f"OKX {_f(do, 2)}R" if do is not None else
+                         f"OKX no evaluable ({ok.get('error') or 'sin datos'})")
+            ok_e &= do is not None and do >= CRIT_MIN_FINAL_DELTA
+        c["e"] = _crit(bool(ok_e), "candidato − actual (XM swap 5 %): " + "; ".join(parts)
+                       + " (pide que no sea negativa)")
+    return c
+
+
+def evaluate_criteria(results: list[dict], candidate: dict | None, final: bool = False) -> dict:
+    """
+    Veredicto del protocolo: {"status", "failed", "criteria", "text"}.
       - Sin candidato → "baseline": las cifras quedan como línea base.
-      - Con candidato → los criterios a)–e) de la especificación (grupo B). Hasta
-        que estén implementados devuelve "pending" (NO es un aprobado).
+      - Con candidato → criterios a)–e) (ver criteria_for_symbol y REGLAS_DE_DECISION.md):
+          "rejected"      si falla cualquiera ("NO APROBADO: falla b, d");
+          "pending_final" si pasa a)–d) pero falta --final (aún NO se adopta);
+          "approved"      solo si pasa a)–e).
     """
     if not candidate:
-        return {"status": "baseline", "failed": [],
+        return {"status": "baseline", "failed": [], "criteria": None,
                 "text": "LÍNEA BASE (sin candidato): estas cifras quedan como referencia; no se adopta nada."}
-    return {"status": "pending", "failed": [],
-            "text": "SIN VEREDICTO: los criterios de aprobado (CPCV, PBO, DSR) aún no están implementados."}
+    # El candidato es de un solo activo; si hubiera varios, cada criterio se combina
+    # con "Y": falla si falla en alguno, pendiente si está pendiente en alguno.
+    per = [criteria_for_symbol(r, final) for r in results]
+    crit = {}
+    for k in "abcde":
+        oks = [p[k]["ok"] for p in per]
+        ok = False if (False in oks or not oks) else (None if None in oks else True)
+        crit[k] = {"ok": ok, "text": " · ".join(p[k]["text"] for p in per)}
+    failed = [k for k in "abcde" if crit.get(k, {}).get("ok") is False]
+    if failed:
+        return {"status": "rejected", "failed": failed, "criteria": crit,
+                "text": f"NO APROBADO: falla {', '.join(failed)}. El candidato NO se adopta."}
+    if crit.get("e", {}).get("ok") is None:
+        return {"status": "pending_final", "failed": [], "criteria": crit,
+                "text": "PASA a)–d); FALTA e) (examen final con --final, una sola vez). Todavía NO se adopta."}
+    return {"status": "approved", "failed": [], "criteria": crit,
+            "text": "APROBADO: cumple a)–e). Adoptarlo es decisión tuya (ver REGLAS_DE_DECISION.md)."}
 
 
 # ---------------------------------------------------------------------------
@@ -844,6 +992,74 @@ def _table_lines(table: list[dict], indent: str = "  ", folds: bool = True) -> l
     return lines
 
 
+def _robustness_lines(rob: dict | None) -> list[str]:
+    """Resumen de la robustez en español sencillo (bloque de cada activo)."""
+    if not rob:
+        return []
+    if rob.get("error"):
+        return [f"  Robustez: no se pudo calcular ({rob['error']})."]
+    cp, pb, dc = rob["cpcv"], rob["pbo"], rob["dsr_current"]
+    pr = cp["procedure"]
+    L = ["  Robustez (solo datos anteriores a la reserva):"]
+    if pr["n"]:
+        L.append(f"    · CPCV ({cp['n_comb']} pruebas): si se elige \"la mejor variante de la rejilla\" con 4/6 "
+                 f"de la historia y se prueba en los otros 2/6, da de mediana {_f(pr['median'], 2)}R por "
+                 f"operación (del {_f(pr['p10'], 2)} al {_f(pr['p90'], 2)}; por debajo de 0 en "
+                 f"{round(pr['frac_neg'] * pr['n'])} de {pr['n']}).")
+    cf = cp["current_fixed"]
+    L.append(f"      La configuración actual habría sido la elegida {cp['times_current']} de {cp['n_comb']} veces; "
+             f"fija, en esas mismas pruebas, da de mediana {_f(cf['median'], 2)}R.")
+    if cp.get("delta_cand_cur"):
+        dd = cp["delta_cand_cur"]
+        L.append(f"      Candidato − actual en las pruebas: mediana {_f(dd['median'], 2)}R "
+                 f"(el candidato habría sido elegido {cp['times_candidate']} de {cp['n_comb']} veces).")
+    L.append(f"    · PBO = {_f(pb['pbo'], 2, False)}: probabilidad de que \"la mejor\" de una mitad de la historia "
+             f"quede en la mitad de abajo en la otra mitad (0,5 = como elegir al azar; el examen pide "
+             f"< {CRIT_MAX_PBO:.2f}).")
+    L.append(f"    · DSR = {_f(dc['dsr'], 2, False)} (actual): probabilidad de que la ventaja por operación sea "
+             f"real descontando las {rob['n_trials']} pruebas hechas (el examen pide > {CRIT_MIN_DSR:.2f}). "
+             f"Sin descontarlas: {_f(dc['psr0'], 2, False)}.")
+    if rob.get("dsr_candidate"):
+        L.append(f"      DSR del candidato = {_f(rob['dsr_candidate']['dsr'], 2, False)} "
+                 f"(sin descontar: {_f(rob['dsr_candidate']['psr0'], 2, False)}).")
+    return L
+
+
+def _robustness_detail(rob: dict | None) -> list[str]:
+    """Detalle técnico de CPCV, PBO y DSR."""
+    if not rob or rob.get("error"):
+        return [f"  CPCV / PBO / DSR: {'error: ' + rob['error'] if rob else 'no calculados'}"]
+    cp, pb = rob["cpcv"], rob["pbo"]
+    lab = rob.get("labels", {})
+    pr = cp["procedure"]
+    L = [f"  CPCV: {cp['n_groups']} grupos de velas, {cp['k_test']} de prueba ({cp['n_comb']} combinaciones), "
+         f"purga {cp['purge_bars']} velas a cada lado y embargo {cp['embargo_bars']} velas; elegida = máx E[R] "
+         f"de entrenamiento con N ≥ {MIN_TRADES_SELECT} (si ninguna, la actual).",
+         f"    Procedimiento: media {_f(pr['mean'])}  mediana {_f(pr['median'])}  mín {_f(pr['min'])}  "
+         f"máx {_f(pr['max'])}  agregado ΣR/N {_f(pr.get('pooled_er'))}",
+         "    Elegidas: " + "; ".join(f"{lab.get(k, k)} ×{n}" for k, n in cp["chosen_counts"].items())]
+    L.append("    Por combinación (grupos de prueba: elegida → E[R] prueba (N) | actual (N)"
+             + (" | candidato (N)" if cp.get("delta_cand_cur") else "") + "):")
+    for c in cp["combos"]:
+        s = (f"      {c['test_groups']}: {lab.get(c['chosen'], c['chosen'])[:30]:30} → {_f(c['er_test'], 2)} "
+             f"({c['n_test']}) | {_f(c['cur_er_test'], 2)} ({c['cur_n_test']})")
+        if "cand_er_test" in c:
+            s += f" | {_f(c['cand_er_test'], 2)} ({c['cand_n_test']})"
+        L.append(s)
+    L.append(f"  PBO (CSCV): S={pb['S']} bloques, {pb['n_comb']} particiones ({pb['n_valid']} válidas), "
+             f"{pb['n_variants']} variantes; λ mediana {_f(pb['lambda_median'], 2)}; E[R] de la mejor: dentro "
+             f"{_f(pb['is_best_er_median'], 2)} → fuera {_f(pb['oos_best_er_median'], 2)} (medianas); "
+             f"P(E[R] fuera < 0) = {_f(pb['p_oos_loss'], 2, False)}.")
+    for name, d in (("actual", rob["dsr_current"]), ("candidato", rob.get("dsr_candidate"))):
+        if d:
+            L.append(f"  DSR {name}: N={d['n']} SR/operación {_f(d['sr'])}  asimetría {_f(d['skew'], 2)}  "
+                     f"curtosis {_f(d['kurt'], 2, False)}  pruebas {d['n_trials']}  sd(SR rejilla) "
+                     f"{_f(d['sd_trials_sr'], 3, False)} ({rob['grid_sr_n']} variantes con N ≥ {MIN_TRADES_SELECT})  "
+                     f"E[máx Z] {_f(d['e_max_z'], 2, False)}  SR0 {_f(d['sr0'], 3, False)}  "
+                     f"PSR(0) {_f(d['psr0'], 3, False)}  DSR {_f(d['dsr'], 3, False)}")
+    return L
+
+
 def format_report(report: dict) -> str:
     """Texto del informe en español: veredicto, tablas por escenario y detalle técnico."""
     L = []
@@ -853,6 +1069,9 @@ def format_report(report: dict) -> str:
     v = report.get("verdict")
     if v:
         L.append(f"VEREDICTO: {v['text']}")
+        for k, c in (v.get("criteria") or {}).items():
+            st = {True: "OK", False: "FALLA", None: "PENDIENTE"}[c["ok"]]
+            L.append(f"  {k}) [{st:^9}] {c['text']}")
     else:
         L.append("SIN VEREDICTO: " + (report.get("registry_error") or "no se pudo completar el protocolo."))
     for w in report.get("warnings", []):
@@ -882,6 +1101,7 @@ def format_report(report: dict) -> str:
         if res.get("candidate"):
             L.append(f"  {res['candidate_variant']['label']}:")
             L.extend(_table_lines(res["candidate"]))
+        L.extend(_robustness_lines(res.get("robustness")))
         if res.get("reserve"):
             L.append(f"  RESERVA (setups ≥ {report['reserve_start']}, horizonte completo):")
             L.append("    Nota: la configuración actual se eligió en sep-2026 mirando datos hasta entonces; "
@@ -918,8 +1138,7 @@ def format_report(report: dict) -> str:
             s = g["selection"]
             L.append(f"   {mark} {g['label']:42} N={s['n']:>4}  E[R]={_f(s['er'])}"
                      + ("" if s["eligible"] else "  (no elegible)"))
-        rob = res.get("robustness")
-        L.append("  CPCV / PBO / DSR: " + ("ver bloque de robustez" if rob else "no calculados todavía."))
+        L.extend(_robustness_detail(res.get("robustness")))
     L.append("Costes: spread de XM medio a la entrada y medio a la salida (1 por operación); swap siempre en "
              "contra por noche (cripto 7/semana; oro y SPX 5 con triple el miércoles), rollover a las 00:00 UTC.")
     L.append("=" * 100)
@@ -1034,6 +1253,18 @@ def run_protocol(symbol: str | None = None, candidate_path: str | None = None,
             echo(f"ERROR: {exc}")
             return 1, report
         res["live_check"] = {"approved": lv.get("approved"), "emitted": lv.get("emitted")}
+        if candidate:
+            # Criterio a): vivo = validador también con la configuración del candidato.
+            cv = res["candidate_variant"]
+            ov = dict(candidate.get("overrides") or {})
+            ov.update({"ml_threshold": cv["ml_threshold"], "directions": list(cv["directions"])})
+            try:
+                with config_override(sym, ov, candidate.get("params_override")):
+                    lvc = live_check(sym, d4, d1)
+            except Exception as exc:  # noqa: BLE001 — sin comprobación, a) falla
+                lvc = {"match": False, "error": str(exc)}
+            res["candidate_live_check"] = {k: lvc.get(k) for k in
+                                           ("match", "approved", "emitted", "repeated", "error")}
         report["symbols"].append(res)
         del d4, d1
 
@@ -1067,7 +1298,13 @@ def run_protocol(symbol: str | None = None, candidate_path: str | None = None,
                           "variants": len(registered_hashes(entries)),
                           "total_trials": total_trials(entries), "new": len(new),
                           "final_accesses_logged": len(finals)}
-    report["verdict"] = evaluate_criteria(report["symbols"], candidate)
+    # Robustez con el número de pruebas YA registrado (incluye las de esta ejecución).
+    for r in report["symbols"]:
+        try:
+            r["robustness"] = robustness_for(r, report["registry"]["total_trials"])
+        except Exception as exc:  # noqa: BLE001 — sin robustez, b)–d) no se aprueban
+            r["robustness"] = {"error": f"{type(exc).__name__}: {exc}"}
+    report["verdict"] = evaluate_criteria(report["symbols"], candidate, final=final)
     echo(format_report(report))
     if out:
         try:

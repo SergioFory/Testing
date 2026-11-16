@@ -403,7 +403,8 @@ def test_protocolo_final_registra_acceso_y_avisa(fake_detector, registry):
     assert r["reserve"]["current"] and r["reserve"]["candidate"]
     assert r["okx"]["origin"] == "prueba" and r["okx"]["current"]
     assert "YA VIO LA RESERVA" not in txt
-    assert rep["verdict"]["status"] == "pending"                  # criterios: grupo B
+    assert rep["verdict"]["status"] in ("rejected", "approved")    # criterios a)–e) con --final
+    assert rep["verdict"]["criteria"]["e"]["ok"] is not None
     entries = P.read_registry(registry)
     fa = [e for e in entries if e["kind"] == "final_access"]
     assert len(fa) == 1 and fa[0]["symbol"] == "ETHUSDT" and fa[0]["okx"] is True

@@ -140,3 +140,88 @@ Simulación de 10.000 secuencias por caso (script de la Fase 1, `D-vigilancia/oc
 - Aplicado hacia atrás a la historia (166 setups aprobados de BTC, ETH y oro), el SPRT habría
   aceptado el edge en la señal 37 (sin costes) o 47 (con costes) y el CUSUM nunca pasó de 8R.
   **Es dentro de muestra** (los filtros se eligieron con esos datos): no prueba nada sobre el futuro.
+
+## Puerta de validación: criterios de APROBADO (fijados el 16-nov-2026, Fase 2)
+
+**Código:** `backtest/protocol.py` (orquestación y veredicto, constantes `CRIT_*`) y
+`backtest/robustness.py` (CPCV, PBO, DSR). **Comando (offline, nunca en el worker):**
+
+    python main.py validate --protocol                                  # línea base de la config actual
+    python main.py validate --protocol --candidate cand.json            # examen de un candidato (sin reserva)
+    python main.py validate --protocol --candidate cand.json --final    # examen final: UNA sola vez por candidato
+
+Cualquier cambio de la estrategia (umbral, filtro, activo, dirección…) tiene que pasar este
+examen antes de llegar al vivo. Los criterios se escribieron **antes** de ver ningún resultado
+de candidatos y no se cambian a la vista de los datos; si alguna vez se cambian, se anota aquí
+con fecha y motivo.
+
+### Qué mira el examen (en sencillo)
+
+Todo se mide en R netos con los costes de XM y un swap supuesto del 5 % anual (escenario de
+decisión), **solo con datos anteriores al 15-nov-2025**. Lo posterior es la **reserva** y solo
+se mira con `--final`.
+
+- **CPCV con re-selección:** se parte la historia en 6 trozos; 15 veces se coge "la mejor
+  variante" de una rejilla de 15 (umbral actual ±0,05/±0,10 × ambas/solo largos/solo cortos)
+  usando 4 trozos y se prueba en los otros 2, dejando un margen entre ambos (el horizonte de
+  una operación y un 1 % más) para que no se "vean". Dice si elegir con datos funciona en datos
+  no vistos.
+- **PBO:** probabilidad de que la variante que parece mejor en una mitad de la historia quede
+  en la mitad de abajo en la otra mitad (0,5 = como elegir al azar).
+- **DSR:** probabilidad de que la ventaja por operación sea real **descontando todas las pruebas
+  hechas** (registro `backtest/trials_registry.jsonl`: 400 históricas + cada variante evaluada).
+  Cuantas más ideas se prueban, más exigente se vuelve.
+
+### Criterios (un candidato se adopta SOLO si cumple los cinco)
+
+a) **Vivo = validador** con la configuración del candidato (lo que se enviaría por Telegram es
+   exactamente lo que se ha medido).
+b) **Mejora del E[R] neto ≥ +0,10R** frente a la configuración actual en la **mediana de la
+   CPCV** (diferencia candidato − actual en los trozos de prueba) **y** en **al menos 2 de los 3
+   periodos** fijos (cripto: may-2022→2023, 2024, 2025→14-nov-2025; oro/SPX: 2006–2014,
+   2015–2020, 2021→14-nov-2025).
+c) **PBO** de la rejilla con el candidato **< 0,20**.
+d) **DSR** del candidato **> 0,95**.
+e) Con `--final`: en la **reserva** y, en cripto, en el **histórico de OKX 2019-12→2022-04**, la
+   diferencia candidato − actual **no es negativa**. Si no hay datos de OKX para comprobarlo,
+   cuenta como no cumplido.
+
+El informe empieza por una línea: **"APROBADO"**, **"NO APROBADO: falla b, d"** o, si a)–d) pasan
+pero aún no se hizo `--final`, **"PASA a)–d); FALTA e)"** (todavía no se adopta). Aprobar no
+cambia nada solo: adoptar el candidato es decisión tuya y se anota aquí con fecha (y reinicia el
+SPRT, regla 1).
+
+Reglas de uso:
+- `--final` se usa **una sola vez por candidato**. Cada acceso queda en el registro; si un
+  candidato ya vio la reserva, el informe lo avisa en grande y su resultado ya no es independiente.
+- Si el registro de pruebas no se puede leer o escribir, **no hay veredicto**.
+- Parámetros fijos: 6 grupos y 2 de prueba en la CPCV, purga de `forward_bars` velas a cada
+  lado + embargo del 1 % de las velas, 16 bloques en el PBO, mínimo de 10 operaciones para que
+  una variante pueda ser "la elegida" (si ninguna llega, se queda la actual).
+
+### Línea base de la configuración actual (16-nov-2026, datos hasta el 15-nov-2026)
+
+Cifras **dentro de muestra** para la config actual (se eligió mirando estos datos), solo como
+referencia para comparar candidatos:
+
+| Activo | E[R] XM swap 5 % (N) | CPCV: "elegir la mejor" en datos no vistos (mediana) | Config actual fija en esas pruebas (mediana) | PBO | DSR (sin descontar pruebas) |
+|---|---|---|---|---|---|
+| BTC | +0,50R (51) | +0,60R (0 de 15 por debajo de 0) | +0,50R | 0,56 | 0,36 (1,00) |
+| ETH | +0,30R (55) | +0,06R (7 de 15 por debajo de 0) | +0,31R | 0,86 | 0,61 (0,94) |
+| Oro | +0,31R (33) | +0,16R (2 de 14) | +0,45R | 0,55 | 0,39 (0,93) |
+| SPX (sombra) | +0,12R (41) | +0,09R (6 de 15) | +0,16R | 0,15 | 0,02 (0,73) |
+
+Cómo leerlo: **ninguna** configuración actual pasaría hoy c) y d) a la vez. Con ~30–55
+operaciones por activo y 460 pruebas hechas, el DSR no puede llegar a 0,95 salvo con una
+ventaja muy grande; el PBO de BTC, ETH y oro está en la zona de "elegir al azar" entre
+variantes parecidas. En SPX el PBO bajo no indica ventaja: solo que las variantes "solo largos"
+ganan siempre a las que incluyen cortos (muy negativas). Es decir, el examen es **exigente a
+propósito**: lo normal será que un cambio no lo pase y la configuración siga congelada.
+
+### Ejemplo registrado: "ETH con umbral 0,45" (informe final §7, 3.3) — NO APROBADO, no se adopta
+
+Único `--final` de la Fase 2 (16-nov-2026 00:57 UTC, queda en el registro):
+a) OK (91 aprobados = 91 emitidos); b) falla: mediana CPCV −0,04R, periodos −0,00 / +0,16 / −0,25R
+(1 de 3); c) falla: PBO 0,86; d) falla: DSR 0,57; e) falla: reserva −0,15R (actual +0,42R con
+N=8, candidato +0,26R con N=14), OKX +0,20R (actual −0,18R N=19, candidato +0,02R N=25).
+Este candidato ya vio la reserva: si se vuelve a evaluar, su resultado ya no es independiente.

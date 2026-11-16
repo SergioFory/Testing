@@ -27,10 +27,14 @@ from data.database import get_engine, init_db, _to_unix
 # Motivos posibles (ver también el comentario del DDL en data/database.py).
 # 'event_blackout' ya no se produce desde la Fase 3 (filtro de eventos quitado);
 # se mantiene para leer filas antiguas.
+# Fase 3 (3.1): 'portfolio_R1'…'portfolio_R4' = bloqueado por el control de cartera
+# (solo con PORTFOLIO_CONTROL_MODE="enforce"; hoy no se producen).
+PORTFOLIO_MOTIVOS = ("portfolio_R1", "portfolio_R2", "portfolio_R3", "portfolio_R4")
 MOTIVOS = ("emitted", "shadow_asset", "below_threshold", "not_fresh",
-           "event_blackout", "risk_invalid", "duplicate", "not_best")
-# Motivos definitivos: una vez registrado como señal, no se sobrescribe.
-FINAL_MOTIVOS = ("emitted", "shadow_asset")
+           "event_blackout", "risk_invalid", "duplicate", "not_best") + PORTFOLIO_MOTIVOS
+# Motivos definitivos: una vez registrado como señal (o bloqueado por la cartera,
+# que tampoco se reintenta), no se sobrescribe.
+FINAL_MOTIVOS = ("emitted", "shadow_asset") + PORTFOLIO_MOTIVOS
 
 
 def _key(ts, direction) -> tuple:
@@ -42,7 +46,8 @@ def _key(ts, direction) -> tuple:
 
 def classify_window(window: pd.DataFrame, already, current_price: float,
                     max_dist_atr: float | None, chosen_key=None, chosen_motivo: str | None = None,
-                    symbol_motivo: str | None = None, asset_live: bool = True) -> list[dict]:
+                    symbol_motivo: str | None = None, asset_live: bool = True,
+                    chosen_portfolio_flag: str | None = None) -> list[dict]:
     """
     Motivo de cada setup de la ventana del ciclo (función pura, sin BD).
 
@@ -54,12 +59,14 @@ def classify_window(window: pd.DataFrame, already, current_price: float,
         max_dist_atr:  distancia máxima entrada↔precio en ATR (como get_best_setup).
         chosen_key:    (ts, direction) del setup que eligió get_best_setup, o None.
         chosen_motivo: qué le pasó al elegido: emitted / shadow_asset /
-                       risk_invalid / event_blackout / duplicate (None = sin decidir:
-                       esa fila no se registra en este ciclo).
+                       risk_invalid / event_blackout / duplicate / portfolio_R1…R4
+                       (None = sin decidir: esa fila no se registra en este ciclo).
         symbol_motivo: motivo que afecta a TODO el activo en este ciclo (antes solo
                        'event_blackout', que ya no se produce desde la Fase 3); se
                        aplica a los demás aprobados ejecutables.
         asset_live:    False si el activo está en modo sombra (para los ya registrados).
+        chosen_portfolio_flag: marca del control de cartera del elegido ('R1,R3',
+                       'ok'; Fase 3, 3.1). Solo se guarda en la fila del elegido.
 
     Returns:
         Lista de dicts listos para record_shadow_setups. keep_existing=True indica
@@ -100,6 +107,7 @@ def classify_window(window: pd.DataFrame, already, current_price: float,
             else:
                 motivo = "not_best"
             raw = s.get("raw_score")
+            is_chosen = chosen is not None and key == chosen and not keep_existing
             out.append({
                 "setup_ts":   key[0],
                 "direction":  key[1],
@@ -111,6 +119,7 @@ def classify_window(window: pd.DataFrame, already, current_price: float,
                 "sl":         float(sl),
                 "tp":         float(tp),
                 "atr":        None if atr is None or pd.isna(atr) else float(atr),
+                "portfolio_flag": chosen_portfolio_flag if is_chosen else None,
                 "keep_existing": keep_existing,
             })
         except Exception as exc:
@@ -133,12 +142,16 @@ def record_shadow_setups(symbol: str, rows: list[dict], now=None) -> int:
     created = _to_unix(now if now is not None else pd.Timestamp.now(tz="UTC"))
     finals = ", ".join(f"'{m}'" for m in FINAL_MOTIVOS)
     base = ("INSERT INTO shadow_setups (symbol, setup_ts, direction, setup_type, raw_score, "
-            "approved, motivo, entry, sl, tp, atr, created_ts) VALUES (:symbol, :setup_ts, "
-            ":direction, :setup_type, :raw_score, :approved, :motivo, :entry, :sl, :tp, :atr, "
-            ":created_ts) ON CONFLICT (symbol, setup_ts, direction) ")
+            "approved, motivo, entry, sl, tp, atr, created_ts, portfolio_flag) VALUES (:symbol, "
+            ":setup_ts, :direction, :setup_type, :raw_score, :approved, :motivo, :entry, :sl, :tp, "
+            ":atr, :created_ts, :portfolio_flag) ON CONFLICT (symbol, setup_ts, direction) ")
     sql_keep = text(base + "DO NOTHING")
+    # portfolio_flag: la del ciclo en que fue el elegido; un ciclo posterior en que
+    # no lo es (NULL) no la borra.
     sql_upd = text(base + "DO UPDATE SET motivo = excluded.motivo, approved = excluded.approved, "
-                   f"raw_score = excluded.raw_score WHERE shadow_setups.motivo NOT IN ({finals})")
+                   "raw_score = excluded.raw_score, portfolio_flag = COALESCE("
+                   "excluded.portfolio_flag, shadow_setups.portfolio_flag) "
+                   f"WHERE shadow_setups.motivo NOT IN ({finals})")
     n = 0
     with get_engine().begin() as conn:
         for r in rows:
@@ -146,6 +159,7 @@ def record_shadow_setups(symbol: str, rows: list[dict], now=None) -> int:
                 logger.warning(f"Registro sombra: motivo desconocido {r['motivo']!r}; se omite.")
                 continue
             params = {k: v for k, v in r.items() if k != "keep_existing"}
+            params.setdefault("portfolio_flag", None)
             params.update(symbol=symbol, setup_ts=_to_unix(r["setup_ts"]), created_ts=created)
             res = conn.execute(sql_keep if r.get("keep_existing") else sql_upd, params)
             n += max(0, res.rowcount or 0)

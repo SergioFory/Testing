@@ -26,7 +26,8 @@ vez se cambia algo de este documento, se escribe aquí con fecha y motivo.
   y con la entrada al precio del mensaje. Los costes reales se vigilan con los fills (regla 6).
 - **Versión con más datos (registro sombra)**: los setups APROBADOS que el sistema detectó
   aunque no se enviaran (por frescura, duplicado, etc.; "evento macro" solo en filas anteriores
-  al 16-nov-2026, cuando se quitó ese filtro), resueltos con la misma
+  al 16-nov-2026, cuando se quitó ese filtro; "control de cartera" solo si algún día se activa
+  su modo "enforce"), resueltos con la misma
   regla. Sirve para tener una lectura antes, pero **las decisiones de riesgo usan las señales live**.
 
 ## Las dos alarmas
@@ -129,6 +130,61 @@ El tope del 10 % actuaba en los 212 setups; el de apalancamiento 1× no actúa e
 **Pendiente práctico (no cambia nada del sistema):** con 1.000 USD esos tamaños pueden quedar por
 debajo del lote mínimo de XM. En cuanto se rellene `XM_CONTRACTS` el mensaje lo dirá ("no llega al
 lote mínimo… con X lotes el riesgo sería Y %"); hasta entonces compruébalo en MT5 antes de operar.
+
+## Control de cartera (Fase 3, 16-nov-2026): EN PRUEBAS, no bloquea
+
+**Qué es.** Antes de cada señal el sistema mira su **cartera según el sistema** = las señales que
+te envió y siguen abiertas, **salvo las que marcaste con `/skip`** (si luego envías `/fill`, vuelve a
+contar). Con eso comprueba cuatro reglas (`PORTFOLIO_RULES` en `config/settings.py`, código en
+`risk/portfolio.py`):
+
+| Regla | Qué dice |
+|---|---|
+| R1 | Como mucho **3 posiciones abiertas** a la vez. |
+| R2 | **Nunca LONG y SHORT a la vez** en el mismo activo. |
+| R3 | BTC y ETH se mueven juntos: el riesgo abierto **BTC + ETH** (incluida la señal nueva) no pasa del **0,50 %** del capital. Con el 0,25 % por operación: como mucho 2 cripto abiertas. |
+| R4 | Si hoy (día UTC) ya se ha perdido un **3 %** del capital en operaciones cerradas, no abrir más. |
+
+**Hoy (modo `PORTFOLIO_CONTROL_MODE = "shadow"`) no bloquea nada:** la señal te llega igual y el
+mensaje añade "Cartera según el sistema: 2 abiertas (BTC long #12, …)" y, si incumple alguna regla,
+"⚠️ Con esta señal: … (control de cartera en pruebas: no bloquea)". Queda guardado (columna
+`portfolio_flag`) y el resumen nocturno cuenta, por regla, cuántas señales de las últimas 24 h y 30
+días habría bloqueado. El modo `"enforce"` (la señal no se envía y queda en el registro sombra con
+motivo `portfolio_R1`…`portfolio_R4`, sin reintentarla más tarde) está programado y probado, pero
+**solo se activa si tú lo decides**.
+
+**Medición histórica** (16-nov-2026; regla de decisión escrita antes de calcular en
+`scratchpad/fase3/LOG.md`; script `scratchpad/fase3/B-cartera/medicion_cartera.py`). Señales que
+habría emitido el vivo, simuladas con costes XM (swap 5 %), riesgo 0,25 % cada una, solo datos
+anteriores a la reserva (15-nov-2025). Periodo principal: los 4 activos a la vez, 2022-05 → 2025-11
+(125 señales: E[R] +0,42R, R total +52,8R, peor racha −7,95R):
+
+| Regla | Señales que habría bloqueado | Efecto en R total y peor racha | Frente a quitar al azar (5.000 sim.) | Recomendación |
+|---|---|---|---|---|
+| R1 | 0 de 125 | ninguno | — (p = 1) | No activar: no habría actuado nunca |
+| R2 | 0 de 125 | ninguno | — (p = 1) | No activar: no habría actuado nunca |
+| R3 | 0 de 125 | ninguno | — (p = 1) | No activar: no habría actuado nunca |
+| R4 | 0 de 125 | ninguno | — (p = 1) | No activar: no habría actuado nunca |
+
+Lo mismo con solo BTC/ETH/oro (119 señales), con todo el histórico (180) y con los costes del
+validador: **ninguna regla habría bloqueado ninguna señal**. Por qué: en la historia nunca hubo más
+de 3 posiciones abiertas a la vez (R1 actúa con la 4.ª), nunca más de 2 cripto a la vez (R3 actúa con
+la 3.ª), nunca una señal contraria con otra abierta del mismo activo, y la peor pérdida realizada en un
+día fue 0,25 % (R4 actúa al 3 %). Se queda cerca del límite: 6 señales salieron con 2 posiciones ya
+abiertas y 43 de 106 señales cripto con la otra cripto abierta (20 de ellas en la misma vela y
+dirección).
+
+**Recomendación por la regla fijada de antemano:** ninguna regla cumple "reduce la peor racha más que
+quitar señales al azar" (no quitan ninguna) y R2 no bloquea ninguna, así que **no se recomienda pasar
+ninguna a "enforce"**: el modo sigue en `"shadow"`. Esto no dice que las reglas sean malas: dice que
+con el sistema actual no habrían cambiado nada; funcionan como cinturón de seguridad para situaciones
+que la historia no ha mostrado (p. ej. muchas señales seguidas en un mercado nuevo). Activarlas o no
+es decisión tuya; si se activa, se anota aquí la fecha. El registro en vivo dirá si alguna llega a
+actuar (resumen nocturno, "Cartera según el sistema").
+
+**Matiz de los primeros días:** las señales enviadas antes del 16-nov-2026 se dimensionaron con el
+tope antiguo (riesgo 0,1–0,8 %); mientras sigan abiertas, R3 puede marcar una señal con una sola
+cripto abierta. Desaparece solo en ≤ 4 días (horizonte de las cripto).
 
 ## Qué esperar (medido antes de empezar)
 

@@ -657,6 +657,35 @@ RISK = {
 }
 
 # =============================================================================
+# CONTROL DE CARTERA (Fase 3, punto 3.1; F11 y F19) — risk/portfolio.py
+# -----------------------------------------------------------------------------
+# Antes de cada señal se reconstruye desde la BD la cartera SEGÚN EL SISTEMA
+# (señales live abiertas que el usuario no saltó con /skip) y se comprueban:
+#   R1 máximo de posiciones abiertas;
+#   R2 nunca LONG y SHORT a la vez en el mismo activo;
+#   R3 grupo correlacionado BTC+ETH: riesgo abierto del grupo + la nueva ≤ 0,50 %
+#      del capital (con el 0,25 % por operación: como mucho 2 cripto abiertas);
+#   R4 si la pérdida realizada del día UTC llega al 3 % del capital, no abrir.
+# PORTFOLIO_CONTROL_MODE:
+#   "shadow"  (HOY): la señal SALE igual; se guarda qué regla la habría bloqueado
+#             (columna portfolio_flag) y el mensaje lo cuenta ("en pruebas: no bloquea").
+#   "enforce" (probado con tests, NO activado): la señal no se emite y el setup
+#             queda en shadow_setups con motivo 'portfolio_R1'…'portfolio_R4'.
+# Pasar a "enforce" es decisión del usuario, con la recomendación por regla de
+# REGLAS_DE_DECISION.md ("Control de cartera"). (RISK["max_positions"] y
+# RISK["max_daily_loss"] son del backtest antiguo, backtest/engine.py; el vivo usa esto.)
+# =============================================================================
+PORTFOLIO_CONTROL_MODE = "shadow"
+PORTFOLIO_RULES = {
+    "max_open_positions":          3,       # R1
+    "no_opposite_same_symbol":     True,    # R2
+    "correlated_groups": [                  # R3
+        {"name": "BTC+ETH", "symbols": ["BTCUSDT", "ETHUSDT"], "max_risk_pct": 0.005},
+    ],
+    "max_daily_realized_loss_pct": 0.03,    # R4
+}
+
+# =============================================================================
 # FILTRO DE EVENTOS ECONÓMICOS — QUITADO (Fase 3, punto 0; decisión del usuario
 # del 16-nov-2026)
 # -----------------------------------------------------------------------------

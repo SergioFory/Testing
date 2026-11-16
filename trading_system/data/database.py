@@ -175,6 +175,9 @@ _DDL = [
     #   not_best         aprobado y ejecutable, pero en ese ciclo salió otro de
     #                    mayor score (transitorio: suele pasar a 'emitted' en el
     #                    ciclo siguiente)
+    #   portfolio_R1…R4  aprobado, bloqueado por el control de cartera (Fase 3,
+    #                    3.1; solo con PORTFOLIO_CONTROL_MODE="enforce", hoy NO
+    #                    activado). Definitivo: no se reintenta en ciclos posteriores.
     # El tracker lo resuelve con la MISMA convención que las señales
     # (check_outcome_detail) para medir también lo que no se emitió. SL/TP = los
     # del setup. Tiempos en segundos Unix (como signals).
@@ -289,6 +292,10 @@ _SIGNAL_COLUMNS = [
     # Quién cerró la señal (Fase 1, 1.9): 'auto' = el tracker por velas;
     # 'manual' = el formulario del dashboard. NULL = filas anteriores.
     ("resolved_by",  "TEXT"),
+    # Control de cartera (Fase 3, 3.1): reglas que la señal incumplía al emitirse
+    # ('R1,R3'), 'ok' si ninguna, NULL si no se evaluó (filas anteriores o fallo
+    # de la comprobación). En modo "shadow" la señal sale igual.
+    ("portfolio_flag", "TEXT"),
 ]
 _SIGNAL_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_signals_setup ON signals(symbol, direction, setup_ts)",
@@ -302,6 +309,12 @@ _SIGNAL_INDEXES = [
 #           antes de existir la columna (procedencia sin verificar).
 _OHLCV_COLUMNS = [
     ("source", "TEXT"),
+]
+
+# Fase 3 (3.1) — registro sombra: marca del control de cartera del setup elegido
+# en el ciclo (mismos valores que signals.portfolio_flag; NULL en los demás).
+_SHADOW_COLUMNS = [
+    ("portfolio_flag", "TEXT"),
 ]
 
 
@@ -322,7 +335,8 @@ def _migrate(conn, dialect: str) -> None:
     # y en SQLite se tolera "duplicate column" para que ninguno de los dos falle.
     if dialect != "sqlite":
         conn.execute(text("SELECT pg_advisory_xact_lock(724501)"))
-    for table, columns in (("signals", _SIGNAL_COLUMNS), ("ohlcv", _OHLCV_COLUMNS)):
+    for table, columns in (("signals", _SIGNAL_COLUMNS), ("ohlcv", _OHLCV_COLUMNS),
+                           ("shadow_setups", _SHADOW_COLUMNS)):
         have = _existing_columns(conn, table, dialect)
         for col, sqltype in columns:
             if col in have:
@@ -489,10 +503,10 @@ def save_signal(signal: dict) -> int:
     init_db()
     cols = ("symbol, ts, setup_type, direction, ml_score, sentiment_score, "
             "entry_price, stop_loss, take_profit, position_size, atr, "
-            "setup_ts, data_source, last_bar_ts, mode, notified, alert_text")
+            "setup_ts, data_source, last_bar_ts, mode, notified, alert_text, portfolio_flag")
     vals = (":symbol, :ts, :setup_type, :direction, :ml_score, :sentiment_score, "
             ":entry_price, :stop_loss, :take_profit, :position_size, :atr, "
-            ":setup_ts, :data_source, :last_bar_ts, :mode, :notified, :alert_text")
+            ":setup_ts, :data_source, :last_bar_ts, :mode, :notified, :alert_text, :portfolio_flag")
     if dialect == "sqlite":
         sql = text(f"INSERT INTO signals ({cols}) VALUES ({vals})")
         with engine.begin() as conn:
@@ -529,6 +543,7 @@ def _signal_params(signal: dict) -> dict:
     return {
         "notified":        None if notified is None else int(bool(notified)),
         "alert_text":      signal.get("alert_text"),
+        "portfolio_flag":  signal.get("portfolio_flag"),
         "setup_ts":        _to_unix(signal.get("setup_ts")),
         "data_source":     signal.get("data_source"),
         "last_bar_ts":     _to_unix(signal.get("last_bar_ts")),

@@ -341,7 +341,7 @@ def cmd_signal(symbol: str, notify: bool = False, ohlcv_cache: dict | None = Non
     # últimas velas cerradas), aprobados o no, se guardan al final con su motivo.
     # `fate` recoge qué le pasó al setup elegido; el registro va en el finally
     # para que se guarde salga por donde salga el ciclo, y nunca lo tumba.
-    fate = {"key": None, "motivo": None, "symbol_motivo": None}
+    fate = {"key": None, "motivo": None, "symbol_motivo": None, "portfolio_flag": None}
     try:
         _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_setup_ts,
                          last_bar_ts, already, data_source, notify, fate)
@@ -364,7 +364,8 @@ def _record_shadow_window(symbol, df_scored, min_setup_ts, last_bar_ts, already,
         rows = classify_window(window, already, current_price, max_dist_atr,
                                chosen_key=fate.get("key"), chosen_motivo=fate.get("motivo"),
                                symbol_motivo=fate.get("symbol_motivo"),
-                               asset_live=notify_enabled(symbol))
+                               asset_live=notify_enabled(symbol),
+                               chosen_portfolio_flag=fate.get("portfolio_flag"))
         if rows:
             n = record_shadow_setups(symbol, rows)
             resumen = ", ".join(f"{r['direction']}@{r['setup_ts']:%m-%d %H:%M}={r['motivo']}" for r in rows)
@@ -387,9 +388,20 @@ def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_se
     from data.outcome_tracker      import (is_duplicate_signal, is_duplicate_setup,
                                            has_recent_legacy_alert, save_signal_from_trade)
 
+    # Control de cartera en modo "enforce" (Fase 3, 3.1; hoy NO activado): un setup
+    # que la cartera ya bloqueó no se reintenta en ciclos posteriores (se emitiría
+    # tarde). En modo "shadow" no hay setups bloqueados y esto no hace nada.
+    exclude = set(already or ())
+    try:
+        from risk.portfolio import control_mode, blocked_setup_keys
+        if control_mode() == "enforce":
+            exclude |= blocked_setup_keys(symbol, min_setup_ts)
+    except Exception as exc:
+        logger.warning(f"[{symbol}] Control de cartera: no se pudieron leer los bloqueados: {exc}")
+
     best = get_best_setup(df_scored, current_price=current_price, max_dist_atr=max_dist_atr,
                           min_setup_ts=min_setup_ts, max_setup_ts=last_bar_ts,
-                          exclude_keys=already)
+                          exclude_keys=exclude)
     if best is None:
         logger.info(
             f"[{symbol}] Sin setup nuevo aprobado en las últimas {MAX_SETUP_AGE_BARS + 1} velas "
@@ -428,6 +440,28 @@ def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_se
 
     mode = "live" if notify_enabled(symbol) else "shadow"
 
+    # Control de cartera (Fase 3, 3.1; F11, F19): cartera SEGÚN EL SISTEMA (señales
+    # live abiertas no saltadas con /skip) y reglas R1–R4 de PORTFOLIO_RULES. En
+    # modo "shadow" (el actual) la señal sale igual: se guarda la marca y el mensaje
+    # lo cuenta. En "enforce" (no activado) no se emite si incumple alguna regla
+    # (solo activos que notifican). Si la comprobación falla, la señal sigue su
+    # camino sin marca (nunca tumba el ciclo).
+    portfolio = None
+    try:
+        from risk.portfolio import check_new_signal
+        portfolio = check_new_signal(trade, capital=TRADING_CAPITAL)
+    except Exception as exc:
+        logger.warning(f"[{symbol}] Control de cartera no disponible (la señal sigue igual): {exc}")
+    fate["portfolio_flag"] = portfolio.flag if portfolio is not None else None
+    if portfolio is not None and portfolio.broken:
+        logger.info(f"[{symbol}] Control de cartera ({portfolio.mode}): la señal incumpliría "
+                    f"{portfolio.flag}: " + "; ".join(b["text"] for b in portfolio.broken))
+        if portfolio.blocks and mode == "live":
+            fate["motivo"] = portfolio.motivo
+            logger.warning(f"[{symbol}] Señal {trade.direction.upper()} (setup {setup_ts}) NO emitida "
+                           f"por el control de cartera ({portfolio.motivo}).")
+            return
+
     # Sentimiento: APAGADO (Fase 1, SENTIMENT['enabled']=False; el veto contrarian
     # se descartó con datos). Solo se consulta si alguien lo reactiva.
     from config.settings import SENTIMENT
@@ -446,13 +480,14 @@ def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_se
     alert_text = (safe_format_signal_alert(trade, sentiment, setup_ts=setup_ts,
                                            current_price=current_price,
                                            threshold=cfg.get("ml_threshold"),
-                                           capital=TRADING_CAPITAL)
+                                           capital=TRADING_CAPITAL, portfolio=portfolio)
                   if will_notify else None)
     signal_id = save_signal_from_trade(trade, sentiment, setup_ts=setup_ts,
                                        data_source=data_source, last_bar_ts=last_bar_ts,
                                        mode=mode,
                                        notified=False if will_notify else None,
-                                       alert_text=alert_text)
+                                       alert_text=alert_text,
+                                       portfolio_flag=fate["portfolio_flag"])
     # -1 = el guardado lo rechazó (duplicado o error de escritura, ya registrado en el log).
     fate["motivo"] = ("duplicate" if signal_id is None or signal_id <= 0
                       else "emitted" if mode == "live" else "shadow_asset")

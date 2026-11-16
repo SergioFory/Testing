@@ -41,6 +41,9 @@ HELP_TEXT = (
     "   Si te equivocas, envía otro <code>/fill</code>: cuenta el más reciente.\n"
     "<code>/skip ID MOTIVO</code> — no la ejecutaste (y por qué).\n"
     "   Ej.: <code>/skip 123 llegué tarde</code>\n"
+    "   Además saca la señal de la <b>cartera del sistema</b> (las posiciones abiertas que "
+    "cuenta el control de cartera: máx. 3 abiertas, no LONG y SHORT a la vez, riesgo BTC+ETH). "
+    "Si luego la ejecutas, un <code>/fill</code> la vuelve a meter.\n"
     "<code>/help</code> — esta ayuda.\n\n"
     "<i>El número de la señal (ID) aparece en el mensaje de la señal. Los comandos se leen "
     "al principio de cada ciclo (cada hora), así que la respuesta puede tardar hasta una hora.</i>"
@@ -208,7 +211,9 @@ def handle_command(cmd: str, args: list[str], update_id: int | None = None, ts=N
         if not save_fill(sig_id, "skip", None, note, ts=ts, update_id=update_id):
             return None
         return (f"📝 <b>Anotado: no ejecutaste la señal {head}</b>\n"
-                f"Motivo: {html.escape(note) if note else '(sin motivo)'}{nota_prev}")
+                f"Motivo: {html.escape(note) if note else '(sin motivo)'}\n"
+                "<i>Sale de la cartera del sistema (ya no cuenta como posición abierta "
+                "para el control de cartera).</i>" + nota_prev)
 
     # /fill
     if len(args) < 2:

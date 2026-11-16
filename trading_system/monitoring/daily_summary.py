@@ -12,6 +12,9 @@ Y en conjunto: resultados de las últimas 24 h en R, estado de la vigilancia
 SPRT/CUSUM (monitoring/sequential.py) y fills frente a lo teórico.
 Fase 2 (2.3): bloque "Calidad de datos" por activo (monitoring/data_monitor.py).
 Fase 2 (2.4): bloque "Eventos macro" de las próximas 48 h (data/econ_events.csv).
+Fase 3 (3.1): bloque "Cartera según el sistema": posiciones abiertas que cuenta el
+control de cartera y cuántas señales de las últimas 24 h / 30 días habría
+bloqueado (o bloqueó, en modo enforce) cada regla R1–R4.
 
 Solo lee la BD (consultas pequeñas, sin descargas). Cada bloque va en su propio
 try: si uno falla, el resto del resumen sale igual.
@@ -38,6 +41,11 @@ MOTIVO_TEXT = {
     "risk_invalid":    "no pasa el control de riesgo",
     "duplicate":       "duplicado",
     "not_best":        "salió otro de mayor score",
+    # Control de cartera en modo "enforce" (Fase 3, 3.1; hoy no activado).
+    "portfolio_R1":    "control de cartera: ya había 3 posiciones abiertas",
+    "portfolio_R2":    "control de cartera: posición contraria abierta en el mismo activo",
+    "portfolio_R3":    "control de cartera: riesgo del grupo BTC+ETH al máximo",
+    "portfolio_R4":    "control de cartera: pérdida del día ≥ 3 %",
 }
 RESULT_TEXT = {"win": "ganada (TP)", "loss": "perdida (SL)", "expired": "cierre por tiempo",
                "be": "break-even"}
@@ -293,6 +301,57 @@ def _fills_block() -> list[str]:
     return lines
 
 
+def portfolio_block(conn, now_unix: int) -> list[str]:
+    """
+    Fase 3 (3.1): cartera según el sistema (risk/portfolio.load_open_positions) y,
+    por regla, cuántas señales live de las últimas 24 h / 30 días incumplían la
+    regla (columna portfolio_flag; en modo shadow salieron igual) más los setups
+    que bloqueó en modo enforce (shadow_setups, motivo 'portfolio_R*').
+    """
+    from risk.portfolio import (load_open_positions, positions_text, control_mode,
+                                RULE_IDS, RULE_TEXT, rules_config, short_name)
+    mode = control_mode()
+    estado = ("en pruebas: no bloquea" if mode == "shadow" else "ACTIVO: bloquea")
+    lines = [f"🧺 <b>Cartera según el sistema</b> <i>(control de cartera {estado})</i>"]
+    now = pd.Timestamp(int(now_unix), unit="s", tz="UTC")
+    opens = load_open_positions(now=now)
+    txt = positions_text(opens)
+    if opens:
+        risk = sum(p["risk_pct"] for p in opens)
+        txt += f"; riesgo abierto {risk * 100:.2f} % del capital".replace(".", ",")
+        for grp in rules_config().get("correlated_groups") or ():
+            syms = set(grp.get("symbols") or ())
+            g = sum(p["risk_pct"] for p in opens if p.get("symbol") in syms)
+            if g > 0:
+                name = grp.get("name") or "+".join(short_name(x) for x in sorted(syms))
+                txt += f" ({_e(name)}: {g * 100:.2f} %)".replace(".", ",")
+    lines.append(f"  Abiertas: {_e(txt)}")
+    lines.append("  <i>Cuentan las señales enviadas aún abiertas, salvo las que marcaste con /skip.</i>")
+
+    counts = {}
+    for label, secs in (("24h", 24 * 3600), ("30d", 30 * 86400)):
+        since = now_unix - secs
+        flags = [r[0] for r in conn.execute(text(
+            "SELECT portfolio_flag FROM signals WHERE COALESCE(mode, 'live') = 'live' "
+            "AND quality_flag IS NULL AND portfolio_flag IS NOT NULL AND ts >= :t"),
+            {"t": since}).fetchall()]
+        blocked = [r[0] for r in conn.execute(text(
+            "SELECT motivo FROM shadow_setups WHERE motivo LIKE 'portfolio_%' AND created_ts >= :t"),
+            {"t": since}).fetchall()]
+        per = {rid: sum(1 for f in flags if rid in str(f).split(",")) for rid in RULE_IDS}
+        for m in blocked:
+            rid = str(m).replace("portfolio_", "")
+            if rid in per:
+                per[rid] += 1
+        counts[label] = (per, len(flags) + len(blocked))
+    verbo = "habría bloqueado" if mode == "shadow" else "bloqueó"
+    lines.append(f"  Señales que {verbo} cada regla (24 h / 30 días; evaluadas: "
+                 f"{counts['24h'][1]} / {counts['30d'][1]}):")
+    for rid in RULE_IDS:
+        lines.append(f"    • {rid} ({_e(RULE_TEXT[rid])}): {counts['24h'][0][rid]} / {counts['30d'][0][rid]}")
+    return lines
+
+
 EVENTS_AHEAD_HOURS = 48
 CALENDAR_UPDATE_WARN_DAYS = 60
 
@@ -379,6 +438,13 @@ def build_daily_summary(now=None, symbols: list | None = None) -> str:
             except Exception as exc:
                 logger.warning(f"Resumen: bloque de calidad de datos falló: {exc}")
                 out.append(f"<b>Calidad de datos</b>: no disponible ({_e(type(exc).__name__)})")
+        # Cartera según el sistema (Fase 3, 3.1; solo lee la BD).
+        out.append("")
+        try:
+            out.extend(portfolio_block(conn, now_unix))
+        except Exception as exc:
+            logger.warning(f"Resumen: bloque de cartera falló: {exc}")
+            out.append(f"🧺 <b>Cartera según el sistema</b>: no disponible ({_e(type(exc).__name__)})")
         # Eventos macro de las próximas 48 h (Fase 2, 2.4; calendario propio, sin red).
         out.append("")
         try:

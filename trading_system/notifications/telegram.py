@@ -103,7 +103,7 @@ def _fmt_qty(q: float) -> str:
 
 def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
                         current_price: float = None, threshold: float = None,
-                        capital: float = None, now=None) -> str:
+                        capital: float = None, now=None, portfolio=None) -> str:
     """
     Texto HTML de la alerta de señal (sin enviarlo). Se separa del envío para
     poder guardarlo en la BD (signals.alert_text) y reenviarlo idéntico si
@@ -126,6 +126,9 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
         que usa el tracker para la salida por tiempo);
       - Fase 2 (2.4): "⚠️ Evento de alto impacto dentro del plazo de la operación:
         CPI 18-nov 13:30 UTC" con los FOMC/CPI/NFP entre ahora y esa fecha (máx. 3).
+      - Fase 3 (3.1): "Cartera según el sistema: 2 abiertas (BTC long #12, …)" y, si
+        la señal incumple alguna regla de cartera, "⚠️ Con esta señal: <regla>
+        (control de cartera en pruebas: no bloquea)" (risk/portfolio.message_lines).
     Sin bloque de sentimiento (apagado y descartado). Todo texto dinámico va
     escapado. El pie "🆔 Señal #ID — /fill … /skip …" lo añade cmd_signal tras
     guardar la señal (notifications.telegram_commands.signal_id_footer).
@@ -139,6 +142,8 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
         threshold:     umbral de score del activo (por defecto, ASSETS[ml_threshold]).
         capital:       capital de la cuenta en USD (por defecto, TRADING_CAPITAL).
         now:           reloj inyectable (pruebas); por defecto, ahora UTC.
+        portfolio:     risk.portfolio.PortfolioCheck de la señal (None = sin bloque
+                       de cartera, p. ej. si la comprobación falló).
     """
     import pandas as pd
     from config.settings import ASSETS, RULES_MAX_RISK_PCT, TRADING_CAPITAL
@@ -265,6 +270,19 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
         if lots["risk_pct"] is not None:
             txt += f" (riesgo con ese tamaño: ${lots['risk_usd']:,.2f} = {_fmt_pct(lots['risk_pct'])})"
         lines.append(f"<b>Lotes XM:</b> {_e(txt)}")
+
+    # Control de cartera (Fase 3, 3.1). Si algo falla aquí, el mensaje sale sin
+    # este bloque (no se cae al mensaje mínimo).
+    if portfolio is not None:
+        try:
+            from risk.portfolio import message_lines
+            pl = message_lines(portfolio)
+        except Exception as exc:
+            logger.warning(f"No se pudo añadir la cartera al mensaje de {trade.symbol}: {exc}")
+            pl = []
+        if pl:
+            lines.append("")
+            lines += [f"<b>{_e(label)}:</b> {_e(txt)}" for label, txt in pl]
 
     if setup_ts is not None:
         from data.outcome_tracker import time_exit_deadline

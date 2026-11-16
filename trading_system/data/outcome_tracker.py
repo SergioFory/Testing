@@ -133,7 +133,7 @@ def emitted_setup_keys(symbol: str, since_ts) -> set:
 def save_signal_from_trade(trade, sentiment: dict = None, setup_ts=None,
                            data_source: str = None, last_bar_ts=None,
                            mode: str = None, notified: bool = None,
-                           alert_text: str = None) -> int:
+                           alert_text: str = None, portfolio_flag: str = None) -> int:
     """
     Persiste una señal generada (TradeSetup) en la tabla signals.
     Retorna el ID asignado, o -1 si falló o era duplicado.
@@ -149,6 +149,8 @@ def save_signal_from_trade(trade, sentiment: dict = None, setup_ts=None,
                      guarda ANTES de enviar y se marca True al confirmar el envío;
                      si falla, el ciclo siguiente la reintenta). None = no aplica.
         alert_text:  texto del mensaje, para poder reenviarlo idéntico.
+        portfolio_flag: reglas de cartera que incumplía al emitirse ('R1,R3'),
+                     'ok' o None si no se evaluó (Fase 3, 3.1; risk/portfolio.py).
     """
     if mode is None:
         from config.settings import notify_enabled
@@ -178,6 +180,7 @@ def save_signal_from_trade(trade, sentiment: dict = None, setup_ts=None,
             "mode":            mode,
             "notified":        notified,
             "alert_text":      alert_text,
+            "portfolio_flag":  portfolio_flag,
         }
         signal_id = save_signal(signal_dict)
         logger.info(f"Señal guardada en DB | {trade.symbol} {trade.direction.upper()} "

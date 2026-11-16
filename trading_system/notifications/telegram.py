@@ -121,7 +121,9 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
         mientras no haya especificación del contrato);
       - "Cerrar a mercado si no toca SL/TP antes de: <fecha UTC>" = cierre de la
         vela i+forward_bars (outcome_tracker.time_exit_deadline, el mismo cálculo
-        que usa el tracker para la salida por tiempo).
+        que usa el tracker para la salida por tiempo);
+      - Fase 2 (2.4): "⚠️ Evento de alto impacto dentro del plazo de la operación:
+        CPI 18-nov 13:30 UTC" con los FOMC/CPI/NFP entre ahora y esa fecha (máx. 3).
     Sin bloque de sentimiento (apagado y descartado). Todo texto dinámico va
     escapado. El pie "🆔 Señal #ID — /fill … /skip …" lo añade cmd_signal tras
     guardar la señal (notifications.telegram_commands.signal_id_footer).
@@ -262,8 +264,36 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
             f"⏱ <b>Cerrar a mercado si no toca SL/TP antes de:</b> "
             f"{_e(f'{deadline:%Y-%m-%d %H:%M} UTC')}{_e(falta)}",
         ]
+        ev_line = event_warning_line(now, deadline)
+        if ev_line:
+            lines.append(ev_line)
 
     return "\n".join(lines)
+
+
+EVENT_LINE_MAX = 3
+
+
+def event_warning_line(start, end) -> str | None:
+    """
+    Fase 2 (2.4): línea de aviso con los eventos de alto impacto (FOMC, CPI, NFP del
+    calendario propio data/econ_events.csv) entre `start` (ahora: la entrada) y `end`
+    (time_exit_deadline). Máx. EVENT_LINE_MAX; HTML escapado. Solo AVISA: la señal se
+    emite igual (la medición de 2.4 no justifica bloquear; REGLAS_DE_DECISION.md).
+    None si no hay eventos o si el calendario falla (nunca lanza).
+    """
+    try:
+        from data.fetchers.econ_calendar import events_between, format_event_short
+        evs = events_between(start, end)
+    except Exception as exc:
+        logger.warning(f"No se pudo leer el calendario de eventos para el mensaje: {exc}")
+        return None
+    if not evs:
+        return None
+    txt = ", ".join(format_event_short(e) for e in evs[:EVENT_LINE_MAX])
+    if len(evs) > EVENT_LINE_MAX:
+        txt += f" (y {len(evs) - EVENT_LINE_MAX} más)"
+    return f"⚠️ <b>Evento de alto impacto dentro del plazo de la operación:</b> {_e(txt)}"
 
 
 def safe_format_signal_alert(trade, sentiment: dict = None, **kwargs) -> str:

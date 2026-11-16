@@ -11,6 +11,7 @@ operaciones cerradas hoy". Por activo operativo:
 Y en conjunto: resultados de las últimas 24 h en R, estado de la vigilancia
 SPRT/CUSUM (monitoring/sequential.py) y fills frente a lo teórico.
 Fase 2 (2.3): bloque "Calidad de datos" por activo (monitoring/data_monitor.py).
+Fase 2 (2.4): bloque "Eventos macro" de las próximas 48 h (data/econ_events.csv).
 
 Solo lee la BD (consultas pequeñas, sin descargas). Cada bloque va en su propio
 try: si uno falla, el resto del resumen sale igual.
@@ -292,6 +293,33 @@ def _fills_block() -> list[str]:
     return lines
 
 
+EVENTS_AHEAD_HOURS = 48
+CALENDAR_UPDATE_WARN_DAYS = 60
+
+
+def events_block(now_unix: int, path=None) -> list[str]:
+    """Fase 2 (2.4): FOMC/CPI/NFP de las próximas 48 h del calendario propio
+    (data/econ_events.csv) y aviso si el calendario se acaba en < 60 días."""
+    from data.fetchers.econ_calendar import (upcoming_events, format_event_short,
+                                             calendar_last_event)
+    now = pd.Timestamp(int(now_unix), unit="s", tz="UTC")
+    evs = upcoming_events(now, hours=EVENTS_AHEAD_HOURS, path=path)
+    lines = [f"📅 <b>Eventos macro (próximas {EVENTS_AHEAD_HOURS} h)</b>"]
+    if evs:
+        for ev in evs:
+            lines.append(f"  • {_e(format_event_short(ev))} — {_e(ev['title'])}")
+        lines.append("  <i>Si caen dentro del plazo de una señal, su mensaje lo avisa.</i>")
+    else:
+        lines.append("  Ninguno (FOMC, CPI, NFP).")
+    last = calendar_last_event(path)
+    if last is None:
+        lines.append("  ⚠️ Calendario propio (data/econ_events.csv) ilegible: revisar.")
+    elif (pd.Timestamp(last) - now).days < CALENDAR_UPDATE_WARN_DAYS:
+        lines.append(f"  ⚠️ El calendario propio solo llega hasta el {pd.Timestamp(last):%Y-%m-%d}: "
+                     "añade el del año siguiente (data/econ_events.csv).")
+    return lines
+
+
 def build_daily_summary(now=None, symbols: list | None = None) -> str:
     """Texto HTML del resumen nocturno (sin enviarlo)."""
     from config.settings import active_assets
@@ -335,6 +363,13 @@ def build_daily_summary(now=None, symbols: list | None = None) -> str:
             except Exception as exc:
                 logger.warning(f"Resumen: bloque de calidad de datos falló: {exc}")
                 out.append(f"<b>Calidad de datos</b>: no disponible ({_e(type(exc).__name__)})")
+        # Eventos macro de las próximas 48 h (Fase 2, 2.4; calendario propio, sin red).
+        out.append("")
+        try:
+            out.extend(events_block(now_unix))
+        except Exception as exc:
+            logger.warning(f"Resumen: bloque de eventos macro falló: {exc}")
+            out.append(f"📅 <b>Eventos macro</b>: no disponible ({_e(type(exc).__name__)})")
         out.append("")
         try:
             out.extend(_results_block(conn, since))

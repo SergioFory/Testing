@@ -250,3 +250,49 @@ dilo y se implementa como cambio de configuración (cambia el vivo: necesita tu 
 Límites conocidos: oro y SPX no tienen una segunda fuente gratuita fiable para contrastar; en
 oro y SPX la "deriva" solo puede avisar de demasiados setups (lo normal es 0 al mes); y si se
 cambia la estrategia o un umbral hay que recalcular `DRIFT_BASELINE` (si no, avisará en falso).
+
+## Filtro de eventos macro (Fase 2, 16-nov-2026): medición y decisión PENDIENTE
+
+**Qué hace hoy.** Antes de emitir una señal de oro o SPX, el sistema mira si hay un evento de alto
+impacto de EE. UU. entre 1 h antes y 2 h después de ese momento; si lo hay, no la emite en ese
+ciclo (lo vuelve a intentar al ciclo siguiente). Cripto está exento. Desde la Fase 2 los eventos
+salen de un calendario propio (`data/econ_events.csv`: FOMC, CPI y empleo/NFP desde 2015 hasta
+2027, de federalreserve.gov y bls.gov) y el feed semanal de ForexFactory queda como complemento
+(funciona hoy: `thisweek` responde; `nextweek` da 404 pero el sistema no lo usa).
+
+**¿Actúa alguna vez? En la práctica, no.** El vivo evalúa el oro y el SPX después del cierre diario
+(22:15–23:00 UTC en invierno, o desde las 00:00 de Nueva York = 04:00–05:00 UTC) y los eventos son
+a las 12:30/13:30 UTC (CPI, empleo) y 18:00/19:00 UTC (Fed). Con todas las señales aprobadas desde
+2015 (36 de oro, 28 de SPX) y probando los 60 minutos posibles del ciclo horario, **0 habrían sido
+retrasadas o bloqueadas** por un FOMC/CPI/NFP (tampoco las de cripto si no estuviera exento: 0 de
+127). Solo podría actuar con un evento del feed a una hora rara (p. ej. un discurso nocturno), y
+entonces solo retrasa la señal 1–3 h. Tenía sentido antes de la Fase 0, cuando el sistema emitía
+durante el día con la vela aún abierta.
+
+**¿Son peores las operaciones con un evento cerca?** Medido sobre las aprobadas antes de la reserva
+(cripto 2022-05 → 2025-11, oro y SPX 2015 → 2025-11; costes XM con swap 5 %; 159 operaciones):
+
+| Ventana | Con evento | Sin evento | Diferencia (IC90) |
+|---|---|---|---|
+| Vela de entrada | 2 (+1,20R) | 157 (+0,34R) | no evaluable: solo 2 con evento |
+| Primeras 24 h | 17 (+0,29R) | 142 (+0,36R) | −0,07R (−0,62 a +0,47) |
+| Todo el plazo | 89 (+0,24R) | 70 (+0,49R) | −0,24R (−0,58 a +0,10); no evaluable: en oro y SPX el 100 % tiene evento |
+
+Por grupos (primeras 24 h): cripto −0,42R (−1,07 a +0,26; ETH −1,01R con solo 6 operaciones),
+oro y SPX +0,73R (−0,09 a +1,42). Todo el plazo, solo cripto: −0,26R (−0,70 a +0,19).
+Muestras pequeñas: ninguna diferencia es concluyente y los signos de cripto y de oro/SPX se
+contradicen.
+
+**Regla fijada antes de medir:** bloquear solo si el IC90 del agregado queda entero por debajo de
+−0,10R y la diferencia es negativa en cripto y en oro/SPX. **No se cumple en ninguna ventana →
+recomendación: AVISAR, no bloquear.** Ya implementado (no cambia qué señales salen): el mensaje de
+cada señal añade "⚠️ Evento de alto impacto dentro del plazo de la operación: CPI 10-dic 13:30 UTC"
+(hasta 3 eventos entre la entrada y la hora límite de cierre por tiempo; saldrá en casi todas las de
+oro y SPX y en ~1 de cada 3 de cripto) y el resumen nocturno lista los eventos de las próximas 48 h.
+
+**Decisión pendiente (tuya):** (1) dejar el filtro actual como está (no molesta, pero no protege de
+nada) o quitarlo para simplificar; (2) no se recomienda descartar setups por eventos. Cualquiera de
+las dos cambia el vivo y necesita tu visto bueno. Qué hacer con el aviso: nada especial (los datos no
+dicen que esas operaciones sean peores; saltarlas por el evento va contra la regla de no saltarse
+señales). Si aun así saltas una, apúntalo con `/skip ID evento` para que la medición siga siendo honesta. Mantenimiento: cuando la Fed o el BLS publiquen el calendario de 2028, añadirlo
+al CSV (el resumen nocturno avisa 60 días antes de que se acabe).

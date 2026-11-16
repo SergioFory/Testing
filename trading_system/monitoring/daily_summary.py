@@ -326,7 +326,10 @@ def portfolio_block(conn, now_unix: int) -> list[str]:
                 name = grp.get("name") or "+".join(short_name(x) for x in sorted(syms))
                 txt += f" ({_e(name)}: {g * 100:.2f} %)".replace(".", ",")
     lines.append(f"  Abiertas: {_e(txt)}")
-    lines.append("  <i>Cuentan las señales enviadas aún abiertas, salvo las que marcaste con /skip.</i>")
+    # Revisión adversarial Fase 3: las que no llegaron por Telegram (notified = 0) no
+    # cuentan (salvo /fill); el texto lo dice para que cuadre con el aviso de arriba.
+    lines.append("  <i>Cuentan las señales que te llegaron y siguen abiertas, salvo las que marcaste "
+                 "con /skip (una que no te llegó solo cuenta si mandas /fill).</i>")
 
     counts = {}
     for label, secs in (("24h", 24 * 3600), ("30d", 30 * 86400)):

@@ -17,9 +17,16 @@ Diseño (nada de esto puede tumbar ni colgar el ciclo):
     llama, caduca sola a los CACHE_TTL_S segundos.
   - Si Deribit no responde (timeout o conexión), no se vuelve a intentar con la
     otra moneda en el mismo ciclo: como mucho se pierde un timeout por ciclo.
+  - Límite de tiempo TOTAL por petición (revisión adversarial de la Fase 3): el
+    timeout de requests vale para cada lectura del socket, no para la petición
+    entera; una respuesta que llega byte a byte podía tardar minutos. La petición
+    se hace en un hilo daemon y se espera como mucho timeout_s; si vence, None y
+    la otra moneda no se pide en este ciclo (como con un timeout normal). El
+    hilo abandonado termina solo (cada lectura sigue limitada por el timeout).
 """
 from __future__ import annotations
 
+import threading
 import time
 
 from loguru import logger
@@ -74,12 +81,13 @@ def fetch_dvol(currency: str, http_get=None, now_ms: int | None = None) -> float
             import requests
             http_get = requests.get
         now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
-        r = http_get(DERIBIT_DVOL_URL,
-                     params={"currency": currency, "start_timestamp": now_ms - LOOKBACK_MS,
-                             "end_timestamp": now_ms, "resolution": "3600"},
-                     timeout=float(cfg.get("timeout_s", 5)))
-        r.raise_for_status()
-        data = (r.json().get("result") or {}).get("data") or []
+        timeout_s = float(cfg.get("timeout_s", 5))
+        payload = _get_json_with_deadline(
+            http_get, DERIBIT_DVOL_URL,
+            params={"currency": currency, "start_timestamp": now_ms - LOOKBACK_MS,
+                    "end_timestamp": now_ms, "resolution": "3600"},
+            timeout_s=timeout_s)
+        data = (payload.get("result") or {}).get("data") or []
         if data:
             v = float(data[-1][4])          # [ts, open, high, low, close]
             # Sanidad: el DVOL histórico de BTC/ETH ha estado entre ~30 y ~200.
@@ -99,6 +107,41 @@ def fetch_dvol(currency: str, http_get=None, now_ms: int | None = None) -> float
         value = None
     _cache[currency] = (t, value)
     return value
+
+
+class DeribitDeadlineTimeout(TimeoutError):
+    """La petición entera superó el límite total (p. ej. respuesta byte a byte)."""
+
+
+def _get_json_with_deadline(http_get, url: str, params: dict, timeout_s: float) -> dict:
+    """
+    GET + raise_for_status + json() en un hilo daemon, esperando como mucho
+    `timeout_s` segundos EN TOTAL. Si vence, lanza DeribitDeadlineTimeout (su
+    nombre contiene "timeout": activa el corte de la otra moneda); si la petición
+    falla, relanza su excepción. El hilo abandonado no bloquea el ciclo ni la
+    salida del proceso (daemon).
+    """
+    box: dict = {}
+
+    def _run():
+        try:
+            r = http_get(url, params=params, timeout=timeout_s)
+            r.raise_for_status()
+            box["json"] = r.json()
+        except BaseException as exc:  # noqa: BLE001 — se relanza en el hilo principal
+            box["exc"] = exc
+
+    th = threading.Thread(target=_run, name="deribit-dvol", daemon=True)
+    th.start()
+    th.join(timeout_s)
+    if th.is_alive():
+        raise DeribitDeadlineTimeout(f"sin respuesta completa en {timeout_s:g} s")
+    if "exc" in box:
+        raise box["exc"]
+    payload = box.get("json")
+    if not isinstance(payload, dict):
+        raise ValueError("respuesta JSON inesperada")
+    return payload
 
 
 def dvol_for(symbol: str, http_get=None) -> float | None:

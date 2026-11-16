@@ -287,6 +287,46 @@ def test_deribit_fail_silent_y_circuito_del_ciclo():
     assert DF.fetch_dvol("BTC") is None
 
 
+def test_deribit_limite_de_tiempo_total(monkeypatch):
+    """Revisión adversarial Fase 3: el timeout de requests es por lectura; una
+    respuesta que llega byte a byte podía tardar minutos. Ahora la petición entera
+    tiene un límite total (timeout_s) y, si vence, la otra moneda no se pide."""
+    import time
+    import config.settings as st
+    monkeypatch.setitem(st.DERIBIT_DVOL, "timeout_s", 0.3)
+    calls = []
+
+    class _SlowBody(_Resp):
+        def json(self):                       # el cuerpo llega muy despacio
+            time.sleep(3.0)
+            return {"result": {"data": [[1, 2, 3, 4, 55.5]]}}
+
+    def _drip(url, params=None, timeout=None):
+        calls.append((params["currency"], timeout))
+        return _SlowBody({})
+    t0 = time.monotonic()
+    assert DF.fetch_dvol("BTC", http_get=_drip) is None
+    assert DF.fetch_dvol("ETH", http_get=_drip) is None
+    took = time.monotonic() - t0
+    assert took < 1.5, took                   # antes: ~3 s por moneda (aquí) / 150 s (servidor real)
+    assert calls == [("BTC", 0.3)]            # la segunda moneda no se pide en este ciclo
+    DF.clear_cycle_cache()
+
+    # Conexión colgada (la llamada misma no vuelve): mismo límite.
+    def _hang(url, params=None, timeout=None):
+        calls.append((params["currency"], timeout))
+        time.sleep(3.0)
+        return _Resp({"result": {"data": [[1, 2, 3, 4, 55.5]]}})
+    calls.clear()
+    t0 = time.monotonic()
+    assert DF.dvol_for("ETHUSDT", http_get=_hang) is None
+    assert time.monotonic() - t0 < 1.0
+    DF.clear_cycle_cache()
+
+    # Una respuesta normal dentro del límite sigue funcionando (y por el hilo).
+    assert DF.fetch_dvol("BTC", http_get=_ok_get([])) == 45.5
+
+
 def test_deribit_apagado_no_pide_nada(monkeypatch):
     import config.settings as st
     monkeypatch.setitem(st.DERIBIT_DVOL, "enabled", False)

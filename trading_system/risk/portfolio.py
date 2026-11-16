@@ -27,6 +27,14 @@ no es un /skip (si el usuario dijo /skip, la señal sale de la cartera; un /fill
 posterior la vuelve a meter). Riesgo de cada una en % del capital =
 position_size × |entrada − SL| / entrada / TRADING_CAPITAL.
 
+Solo cuentan las señales que LLEGARON al usuario: las de notified = 0 (Telegram
+falló; pendientes de reintento o con el reintento ya caducado, ver
+telegram.retry_failed_signal_alerts) quedan fuera de la cartera y de la pérdida
+del día (R4), porque el usuario no tiene esa posición. Si el reintento la
+entrega (notified = 1) entra; si el usuario manda /fill igualmente (la ejecutó),
+también. notified NULL (filas antiguas, anteriores a la columna) cuenta como
+entregada. Revisión adversarial de la Fase 3.
+
 Las funciones de reglas son PURAS (sin BD) para poder usarlas igual en el vivo,
 en las pruebas y en la medición histórica del arnés. Nada de aquí puede tumbar el
 ciclo: quien llama envuelve en try/except y, si algo falla, la señal sigue su
@@ -176,14 +184,24 @@ def flag_of(broken: list[dict]) -> str:
 # Cartera desde la BD
 # ---------------------------------------------------------------------------
 
+# Último registro de fills de la señal (el de mayor ts y, a igualdad, mayor id).
+_LAST_FILL_SQL = ("COALESCE((SELECT f.kind FROM fills f WHERE f.signal_id = s.id "
+                  "ORDER BY f.ts DESC, f.id DESC LIMIT 1), '')")
+
+# Filtro común de la cartera y de R4 (ver docstring del módulo): sin /skip como
+# último registro y entregada por Telegram (notified distinto de 0; NULL = fila
+# antigua → cuenta) o confirmada con /fill.
+_MEMBER_SQL = (
+    f"AND {_LAST_FILL_SQL} <> 'skip' "
+    f"AND (COALESCE(s.notified, 1) <> 0 OR {_LAST_FILL_SQL} = 'fill') "
+)
+
 _OPEN_SQL = (
     "SELECT s.id, s.symbol, s.direction, s.entry_price, s.stop_loss, s.position_size, "
     "s.setup_ts, s.ts FROM signals s "
     "WHERE s.mode = 'live' AND s.quality_flag IS NULL AND s.setup_ts IS NOT NULL "
     "AND s.resultado_real IS NULL AND s.ts <= :now "
-    # Último registro de fills de la señal (el de mayor ts y, a igualdad, mayor id).
-    "AND COALESCE((SELECT f.kind FROM fills f WHERE f.signal_id = s.id "
-    "              ORDER BY f.ts DESC, f.id DESC LIMIT 1), '') <> 'skip' "
+    + _MEMBER_SQL +
     "ORDER BY s.ts ASC, s.id ASC"
 )
 
@@ -223,7 +241,8 @@ def realized_loss_today(now=None, capital: float | None = None) -> float:
     Pérdida realizada del día UTC de `now`, en fracción del capital (positiva =
     pérdida; negativa = ganancia neta): −Σ pnl_r × riesgo de las señales live sin
     quality_flag, con setup_ts, resueltas hoy (resolved_ts entre las 00:00 UTC y
-    `now`) y que el usuario no saltó (/skip como último registro). pnl_r: el
+    `now`), que le llegaron por Telegram (o confirmó con /fill) y que no saltó
+    (/skip como último registro). pnl_r: el
     guardado o, si falta, el que se deduce del resultado (outcome_tracker.signal_r).
     """
     from data.database import get_engine, init_db
@@ -239,8 +258,7 @@ def realized_loss_today(now=None, capital: float | None = None) -> float:
             "s.pnl_pct, s.resultado_real, s.resolved_by FROM signals s "
             "WHERE s.mode = 'live' AND s.quality_flag IS NULL AND s.setup_ts IS NOT NULL "
             "AND s.resultado_real IS NOT NULL AND s.resolved_ts >= :a AND s.resolved_ts <= :b "
-            "AND COALESCE((SELECT f.kind FROM fills f WHERE f.signal_id = s.id "
-            "              ORDER BY f.ts DESC, f.id DESC LIMIT 1), '') <> 'skip'"
+            + _MEMBER_SQL
         ), {"a": day0, "b": now_u}).mappings().fetchall()
     total = 0.0
     for r in rows:

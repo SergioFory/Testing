@@ -79,9 +79,12 @@ mala lo hace crecer. **Alarma si S llega a 20R.** Solo con las señales live.
 4. **SPX vuelve a notificarse solo si** el E[R] neto con los costes reales de XM es
    ≥ +0,10R en al menos 2 de 3 épocas **y** pasa la puerta de validación (Fase 2).
    Si no, sigue en sombra (se registra y se mide, sin coste).
-5. **El filtro VRP (volatilidad implícita/realizada) solo se activa** tras ≥ 30 señales cripto
-   aprobadas fuera de muestra (y con las demás condiciones de la Fase 2: mismo signo en BTC y
-   ETH, mejora ≥ +0,10R).
+5. **El filtro VRP (volatilidad implícita/realizada) solo se activa** si se cumple TODO lo de la
+   sección "Regla de activación del VRP (fijada el 16-nov-2026)", más abajo (informe §7, 2.5; Fase 3):
+   ≥ 30 señales cripto aprobadas y resueltas **registradas con VRP desde el 16-nov-2026** (lo
+   anterior no cuenta); el filtro exacto del experimento E6 (percentil 33 causal); mismo signo en
+   BTC y ETH; mejora ≥ +0,10R por operación; y revisión obligatoria si descarta > 60 % de los setups
+   en mercado bajista. Después, puerta de validación con `--final` y **decisión tuya**.
 6. **Costes reales:** tras ~20 fills (`/fill`), si el R ejecutado menos el R teórico es
    menor que −0,10R de media, se ajustan los costes del modelo a los reales.
    **Oro (base futuro/contado):** la entrada, el SL y el TP del oro salen del futuro GC=F,
@@ -134,8 +137,10 @@ lote mínimo… con X lotes el riesgo sería Y %"); hasta entonces compruébalo 
 ## Control de cartera (Fase 3, 16-nov-2026): EN PRUEBAS, no bloquea
 
 **Qué es.** Antes de cada señal el sistema mira su **cartera según el sistema** = las señales que
-te envió y siguen abiertas, **salvo las que marcaste con `/skip`** (si luego envías `/fill`, vuelve a
-contar). Con eso comprueba cuatro reglas (`PORTFOLIO_RULES` en `config/settings.py`, código en
+te envió, **te llegaron por Telegram** y siguen abiertas, **salvo las que marcaste con `/skip`** (si
+luego envías `/fill`, vuelve a contar). Una señal cuyo envío falló (el resumen nocturno la lista en
+"Señales que NO te llegaron") no cuenta ni como posición abierta ni en la pérdida del día: si el
+reintento te la entrega, entra; si la ejecutaste igualmente, manda `/fill` y entra. Con eso comprueba cuatro reglas (`PORTFOLIO_RULES` en `config/settings.py`, código en
 `risk/portfolio.py`):
 
 | Regla | Qué dice |
@@ -153,13 +158,26 @@ días habría bloqueado. El modo `"enforce"` (la señal no se envía y queda en 
 motivo `portfolio_R1`…`portfolio_R4`, sin reintentarla más tarde) está programado y probado, pero
 **solo se activa si tú lo decides**.
 
-**Medición histórica** (16-nov-2026; regla de decisión escrita antes de calcular en
-`scratchpad/fase3/LOG.md`; script `scratchpad/fase3/B-cartera/medicion_cartera.py`). Señales que
+**Regla de decisión** (fijada en la especificación de la Fase 3 y escrita antes de calcular nada).
+Se **recomienda** pasar una regla a `"enforce"` solo si cumple las tres cosas:
+1. bloquea **≤ 15 %** de las señales;
+2. el **R total no cae más de un 10 %**: R total con la regla ≥ R total sin ella − 0,10 × |R total sin ella|;
+3. **reduce la peor racha (drawdown máximo en R) más que quitar al azar** el mismo número de señales,
+   con **p < 0,10**. p = proporción de las simulaciones al azar (5.000) que dejan una peor racha igual o
+   menor que la de la regla (p pequeño = la regla lo hace mejor que el azar). Si la regla no quita
+   ninguna señal, quitar 0 al azar da lo mismo que la base y p = 1.
+Excepción: **R2** (LONG y SHORT a la vez) se recomienda si bloquea **al menos 1** señal y cumple el
+punto 2, por coherencia operativa. Una regla que no bloquea ninguna señal no se recomienda (no hay
+efecto medible). La recomendación es por regla ("todas juntas" se informa igual). Para decidir más
+adelante con el registro en vivo se aplican estos mismos números.
+
+**Medición histórica** (16-nov-2026, con la regla de arriba; la simulación usa las mismas funciones
+de reglas que el vivo, `risk/portfolio.evaluate_portfolio_rules`). Señales que
 habría emitido el vivo, simuladas con costes XM (swap 5 %), riesgo 0,25 % cada una, solo datos
 anteriores a la reserva (15-nov-2025). Periodo principal: los 4 activos a la vez, 2022-05 → 2025-11
 (125 señales: E[R] +0,42R, R total +52,8R, peor racha −7,95R):
 
-| Regla | Señales que habría bloqueado | Efecto en R total y peor racha | Frente a quitar al azar (5.000 sim.) | Recomendación |
+| Regla | Señales que habría bloqueado | Efecto en R total y peor racha | Frente a quitar al azar (5.000 sim.; p de la peor racha) | Recomendación |
 |---|---|---|---|---|
 | R1 | 0 de 125 | ninguno | — (p = 1) | No activar: no habría actuado nunca |
 | R2 | 0 de 125 | ninguno | — (p = 1) | No activar: no habría actuado nunca |
@@ -332,8 +350,9 @@ tamaño a la mitad" del informe no se evaluó.
 | ETH umbral 0,50 | 55 / +0,30R → 65 / +0,23R | −0,07R; −0,09 / +0,06 / −0,18 | 0,86 | 0,45 | NO APROBADO (falla b, c, d) |
 
 En los cinco, a) vivo = validador con la configuración del candidato: OK. Pruebas registradas al
-evaluarlos: 461 → 464 (los tres filtros y SPX umbral 0 son variantes nuevas; ETH 0,50 ya estaba en
-la rejilla y no cuenta otra vez).
+evaluarlos: 460 → 464 (4 variantes nuevas: los tres filtros y SPX umbral 0; ETH 0,50 ya estaba en
+la rejilla y no cuenta otra vez). La N del DSR de cada informe va de 461 a 464 porque cada candidato
+cuenta también su propia prueba.
 
 Cómo leerlo:
 - **SMA200:** confirma lo que ya decía la auditoría (F32). En ETH sube el E[R] por operación, pero
@@ -355,7 +374,7 @@ No cambian ninguna señal ni el mensaje. Si Deribit no responde (timeout de 5 s)
 vacíos ese ciclo y todo sigue igual. Estas variables sirven para decidir más adelante con datos
 propios, sin volver a mirar la misma historia.
 
-### Regla de activación del VRP (fijada hoy; informe §7, 2.5; experimento E6)
+### Regla de activación del VRP (fijada el 16-nov-2026; informe §7, 2.5; experimento E6)
 
 El VRP no se activa como filtro hasta que se cumpla TODO esto, contado **solo con setups registrados
 desde el 16-nov-2026** (el registro empieza hoy; lo anterior es la historia con la que se generó la

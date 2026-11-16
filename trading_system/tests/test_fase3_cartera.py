@@ -373,6 +373,66 @@ def test_realized_loss_today(temp_db, capital_12k):
     assert realized_loss_today(now=now) == pytest.approx(0.0025 + 0.005 - 0.00375)
 
 
+def test_senales_que_no_llegaron_no_cuentan_en_la_cartera(temp_db, capital_12k):
+    """Revisión adversarial Fase 3: una señal live con notified = 0 (Telegram falló)
+    no es una posición del usuario: fuera de la cartera, de R3 y del texto; si el
+    reintento la entrega (notified = 1) o el usuario manda /fill, vuelve a contar.
+    notified NULL (filas antiguas) cuenta."""
+    from data.database import mark_signal_notified, save_fill
+    from risk.portfolio import check_new_signal, load_open_positions, positions_text
+    btc = _open("BTCUSDT", "long", entry=200.0, setup_i=1)
+    eth = _open("ETHUSDT", "long", entry=300.0, setup_i=2)
+    old = _open("XAUUSD", "long", entry=400.0, setup_i=3)        # notified NULL → cuenta
+    for sid in (btc, eth):
+        assert mark_signal_notified(sid, False)
+    assert [p["id"] for p in load_open_positions()] == [old]
+    chk = check_new_signal(_Trade("BTCUSDT", "long"))
+    assert chk.flag == "ok"                                     # sin R3 por posiciones fantasma
+    assert positions_text(chk.open_positions) == f"1 abierta (XAU long #{old})"
+    # El reintento entrega BTC → entra; ETH con /fill (la ejecutó igualmente) → entra.
+    assert mark_signal_notified(btc, True)
+    save_fill(eth, "fill", price=300.0, ts=1000, update_id=31)
+    assert [p["id"] for p in load_open_positions()] == [btc, eth, old]
+    assert check_new_signal(_Trade("BTCUSDT", "long")).flag == "R1,R3"
+    # /skip después del /fill vuelve a sacarla.
+    save_fill(eth, "skip", ts=2000, update_id=32)
+    assert [p["id"] for p in load_open_positions()] == [btc, old]
+
+
+def test_perdida_del_dia_ignora_senales_que_no_llegaron(temp_db, capital_12k):
+    from data.database import mark_signal_notified, save_fill
+    from risk.portfolio import realized_loss_today
+    now = pd.Timestamp("2026-11-16 15:00", tz="UTC")
+    today = int(pd.Timestamp("2026-11-16 09:00", tz="UTC").timestamp())
+    s1 = _open("BTCUSDT", "long", entry=200.0, setup_i=1)     # entregada, −1R → 0,25 %
+    s2 = _open("ETHUSDT", "long", entry=300.0, setup_i=2)     # no llegó, −2R → no cuenta
+    s3 = _open("XAUUSD", "long", entry=400.0, setup_i=3)      # no llegó pero /fill, −1R → cuenta
+    for sid in (s2, s3):
+        assert mark_signal_notified(sid, False)
+    assert mark_signal_notified(s1, True)
+    save_fill(s3, "fill", price=400.0, ts=today - 60, update_id=41)
+    with temp_db.get_engine().begin() as conn:
+        for sid, r in ((s1, -1.0), (s2, -2.0), (s3, -1.0)):
+            conn.execute(text("UPDATE signals SET resultado_real='loss', pnl_r=:r, resolved_ts=:t "
+                              "WHERE id=:i"), {"r": r, "t": today, "i": sid})
+    assert realized_loss_today(now=now) == pytest.approx(0.0025 + 0.0025)
+
+
+def test_resumen_nocturno_cartera_sin_senales_que_no_llegaron(temp_db, capital_12k):
+    """El resumen no puede decir a la vez 'no te llegaron 3' y 'abiertas: 3' con esas mismas."""
+    import time
+    from data.database import mark_signal_notified
+    from monitoring.daily_summary import portfolio_block
+    ids = [_open(s, "short", entry=e, setup_i=i)
+           for i, (s, e) in enumerate((("BTCUSDT", 200.0), ("ETHUSDT", 300.0), ("XAUUSD", 400.0)), 1)]
+    for sid in ids:
+        assert mark_signal_notified(sid, False)
+    with temp_db.get_engine().connect() as conn:
+        txt = "\n".join(portfolio_block(conn, int(time.time())))
+    assert "Abiertas: ninguna posición abierta" in txt
+    assert "Cuentan las señales que te llegaron" in txt
+
+
 # ---------------------------------------------------------------------------
 # Ciclo vivo: modo sombra (el activo)
 # ---------------------------------------------------------------------------

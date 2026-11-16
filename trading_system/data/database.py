@@ -296,6 +296,13 @@ _SIGNAL_COLUMNS = [
     # ('R1,R3'), 'ok' si ninguna, NULL si no se evaluó (filas anteriores o fallo
     # de la comprobación). En modo "shadow" la señal sale igual.
     ("portfolio_flag", "TEXT"),
+    # Fase 4 (grupo C; F14 del informe): precio actual usado al emitir = cierre de
+    # la última vela cerrada que vio el ciclo (el mismo del filtro de frescura y de
+    # la línea "Precio actual" del mensaje). Permite medir cuánto se había movido
+    # el precio desde la entrada al llegar la señal. NULL = filas anteriores,
+    # señales guardadas por otros caminos o precio no disponible. Solo registro:
+    # no interviene en la resolución ni en el R.
+    ("price_at_emit", "DOUBLE PRECISION"),
 ]
 _SIGNAL_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_signals_setup ON signals(symbol, direction, setup_ts)",
@@ -508,10 +515,12 @@ def save_signal(signal: dict) -> int:
     init_db()
     cols = ("symbol, ts, setup_type, direction, ml_score, sentiment_score, "
             "entry_price, stop_loss, take_profit, position_size, atr, "
-            "setup_ts, data_source, last_bar_ts, mode, notified, alert_text, portfolio_flag")
+            "setup_ts, data_source, last_bar_ts, mode, notified, alert_text, portfolio_flag, "
+            "price_at_emit")
     vals = (":symbol, :ts, :setup_type, :direction, :ml_score, :sentiment_score, "
             ":entry_price, :stop_loss, :take_profit, :position_size, :atr, "
-            ":setup_ts, :data_source, :last_bar_ts, :mode, :notified, :alert_text, :portfolio_flag")
+            ":setup_ts, :data_source, :last_bar_ts, :mode, :notified, :alert_text, :portfolio_flag, "
+            ":price_at_emit")
     if dialect == "sqlite":
         sql = text(f"INSERT INTO signals ({cols}) VALUES ({vals})")
         with engine.begin() as conn:
@@ -543,12 +552,24 @@ def _to_unix(value):
     return int(ts.timestamp())
 
 
+def _price_or_none(value):
+    """Precio como float, o None si falta, no es número, es NaN/infinito o ≤ 0
+    (price_at_emit es solo registro: un valor raro no debe impedir guardar la señal)."""
+    import math
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) and v > 0 else None
+
+
 def _signal_params(signal: dict) -> dict:
     notified = signal.get("notified")
     return {
         "notified":        None if notified is None else int(bool(notified)),
         "alert_text":      signal.get("alert_text"),
         "portfolio_flag":  signal.get("portfolio_flag"),
+        "price_at_emit":   _price_or_none(signal.get("price_at_emit")),
         "setup_ts":        _to_unix(signal.get("setup_ts")),
         "data_source":     signal.get("data_source"),
         "last_bar_ts":     _to_unix(signal.get("last_bar_ts")),

@@ -265,11 +265,64 @@ _ALERTED_MAX = 2000
 # data_quality y en el ciclo siguiente no sería nueva, así que sin esto el aviso
 # se perdería. (symbol, check, ts) -> (incidencia, hora del primer fallo). Se
 # reintenta en los ciclos siguientes (con el mismo throttling de 6 h) hasta
-# PENDING_MAX_AGE; después solo queda en el resumen nocturno. Vive en la memoria
-# del proceso (un reinicio del worker lo pierde: queda el resumen nocturno).
+# PENDING_MAX_AGE; después solo queda en el resumen nocturno.
+# Fase 4 (grupo C): los pendientes y la hora del último aviso por activo se
+# guardan también en la tabla kv (KV_ALERTS), así que un reinicio del worker
+# (despliegue, OOM) ya no los pierde: se recargan la primera vez que se usan.
 _pending: dict = {}
 PENDING_MAX_AGE = timedelta(hours=24)
 _PENDING_MAX = 200
+
+KV_ALERTS = "calidad:avisos"   # kv: {"pending": [...], "last_alert": {symbol: unix}}
+_state_loaded = False          # ¿ya se recargó el estado de kv en este proceso?
+
+
+def _load_alert_state() -> None:
+    """Recarga de kv los avisos pendientes y la hora del último aviso por activo
+    (una vez por proceso). Lo que ya hubiera en memoria manda. Nunca lanza: si la
+    BD falla, se sigue solo con la memoria y se reintenta en el ciclo siguiente."""
+    global _state_loaded
+    if _state_loaded:
+        return
+    try:
+        from data.database import kv_get
+        raw = kv_get(KV_ALERTS)
+        st = json.loads(raw) if raw else {}
+        for item in st.get("pending") or ():
+            key = (str(item["symbol"]), str(item["check"]), int(item["ts"]))
+            g = {"check": key[1], "ts": pd.Timestamp(key[2], unit="s", tz="UTC"),
+                 "detalle": str(item.get("detalle") or ""), "grave": True}
+            _pending.setdefault(key, (g, pd.Timestamp(int(item["since"]), unit="s", tz="UTC")))
+        for sym, unix in (st.get("last_alert") or {}).items():
+            _alert_state.setdefault(str(sym), pd.Timestamp(int(unix), unit="s", tz="UTC"))
+        _state_loaded = True
+        if _pending:
+            logger.info(f"Calidad de datos: {len(_pending)} aviso(s) grave(s) pendiente(s) recuperado(s) "
+                        "de la BD tras el arranque; se reintentarán.")
+    except Exception as exc:  # noqa: BLE001 — sin BD se sigue con la memoria
+        logger.debug(f"Calidad de datos: no se pudo recargar el estado de avisos de kv: {exc}")
+
+
+def _alert_state_snapshot() -> tuple:
+    """Huella del estado que se guarda en kv (para escribir solo si cambia)."""
+    from data.database import _to_unix
+    return (tuple(sorted((k, _to_unix(v[1])) for k, v in _pending.items())),
+            tuple(sorted((s, _to_unix(t)) for s, t in _alert_state.items())))
+
+
+def _save_alert_state() -> None:
+    """Guarda en kv los avisos pendientes y la hora del último aviso. Nunca lanza."""
+    try:
+        from data.database import kv_set, _to_unix
+        st = {
+            "pending": [{"symbol": k[0], "check": k[1], "ts": int(k[2]),
+                         "detalle": str(g.get("detalle") or "")[:500], "since": _to_unix(since)}
+                        for k, (g, since) in _pending.items()],
+            "last_alert": {s: _to_unix(t) for s, t in _alert_state.items()},
+        }
+        kv_set(KV_ALERTS, json.dumps(st))
+    except Exception as exc:  # noqa: BLE001 — queda en memoria; el resumen nocturno lo cuenta igual
+        logger.warning(f"Calidad de datos: no se pudo guardar el estado de avisos en kv: {exc}")
 
 
 def record_incidents(symbol: str, incidents: list[dict], now=None) -> set:
@@ -298,7 +351,18 @@ def _maybe_alert(symbol: str, graves: list[dict], new_keys: set | None, notify: 
     """Aviso inmediato por Telegram de las incidencias GRAVES nuevas, como máximo
     uno cada ALERT_EVERY por activo. new_keys=None = la BD falló (se decide solo
     con la memoria del proceso). Los graves cuyo envío falló (_pending) se
-    reintentan aunque ya no sean nuevos en la BD. Devuelve True si se envió."""
+    reintentan aunque ya no sean nuevos en la BD. Devuelve True si se envió.
+    Fase 4: si cambian los pendientes o la hora del último aviso, se guardan en kv."""
+    _load_alert_state()
+    before = _alert_state_snapshot()
+    try:
+        return _maybe_alert_inner(symbol, graves, new_keys, notify, now)
+    finally:
+        if _alert_state_snapshot() != before:
+            _save_alert_state()
+
+
+def _maybe_alert_inner(symbol: str, graves: list[dict], new_keys: set | None, notify: bool, now) -> bool:
     from data.database import _to_unix
     t = _now(now)
     fresh = []
@@ -368,6 +432,7 @@ def run_cycle_checks(symbol: str, df_4h: pd.DataFrame, df_daily: pd.DataFrame | 
         logger.warning(f"[{symbol}] Monitor de datos falló (no afecta a la señal): {exc}")
         return []
     ms = (time.perf_counter() - t0) * 1000
+    _load_alert_state()   # Fase 4: pendientes de antes de un reinicio (kv)
     if not incidents:
         logger.debug(f"[{symbol}] Calidad de datos: sin incidencias ({ms:.1f} ms).")
         if any(k[0] == symbol for k in _pending):

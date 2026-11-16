@@ -15,6 +15,8 @@ Fase 2 (2.4): bloque "Eventos macro" de las próximas 48 h (data/econ_events.csv
 Fase 3 (3.1): bloque "Cartera según el sistema": posiciones abiertas que cuenta el
 control de cartera y cuántas señales de las últimas 24 h / 30 días habría
 bloqueado (o bloqueó, en modo enforce) cada regla R1–R4.
+Fase 4 (grupo C; F21): bloque "Últimos 12 meses": nº de señales live resueltas y
+R medio (por activo), con una explicación en texto llano.
 
 Solo lee la BD (consultas pequeñas, sin descargas). Cada bloque va en su propio
 try: si uno falla, el resto del resumen sale igual.
@@ -212,6 +214,71 @@ def _results_block(conn, since: int) -> list[str]:
     if sh and sh[0]:
         lines.append(f"• Aprobados NO emitidos (registro sombra): {int(sh[0])} resuelto(s), "
                      f"{float(sh[1] or 0):+.2f}R")
+    return lines
+
+
+YEAR_WINDOW_DAYS = 365
+
+
+def year_results(conn, now_unix: int, symbols: list | None = None) -> dict:
+    """
+    Fase 4 (grupo C; F21 del informe): señales LIVE resueltas en los últimos 12
+    meses (resolved_ts o, en filas antiguas sin él, ts de emisión) de los activos
+    que hoy se notifican, sin las marcadas por la limpieza (quality_flag). R del
+    tracker (pnl_r o el implícito en el resultado; sin costes). Incluye las
+    anteriores a la Fase 0 (no es el universo del SPRT: eso es la vigilancia).
+    Devuelve {"n", "mean_r", "sum_r", "by_symbol": {sym: (n, mean_r)}, "n_sin_r"}.
+    """
+    from monitoring.sequential import _r_value
+    if symbols is None:
+        from config.settings import active_assets, notify_enabled
+        symbols = [s for s in active_assets() if notify_enabled(s)]
+    out = {"n": 0, "mean_r": None, "sum_r": 0.0, "by_symbol": {}, "n_sin_r": 0}
+    if not symbols:
+        return out
+    params = {f"s{k}": v for k, v in enumerate(symbols)}
+    params["t"] = int(now_unix) - YEAR_WINDOW_DAYS * 86400
+    rows = conn.execute(text(
+        "SELECT symbol, pnl_r, resultado_real, entry_price, stop_loss, take_profit, resolved_by "
+        "FROM signals WHERE resultado_real IS NOT NULL AND quality_flag IS NULL "
+        "AND COALESCE(mode, 'live') = 'live' AND COALESCE(resolved_ts, ts) >= :t "
+        f"AND symbol IN ({', '.join(':' + k for k in params if k != 't')})"), params).fetchall()
+    per: dict = {}
+    for sym, pnl_r, res, entry, sl, tp, rby in rows:
+        r = _r_value(pnl_r, res, entry, sl, tp, rby)
+        if r is None:                 # sin precio de salida (expirada o manual): no se puede medir
+            out["n_sin_r"] += 1
+            continue
+        per.setdefault(sym, []).append(float(r))
+    allr = [r for rs in per.values() for r in rs]
+    out["n"] = len(allr)
+    if allr:
+        out["sum_r"] = sum(allr)
+        out["mean_r"] = out["sum_r"] / len(allr)
+    out["by_symbol"] = {sym: (len(rs), sum(rs) / len(rs)) for sym, rs in per.items()}
+    return out
+
+
+def year_block(conn, now_unix: int, symbols: list | None = None) -> list[str]:
+    """Bloque de texto (HTML) con year_results, en lenguaje llano."""
+    from risk.portfolio import short_name
+    yr = year_results(conn, now_unix, symbols)
+    lines = ["📆 <b>Últimos 12 meses</b> (señales live resueltas)"]
+    if not yr["n"]:
+        lines.append("• Aún ninguna señal live resuelta en los últimos 12 meses.")
+    else:
+        word = "señal resuelta" if yr["n"] == 1 else "señales resueltas"
+        lines.append(f"• {yr['n']} {word}; R medio <b>{yr['mean_r']:+.2f}R</b> por señal "
+                     f"(suma {yr['sum_r']:+.2f}R; sin costes)")
+        parts = [f"{_e(short_name(sym))} {n} ({m:+.2f}R)"
+                 for sym, (n, m) in sorted(yr["by_symbol"].items())]
+        lines.append("• Por activo: " + " · ".join(parts))
+    if yr["n_sin_r"]:
+        lines.append(f"• Sin R medible (sin precio de salida; no cuentan en la media): {yr['n_sin_r']}")
+    # Texto corto: el resumen ya ronda el límite de Telegram (medido en LOG.md, Fase 4 C).
+    lines.append("<i>R medio &gt; 0 = de media cada señal ganó más de lo que arriesgó. El sistema gana "
+                 "sobre todo en meses con tendencia: un año flojo no prueba que esté roto (decide la "
+                 "vigilancia).</i>")
     return lines
 
 
@@ -461,6 +528,13 @@ def build_daily_summary(now=None, symbols: list | None = None) -> str:
         except Exception as exc:
             logger.warning(f"Resumen: bloque de resultados falló: {exc}")
             out.append(f"<b>Resultados</b>: no disponible ({_e(type(exc).__name__)})")
+        # Fase 4 (grupo C; F21): R medio y nº de señales live de los últimos 12 meses.
+        out.append("")
+        try:
+            out.extend(year_block(conn, now_unix))
+        except Exception as exc:
+            logger.warning(f"Resumen: bloque de los últimos 12 meses falló: {exc}")
+            out.append(f"📆 <b>Últimos 12 meses</b>: no disponible ({_e(type(exc).__name__)})")
     out.append("")
     try:
         from monitoring.sequential import monitoring_state, format_monitoring

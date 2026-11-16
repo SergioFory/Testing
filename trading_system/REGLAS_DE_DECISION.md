@@ -411,7 +411,8 @@ Desde la Fase 2 cada ciclo revisa las últimas 60 velas de cada activo (velas pl
 con fecha de fin de semana, huecos, precio congelado, saltos absurdos y cambio de fuente) y cada
 noche compara BTC/ETH entre OKX y Gate.io y cuenta los setups de 30 días frente a lo normal.
 Lo grave llega por Telegram ("datos sospechosos", como mucho un aviso cada 6 h por activo; si el
-envío falla, se reintenta en los ciclos siguientes durante 24 h); todo
+envío falla, se reintenta en los ciclos siguientes durante 24 h; desde la Fase 4 esos avisos
+pendientes se guardan en la base de datos y sobreviven a un reinicio del worker); todo
 va al resumen nocturno en "Calidad de datos". **Hoy NO bloquea ninguna señal.**
 
 Qué hacer si llega un aviso de "datos sospechosos": antes de operar una señal de ese activo,
@@ -484,7 +485,8 @@ es motivo para no entrar)"; saldrá en casi todas las de oro y SPX y en ~1 de ca
 eventos. Qué hacer con el aviso: nada especial (los datos no
 dicen que esas operaciones sean peores; saltarlas por el evento va contra la regla de no saltarse
 señales). Si aun así saltas una, apúntalo con `/skip ID evento` para que la medición siga siendo honesta. Mantenimiento: cuando la Fed o el BLS publiquen el calendario de 2028, añadirlo
-al CSV (el resumen nocturno avisa 60 días antes de que se acabe).
+al CSV (el resumen nocturno avisa 60 días antes de que se acabe). **Pendiente: añadir el calendario
+de 2028 antes de octubre de 2027** (ver "Mensaje y registro (Fase 4)": no falta ningún FOMC de 2027).
 
 ## Cuándo llegan las señales (Fase 4, 16-nov-2026): ciclo a hora fija
 
@@ -562,3 +564,32 @@ dashboard ya no escribe en la base de datos ni envía nada:
   - registro sombra: setups por motivo y activo, y resultados de los resueltos;
   - la línea de riesgo por operación.
 - La prueba de Telegram se hace con `python trading_system/main.py telegram`.
+
+## Mensaje y registro (Fase 4, 16-nov-2026; no cambia qué señales salen)
+
+- **Distancias del SL y del TP en el mensaje** (todos los activos), justo debajo de los niveles:
+  "Distancias desde la entrada: SL a 1.50 % (1,350.00 USD por BTC); TP a 2.25 % (…)". En el SPX van
+  en puntos del índice. Sirven para colocar el SL y el TP sobre **tu** precio de entrada si el de tu
+  bróker no coincide con el del mensaje.
+- **Oro:** el mensaje añade que los niveles salen del futuro GC=F, que suele cotizar por encima del
+  oro de XM (en nov-2026 ~0,3–0,5 %; tras el cambio de contrato puede ser ~0,7–1 %, estimación sin
+  medir): "si tu precio en MT5 es distinto, coloca el SL y el TP a esas distancias de tu precio de
+  entrada". Así el riesgo en R es el de la señal aunque el nivel absoluto sea otro (regla 6).
+- **Precio al emitir:** cada señal nueva guarda en la columna `price_at_emit` el precio actual que
+  usó el ciclo (cierre de la última vela cerrada; el mismo de la línea "Precio actual" y del filtro de
+  frescura). Es solo registro (F14 del informe): permitirá medir cuánto se había movido el precio
+  desde la entrada al llegar la señal. No cambia la resolución ni el R (siguen con la entrada del
+  mensaje). Las señales anteriores quedan con el valor vacío.
+- **Resumen nocturno, bloque "Últimos 12 meses":** nº de señales live resueltas en los últimos 365
+  días y su R medio (total y por activo; sin costes del bróker), de los activos que hoy se notifican y
+  sin las repeticiones que marcó la limpieza de la Fase 0. Incluye las anteriores a la Fase 0, así que
+  **no** es lo que cuenta la vigilancia. Cómo leerlo: el sistema gana sobre todo en meses con
+  tendencia (F21), así que un año flojo no prueba por sí solo que esté roto; las decisiones las toman
+  el SPRT y el CUSUM.
+- **Calendario de eventos (comprobado el 16-nov-2026 en federalreserve.gov, página "Meeting calendars",
+  actualizada el 12-nov-2026):** en 2027 la Fed **no** tiene reunión en diciembre. Las de 2027 son
+  26-27 ene, 16-17 mar, 27-28 abr, 8-9 jun, 27-28 jul, 14-15 sep, 26-27 oct (la página la marca como
+  "Monetary Policy Strategy Meeting") y 16-17 nov; todas ya estaban en `data/econ_events.csv`. La
+  siguiente es el 25-26 de enero de 2028: **no se añade todavía** para que el aviso del resumen ("el
+  calendario se acaba en < 60 días") siga saltando a tiempo por el CPI/empleo de 2028, que el BLS aún no
+  ha publicado. **Pendiente: añadir el calendario de 2028 (Fed y BLS) antes de octubre de 2027.**

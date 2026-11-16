@@ -115,6 +115,8 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
       - hora UTC de la vela del setup y cuánto hace que cerró;
       - entrada/SL/TP, precio actual (cierre de la última vela cerrada) y el R:R
         efectivo si se entra a ese precio;
+      - Fase 4 (grupo C): distancias del SL y del TP a la entrada (% y USD por
+        unidad) y, en el oro, la nota de que salen del futuro GC=F (distance_lines);
       - riesgo REAL en % del capital (risk_usd / capital). Desde la Fase 3 (3.2) el
         sistema arriesga el 0,25 % (tope de la regla 3) y la línea "Para respetar el
         0,25 %" solo sale si algún día se superase; si el tamaño lo recorta el
@@ -196,6 +198,13 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
         f"<b>Take Profit:</b> ${_e(fmt_price(trade.take_profit))}",
         f"<b>R:R a la entrada:</b> {float(trade.rr_ratio):.2f}",
     ]
+    # Fase 4 (grupo C): distancias del SL y del TP a la entrada, en % y en USD por
+    # unidad, para colocarlas sobre TU precio si el de tu bróker no coincide.
+    # Si algo falla aquí, el mensaje sale sin estas líneas (no cae al mínimo).
+    try:
+        lines += distance_lines(trade, cfg)
+    except Exception as exc:
+        logger.warning(f"No se pudieron añadir las distancias de SL/TP al mensaje de {trade.symbol}: {exc}")
 
     if current_price is not None:
         from notifications.telegram_commands import effective_rr
@@ -299,6 +308,57 @@ def format_signal_alert(trade, sentiment: dict = None, *, setup_ts=None,
             lines.append(ev_line)
 
     return "\n".join(lines)
+
+
+# Fase 4 (grupo C): unidad en singular para "USD por …" (XM_CONTRACTS[unit] va en
+# plural para el tamaño). En el SPX la distancia en USD por unidad del índice son
+# puntos del índice, que es como se coloca en MT5.
+_PER_UNIT = {"BTC": "BTC", "ETH": "ETH", "oz": "oz"}
+
+# Nota del futuro frente al contado, por ticker de la fuente (ASSETS[yf_ticker]).
+# El oro sale del futuro GC=F y en XM se opera el contado (GOLD), que suele cotizar
+# POR DEBAJO: ~0,3–0,5 % en nov-2026 (medido del 29-oct al 13-nov-2026 con PAXG/XAUT
+# de Kraken; REGLAS_DE_DECISION.md, regla 6) y ~0,7–1 % tras el cambio de contrato
+# (estimación, no medida). Las distancias sí valen: por eso se dan arriba.
+FUTURES_BASIS_NOTE = {
+    "GC=F": ("ℹ️ <i>Oro: la entrada, el SL y el TP salen del futuro GC=F, que suele cotizar por encima "
+             "del oro de XM (en nov-2026, ~0.3–0.5 %; tras el cambio de contrato puede ser ~0.7–1 %). "
+             "Si tu precio en MT5 es distinto, coloca el SL y el TP a esas distancias de tu precio "
+             "de entrada.</i>"),
+}
+
+
+def distance_lines(trade, cfg: dict | None = None) -> list[str]:
+    """
+    Fase 4 (grupo C): líneas HTML con la distancia del SL y del TP a la entrada:
+      "Distancias desde la entrada: SL a 1.23 % (1,234.56 USD por BTC); TP a 1.85 % (…)"
+    y, en el oro (fuente GC=F), la nota de que los niveles salen del futuro y hay
+    que colocarlos a esas distancias de tu precio de entrada en MT5.
+    Solo texto: no cambia ningún nivel de la señal. [] si la entrada no es válida.
+    """
+    from config.settings import ASSETS, XM_CONTRACTS, price_decimals
+    cfg = ASSETS.get(trade.symbol, {}) if cfg is None else cfg
+    entry = float(trade.entry_price)
+    if not entry or entry != entry or entry <= 0:   # 0, NaN o negativo: no se puede
+        return []
+    unit = (XM_CONTRACTS.get(trade.symbol) or {}).get("unit")
+    is_index = trade.symbol == "SPX500"
+    dec = price_decimals(entry)   # mismos decimales que los niveles del mensaje
+
+    def _one(level: float) -> str:
+        dist = abs(float(level) - entry)
+        if is_index:
+            usd = f"{dist:,.{dec}f} puntos del índice"
+        else:
+            usd = f"{dist:,.{dec}f} USD por {_PER_UNIT.get(unit, 'unidad')}"
+        return f"{_fmt_pct(dist / entry)} ({usd})"
+
+    out = [f"<b>Distancias desde la entrada:</b> SL a {_e(_one(trade.stop_loss))}; "
+           f"TP a {_e(_one(trade.take_profit))}"]
+    note = FUTURES_BASIS_NOTE.get(cfg.get("yf_ticker")) if cfg.get("source") == "yfinance" else None
+    if note:
+        out.append(note)
+    return out
 
 
 EVENT_LINE_MAX = 3

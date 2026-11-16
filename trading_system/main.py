@@ -508,7 +508,9 @@ def _emit_best_setup(symbol, cfg, df_scored, current_price, max_dist_atr, min_se
                                        mode=mode,
                                        notified=False if will_notify else None,
                                        alert_text=alert_text,
-                                       portfolio_flag=fate["portfolio_flag"])
+                                       portfolio_flag=fate["portfolio_flag"],
+                                       # Fase 4 (F14): precio actual usado al emitir.
+                                       price_at_emit=current_price)
     # -1 = el guardado lo rechazó (duplicado o error de escritura, ya registrado en el log).
     fate["motivo"] = ("duplicate" if signal_id is None or signal_id <= 0
                       else "emitted" if mode == "live" else "shadow_asset")

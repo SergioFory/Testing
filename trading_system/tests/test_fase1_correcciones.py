@@ -287,6 +287,15 @@ def test_fill_que_falla_siempre_avisa_tras_tres_intentos(temp_db, fake_telegram,
     sid = save_signal_from_trade(_Trade(), setup_ts=pd.Timestamp("2026-11-15", tz="UTC"), mode="live")
     _fake_updates(monkeypatch, [[_upd(300, f"/fill {sid} 100.5")]], [])
     monkeypatch.setattr(db, "save_fill", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("caída")))
+    # Revisión de la Fase 4: además de los intentos hace falta que pase la ventana de
+    # reintento (2 h desde el primer fallo). Un intento por ciclo horario, como antes.
+    import notifications.telegram_commands as tc
+    clock = {"t": 1_800_000_000.0}
+
+    def _tick():
+        clock["t"] += 3600
+        return clock["t"]
+    monkeypatch.setattr(tc, "_clock", _tick)
     for _ in range(MAX_UPDATE_ATTEMPTS - 1):
         poll_commands()
         assert temp_db.kv_get(KV_OFFSET) in (None, "300")

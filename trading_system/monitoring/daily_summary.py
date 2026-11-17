@@ -317,10 +317,16 @@ def fills_vs_theory() -> dict:
     """Compara lo ejecutado (/fill, el más reciente por señal) con lo teórico en
     las señales ya resueltas. R ejecutado = misma salida, entrando a tu precio,
     en R de la señal: sign × (salida − tu precio) / |entrada − SL|. La diferencia
-    con el R teórico es la de la entrada (no se registra tu precio de salida)."""
+    con el R teórico es la de la entrada (no se registra tu precio de salida).
+
+    Revisión de la Fase 4: además del total, 'crypto' y 'gold' ({'n', 'mean_diff_r'})
+    por separado. En el oro la diferencia incluye la base futuro GC=F / contado de
+    XM (≈0,1R; regla 6): si colocas SL/TP a las distancias del mensaje desde tu
+    precio, tu R real no cambia aunque aquí salga distinto. No es coste."""
     from data.database import load_fills, get_engine
     fills = load_fills()
-    out = {"n_fill": 0, "n_skip": 0, "n_resolved": 0, "mean_diff_r": None, "sum_diff_r": 0.0}
+    out = {"n_fill": 0, "n_skip": 0, "n_resolved": 0, "mean_diff_r": None, "sum_diff_r": 0.0,
+           "crypto": {"n": 0, "mean_diff_r": None}, "gold": {"n": 0, "mean_diff_r": None}}
     if fills.empty:
         return out
     out["n_skip"] = int(fills.loc[fills["kind"] == "skip", "signal_id"].nunique())
@@ -330,28 +336,42 @@ def fills_vs_theory() -> dict:
         return out
     ids = [int(x) for x in f["signal_id"]]
     params = {f"i{k}": v for k, v in enumerate(ids)}
-    q = ("SELECT id, direction, entry_price, stop_loss, exit_price, pnl_r FROM signals "
+    q = ("SELECT id, direction, entry_price, stop_loss, exit_price, pnl_r, symbol FROM signals "
          f"WHERE id IN ({', '.join(':' + k for k in params)}) AND resultado_real IS NOT NULL "
          "AND exit_price IS NOT NULL AND pnl_r IS NOT NULL")
     with get_engine().connect() as conn:
         sig = {int(r[0]): r for r in conn.execute(text(q), params).fetchall()}
     diffs = []
+    groups = {"crypto": [], "gold": []}
     for _, row in f.iterrows():
         s = sig.get(int(row["signal_id"]))
         if s is None or row["price"] is None or pd.isna(row["price"]):
             continue
-        _id, direction, entry, sl, exit_price, pnl_r = s
+        _id, direction, entry, sl, exit_price, pnl_r, symbol = s
         risk = abs(float(entry) - float(sl))
         if risk <= 0:
             continue
         sign = 1.0 if direction == "long" else -1.0
         r_exec = sign * (float(exit_price) - float(row["price"])) / risk
-        diffs.append(r_exec - float(pnl_r))
+        d = r_exec - float(pnl_r)
+        diffs.append(d)
+        groups["gold" if is_gold_symbol(symbol) else "crypto"].append(d)
     out["n_resolved"] = len(diffs)
     if diffs:
         out["mean_diff_r"] = sum(diffs) / len(diffs)
         out["sum_diff_r"] = sum(diffs)
+    for g, ds in groups.items():
+        out[g] = {"n": len(ds), "mean_diff_r": (sum(ds) / len(ds)) if ds else None}
     return out
+
+
+def is_gold_symbol(symbol) -> bool:
+    """Oro (niveles del futuro GC=F; se opera el contado de XM): XAUUSD."""
+    return str(symbol or "").upper().startswith("XAU")
+
+
+GOLD_BASIS_NOTE = ("el oro incluye la diferencia futuro GC=F / contado de XM (~0,1R), no es coste "
+                   "(regla 6)")
 
 
 def _fills_block() -> list[str]:
@@ -364,9 +384,17 @@ def _fills_block() -> list[str]:
     if fv["mean_diff_r"] is not None:
         lines.append(f"• R ejecutado − R teórico (entrada): {fv['mean_diff_r']:+.3f}R de media en "
                      f"{fv['n_resolved']} señal(es) resuelta(s)")
-        if fv["n_resolved"] >= 20 and fv["mean_diff_r"] < -0.10:
-            lines.append("  ⚠️ Regla 6: con ≥20 fills la diferencia es < −0,10R → ajustar los costes del modelo "
-                         "(en el oro, descuenta antes la base futuro GC=F / contado de XM, ≈0,1R; ver reglas).")
+        cr, au = fv.get("crypto") or {}, fv.get("gold") or {}
+        if au.get("n"):
+            # Revisión de la Fase 4: el oro aparte (regla 6), con su aviso.
+            cr_txt = (f"{cr['mean_diff_r']:+.3f}R en {cr['n']}" if cr.get("n") else "sin fills")
+            lines.append(f"  BTC/ETH: {cr_txt}; oro: {au['mean_diff_r']:+.3f}R en {au['n']} "
+                         f"({GOLD_BASIS_NOTE})")
+        # Regla 6 sobre BTC/ETH (en el oro hay que medir antes la base, ver reglas).
+        if (cr.get("n") or 0) >= 20 and cr["mean_diff_r"] < -0.10:
+            lines.append("  ⚠️ Regla 6: con ≥20 fills de BTC/ETH la diferencia es < −0,10R → ajustar los costes "
+                         "del modelo (en el oro, descuenta antes la base futuro GC=F / contado de XM, ≈0,1R; "
+                         "ver reglas).")
     return lines
 
 

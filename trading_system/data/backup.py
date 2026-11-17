@@ -28,7 +28,12 @@ secuencias):
     estaba"; si tiene otro contenido es un CONFLICTO y no se toca (la BD manda; el
     informe lo dice para que decidas).
   - Tampoco se inserta una fila que choque con una clave única (p. ej. el mismo
-    setup del registro sombra ya guardado con otro id).
+    setup del registro sombra ya guardado con otro id), ni una señal cuyo setup
+    (activo, dirección, setup_ts) ya esté en la BD con otro id.
+  - Los fills/trades de una señal de la copia que no queda en la BD como la MISMA
+    señal (conflicto con otra señal, setup ya guardado con otro id) no se insertan:
+    se colgarían de otra señal. Lo seguro: restaurar con el worker parado sobre
+    una BD vacía.
   - Conserva los id originales (los /fill usan el id de la señal). En PostgreSQL
     se ajusta después la secuencia de cada id para que las filas nuevas sigan
     numerándose tras la mayor restaurada.
@@ -64,6 +69,20 @@ PRIMARY_KEYS = {"kv": ("name",), "retrain_log": ("symbol",)}     # el resto: id
 UNIQUE_KEYS = {"shadow_setups": (("symbol", "setup_ts", "direction"),),
                "fills": (("update_id",),),
                "data_quality": (("symbol", "check_name", "ts"),)}
+# Revisión de la Fase 4: clave LÓGICA de una señal (el setup). Si la BD ya tiene ese
+# setup con OTRO id (BD recreada y el worker ya lo emitió), la fila de la copia no se
+# inserta: sería la misma señal dos veces (dos posiciones abiertas para la cartera).
+# Solo se compara con las filas que YA están en la BD, no entre filas de la copia (si
+# la BD de origen tenía dos filas así, la copia las reproduce tal cual). Con setup_ts
+# NULL (señales antiguas) no se puede comparar y no se aplica.
+LOGICAL_KEYS = {"signals": ("symbol", "direction", "setup_ts")}
+# Lo que no cambia nunca en una señal desde que se emite: si una señal de la copia y la
+# de la BD comparten id pero difieren aquí, son señales DISTINTAS (no la misma con otro
+# estado), y los /fill de la copia no deben colgarse de la de la BD.
+SIGNAL_IDENTITY = ("symbol", "direction", "ts", "entry_price")
+# Tablas que apuntan a signals.id: sus filas solo se insertan si su señal quedó bien
+# (insertada o ya igual / la misma señal en la BD).
+SIGNAL_CHILD_TABLES = ("fills", "trades")
 SERIAL_TABLES = ("signals", "trades", "fills", "shadow_setups", "data_quality", "setups",
                  "backtest_results")
 FETCH_CHUNK = 1000
@@ -269,13 +288,20 @@ def _key(row: dict, cols) -> tuple | None:
     return None if any(v is None for v in vals) else vals
 
 
-def _plan_table(conn, table: str, spec: dict, target_cols: list[str] | None) -> dict:
-    """Clasifica las filas de la copia de una tabla frente a la BD."""
+def _plan_table(conn, table: str, spec: dict, target_cols: list[str] | None,
+                bad_signal_ids: set | None = None) -> dict:
+    """Clasifica las filas de la copia de una tabla frente a la BD.
+
+    bad_signal_ids (solo fills/trades): id de señales de la copia que NO quedan en
+    la BD como la misma señal (conflicto con otra señal, setup ya guardado con otro
+    id, sin clave...). Sus filas no se insertan: se colgarían de otra señal."""
     from sqlalchemy import text
     cols = list(spec["columns"])
     rows = [dict(zip(cols, r)) for r in spec["rows"]]
     plan = {"table": table, "rows": len(rows), "new": 0, "same": 0, "conflict": 0, "unique": 0,
             "nokey": 0, "dropped_cols": [], "insert_cols": [], "to_insert": [], "conflict_ids": [],
+            "logical": 0, "logical_ids": [], "orphan": 0, "orphan_ids": [],
+            "bad_ids": set(),   # signals: id de la copia que no quedan como la misma señal
             "skipped": None, "creates_table": target_cols is None}
     if table not in KNOWN_TABLES:
         plan["skipped"] = "tabla sin esquema conocido: no se restaura automáticamente (sus filas siguen en el fichero)"
@@ -290,8 +316,14 @@ def _plan_table(conn, table: str, spec: dict, target_cols: list[str] | None) -> 
         plan["skipped"] = f"la copia no trae la clave {', '.join(_pk(table))}"
         return plan
     uniq = [u for u in UNIQUE_KEYS.get(table, ()) if all(c in common for c in u)]
+    lkey = LOGICAL_KEYS.get(table)
+    if lkey and not all(c in common for c in lkey):
+        lkey = None                      # copia antigua sin esas columnas: no se compara
+    ident = [c for c in SIGNAL_IDENTITY if c in common] if table == "signals" else []
+    child = table in SIGNAL_CHILD_TABLES and "signal_id" in common and bad_signal_ids
 
     existing: dict = {}
+    db_logical: set = set()              # claves lógicas (setups) que ya están en la BD
     seen_unique = [set() for _ in uniq]
     if not plan["creates_table"]:
         sel = ", ".join(f'"{c}"' for c in common)
@@ -303,15 +335,31 @@ def _plan_table(conn, table: str, spec: dict, target_cols: list[str] | None) -> 
             for r in chunk:
                 d = dict(zip(common, r))
                 existing[_key(d, pk)] = d
+                if lkey:
+                    lk = _key(d, lkey)
+                    if lk is not None:
+                        db_logical.add(lk)
                 for i, u in enumerate(uniq):
                     k = _key(d, u)
                     if k is not None:
                         seen_unique[i].add(k)
 
+    def _bad(row):
+        if table == "signals" and row.get("id") is not None:
+            plan["bad_ids"].add(_jsonable(row.get("id")))
+
     for row in rows:
+        if child and _jsonable(row.get("signal_id")) in bad_signal_ids:
+            # /fill o /skip de una señal de la copia que no queda en la BD (su id lo
+            # tiene allí OTRA señal, o el setup está con otro id): no se inserta.
+            plan["orphan"] += 1
+            if len(plan["orphan_ids"]) < 10:
+                plan["orphan_ids"].append(_jsonable(row.get("signal_id")))
+            continue
         k = _key(row, pk)
         if k is None:
             plan["nokey"] += 1
+            _bad(row)
             continue
         old = existing.get(k)
         if old is not None:
@@ -321,10 +369,26 @@ def _plan_table(conn, table: str, spec: dict, target_cols: list[str] | None) -> 
                 plan["conflict"] += 1
                 if len(plan["conflict_ids"]) < 10:
                     plan["conflict_ids"].append(k[0] if len(k) == 1 else k)
+                # Misma señal con otro estado (p. ej. ya resuelta en la BD): sus /fill
+                # valen. Otra señal con ese id: sus /fill no se insertan.
+                if table == "signals" and not (ident and all(_same_value(row.get(c), old.get(c))
+                                                             for c in ident)):
+                    _bad(row)
             continue
+        if lkey:
+            lk = _key(row, lkey)
+            # (Si la BD tuviera esta misma clave primaria ya se habría tratado arriba:
+            # aquí el setup está en la BD necesariamente con OTRO id.)
+            if lk is not None and lk in db_logical:
+                plan["logical"] += 1
+                if len(plan["logical_ids"]) < 10:
+                    plan["logical_ids"].append(k[0] if len(k) == 1 else k)
+                _bad(row)
+                continue
         ukeys = [_key(row, u) for u in uniq]
         if any(uk is not None and uk in seen_unique[i] for i, uk in enumerate(ukeys)):
             plan["unique"] += 1
+            _bad(row)
             continue
         for i, uk in enumerate(ukeys):
             if uk is not None:
@@ -342,12 +406,17 @@ def plan_restore(backup: dict, engine=None) -> list[dict]:
     order = [t for t in KNOWN_TABLES if t in backup["tables"]] + \
             [t for t in backup["tables"] if t not in KNOWN_TABLES]
     plans = []
+    bad_signal_ids: set = set()
     with engine.connect() as conn:
-        for table in order:
+        for table in order:            # signals va antes que fills/trades (KNOWN_TABLES)
             if table in EXCLUDED_TABLES:
                 continue
             target = _columns(engine, table) if table in names else None
-            plans.append(_plan_table(conn, table, backup["tables"][table], target))
+            p = _plan_table(conn, table, backup["tables"][table], target,
+                            bad_signal_ids=bad_signal_ids if table in SIGNAL_CHILD_TABLES else None)
+            if table == "signals":
+                bad_signal_ids = set(p["bad_ids"])
+            plans.append(p)
     return plans
 
 
@@ -427,8 +496,18 @@ def format_restore(report: dict) -> str:
             any_conflict = True
             ids = ", ".join(str(i) for i in p["conflict_ids"])
             txt += f" · EN CONFLICTO (misma clave, otro contenido; no se tocan): {_n(p['conflict'])} (p. ej. {ids})"
+        if p.get("logical"):
+            any_conflict = True
+            ids = ", ".join(str(i) for i in p["logical_ids"])
+            txt += (f" · ESE SETUP YA ESTÁ en la BD con otro id (no se insertan, serían la misma señal dos "
+                    f"veces): {_n(p['logical'])} (p. ej. {ids})")
         if p["unique"]:
             txt += f" · ya existían con otra clave (clave única): {_n(p['unique'])}"
+        if p.get("orphan"):
+            any_conflict = True
+            ids = ", ".join(str(i) for i in p["orphan_ids"])
+            txt += (f" · de señales en conflicto u omitidas (no se insertan; se colgarían de otra señal): "
+                    f"{_n(p['orphan'])} (señal p. ej. {ids})")
         if p["nokey"]:
             txt += f" · sin clave: {_n(p['nokey'])}"
         if p["creates_table"]:
@@ -439,7 +518,12 @@ def format_restore(report: dict) -> str:
     if any_conflict:
         lines.append("Conflicto = en la BD hay una fila con la misma clave (id) y otro contenido, p. ej. si la "
                      "BD se recreó y el worker ya guardó señales nuevas con esos id. No se sobrescribe nada; "
-                     "esas filas siguen en el fichero de la copia.")
+                     "esas filas siguen en el fichero de la copia. Los /fill y /skip de esas señales tampoco "
+                     "se insertan (quedarían pegados a otra señal).")
+        lines.append("⚠️ Lo seguro es restaurar con el worker PARADO y sobre una BD VACÍA (recién creada). Si "
+                     "la vista previa muestra señales en conflicto o setups que ya están con otro id, NO hagas "
+                     "--apply: las señales de la copia con esos id no se recuperarían. Detén el worker, vacía la "
+                     "BD y restaura de nuevo.")
     if not report["applied"]:
         lines.append(f"VISTA PREVIA: no se ha escrito nada. Para restaurar: python main.py restore --file "
                      f"{report['path']} --apply")
@@ -560,7 +644,14 @@ def summary_line(now_unix: int | None = None) -> str | None:
             return (f"💾 Copia de seguridad mensual enviada como documento "
                     f"({_fmt_bytes(int(state.get('bytes', 0)))}); guárdala fuera de Render.")
         import html
-        return (f"💾 ⚠️ Copia de seguridad mensual NO enviada: {html.escape(str(state.get('error') or '?')[:160])}. "
+        motivo = html.escape(str(state.get('error') or '?')[:160])
+        # Revisión de la Fase 4: el día del intento sale de su propio ts (día UTC). Si
+        # ya era el último día de reintento, no hay "mañana": se pide hacerla a mano.
+        dia = _dt.datetime.fromtimestamp(int(state["ts"]), _dt.timezone.utc).day
+        if dia >= MONTHLY_RETRY_UNTIL_DAY:
+            return (f"💾 ⚠️ Copia de seguridad mensual NO enviada: {motivo}. Era el último intento del "
+                    "mes: hazla a mano con python trading_system/main.py backup --send")
+        return (f"💾 ⚠️ Copia de seguridad mensual NO enviada: {motivo}. "
                 f"Se reintenta mañana (hasta el día {MONTHLY_RETRY_UNTIL_DAY}); a mano: "
                 "python trading_system/main.py backup --send")
     except Exception:

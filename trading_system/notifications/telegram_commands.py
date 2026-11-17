@@ -25,6 +25,7 @@ from __future__ import annotations
 import html
 import re
 import threading
+import time
 
 import requests
 from loguru import logger
@@ -42,7 +43,19 @@ _inflight: dict = {"thread": None}
 # Intentos por comando antes de darlo por perdido y avisar (el contador vive en
 # memoria del proceso: si la BD está caída tampoco se podría guardar en ella).
 MAX_UPDATE_ATTEMPTS = 3
+# Revisión de la Fase 4: con el sondeo cada 2 min, 3 intentos eran ~4 min (antes,
+# uno por ciclo horario, ~2 h). Ahora se abandona solo tras MAX_UPDATE_ATTEMPTS
+# intentos Y al menos UPDATE_RETRY_WINDOW_S desde el PRIMER fallo: se conserva la
+# ventana de reintento de antes ante un fallo pasajero de la BD.
+UPDATE_RETRY_WINDOW_S = 2 * 3600
+# update_id → (intentos fallidos, hora time.time() del primer fallo). Se borra al
+# procesarse bien o al darlo por perdido: no crece.
 _update_failures: dict = {}
+
+
+def _clock() -> float:
+    """Hora actual en segundos (función aparte para que las pruebas la simulen)."""
+    return time.time()
 
 def _when_read_text() -> str:
     """Cuándo se leen los comandos (Fase 4: cada TELEGRAM_POLL_MINUTES minutos)."""
@@ -423,11 +436,16 @@ def poll_commands(log_failures: bool = True) -> dict:
                     # UNIQUE evita duplicar) hasta MAX_UPDATE_ATTEMPTS; después se
                     # responde que no se pudo registrar y se sigue.
                     out["errors"] += 1
-                    n = _update_failures.get(uid, 0) + 1
-                    _update_failures[uid] = n
+                    now_s = _clock()
+                    prev_n, first_s = _update_failures.get(uid, (0, now_s))
+                    n = prev_n + 1
+                    _update_failures[uid] = (n, first_s)
+                    waited = max(0.0, now_s - first_s)
                     logger.error(f"Comandos Telegram: error procesando /{cmd} (actualización {uid}, "
-                                 f"intento {n}/{MAX_UPDATE_ATTEMPTS}): {exc}")
-                    if uid is not None and n < MAX_UPDATE_ATTEMPTS:
+                                 f"intento {n}, {waited / 60:.0f} min desde el primer fallo; se abandona "
+                                 f"tras {MAX_UPDATE_ATTEMPTS} intentos y "
+                                 f"{UPDATE_RETRY_WINDOW_S // 60} min): {exc}")
+                    if uid is not None and (n < MAX_UPDATE_ATTEMPTS or waited < UPDATE_RETRY_WINDOW_S):
                         advance = False
                         break          # el offset se queda en esta actualización
                     _update_failures.pop(uid, None)

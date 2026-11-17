@@ -148,10 +148,12 @@ with tab_view:
         if trade is not None:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Entrada", f"${fmt_price(trade.entry_price)}")
-            c2.metric("Stop Loss", f"${fmt_price(trade.stop_loss)}",
-                      delta=f"-{trade.stop_distance_pct*100:.2f}%", delta_color="inverse")
-            c3.metric("Take Profit", f"${fmt_price(trade.take_profit)}",
-                      delta=f"+{trade.target_distance_pct*100:.2f}%")
+            # Distancia con su signo real (en un corto el SL está por encima): sin colores.
+            sl_d, tp_d = views.level_deltas(trade.entry_price, trade.stop_loss, trade.take_profit)
+            c2.metric("Stop Loss", f"${fmt_price(trade.stop_loss)}", delta=f"{sl_d} desde la entrada",
+                      delta_color="off")
+            c3.metric("Take Profit", f"${fmt_price(trade.take_profit)}", delta=f"{tp_d} desde la entrada",
+                      delta_color="off")
             c4.metric("R:R", f"{trade.rr_ratio:.2f}:1")
             c5, c6, c7, c8 = st.columns(4)
             c5.metric("Nominal USD", f"${trade.position_size:,.0f}")
@@ -222,7 +224,8 @@ with tab_port:
         c1, c2, c3 = st.columns(3)
         c1.metric("Posiciones abiertas", len(pv["positions"]))
         c2.metric("Riesgo abierto", f"{pv['risk_pct']:.2f} % del capital")
-        c3.metric("Pérdida realizada hoy (UTC)", f"{pv['day_loss_pct']:.2f} %")
+        c3.metric("Resultado realizado hoy (UTC)", views.signed_pct(pv["day_result_pct"]),
+                  help=views.DAY_RESULT_HELP)
         if not pv["positions"].empty:
             st.dataframe(pv["positions"], width="stretch", hide_index=True)
         st.markdown(pv["text"])
@@ -234,10 +237,19 @@ with tab_port:
         c1, c2, c3 = st.columns(3)
         c1.metric("Ejecutadas (/fill)", s["n_fill"])
         c2.metric("No ejecutadas (/skip)", s["n_skip"])
-        c3.metric("R ejecutado − R teórico (media)",
-                  f"{s['mean_diff_r']:+.3f}R" if s.get("mean_diff_r") is not None else "—",
-                  help=f"Sobre {s['n_resolved']} señal(es) con /fill ya resueltas. Diferencia "
-                       "por la entrada: el sistema no conoce tu precio de salida.")
+        # Revisión de la Fase 4: BTC/ETH y oro por separado (regla 6). En el oro la
+        # diferencia incluye la base futuro/contado, no es coste.
+        cr, au = s.get("crypto") or {}, s.get("gold") or {}
+        c3.metric("R ejecutado − R teórico (media BTC/ETH)",
+                  f"{cr['mean_diff_r']:+.3f}R" if cr.get("mean_diff_r") is not None else "—",
+                  help=f"Sobre {cr.get('n', 0)} señal(es) de BTC/ETH con /fill ya resueltas. Diferencia "
+                       "por la entrada: el sistema no conoce tu precio de salida. Regla 6: si con ~20 "
+                       "fills es < −0,10R, se ajustan los costes.")
+        if au.get("n"):
+            st.caption(f"Oro: R ejecutado − R teórico {au['mean_diff_r']:+.3f}R de media en {au['n']} "
+                       "señal(es). Incluye la diferencia entre el futuro GC=F y el contado de XM (~0,1R): "
+                       "no es coste de ejecución. Si colocaste el SL y el TP a las distancias del mensaje "
+                       "desde tu precio, tu R real es el teórico (regla 6).")
         if ex["table"].empty:
             st.caption("Sin registros. Responde a cada señal en Telegram con /fill ID PRECIO "
                        "o /skip ID motivo.")

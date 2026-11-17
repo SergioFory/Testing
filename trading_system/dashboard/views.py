@@ -316,7 +316,10 @@ def portfolio_view(now=None) -> dict:
         lines = portfolio_block(conn, _unix(now_ts))
     return {"positions": pos,
             "risk_pct": float(sum(p["risk_pct"] for p in opens)) * 100,
-            "day_loss_pct": float(realized_loss_today(now=now_ts)) * 100,
+            # Convención de la regla R4: pérdida POSITIVA, ganancia negativa (+0.0 quita
+            # el "-0.0" de un día sin nada). Para enseñarlo, day_result_pct (signo natural).
+            "day_loss_pct": float(realized_loss_today(now=now_ts)) * 100 + 0.0,
+            "day_result_pct": -float(realized_loss_today(now=now_ts)) * 100 + 0.0,
             "mode": control_mode(),
             "text": html_to_markdown("\n".join(lines))}
 
@@ -334,7 +337,7 @@ def executions() -> dict:
     Devuelve {'table' (DataFrame), 'summary' (monitoring.daily_summary.fills_vs_theory)}.
     """
     from data.database import load_fills, get_engine
-    from monitoring.daily_summary import fills_vs_theory
+    from monitoring.daily_summary import fills_vs_theory, is_gold_symbol, GOLD_BASIS_NOTE
     from data.outcome_tracker import signal_r
     summary = fills_vs_theory()
     fills = load_fills()
@@ -375,6 +378,10 @@ def executions() -> dict:
             "nota": f.get("note"), "resultado": s.get("resultado_real"),
             "R teórico": None if r_theo is None or pd.isna(r_theo) else round(float(r_theo), 3),
             "R ejecutado": None if r_exec is None else round(r_exec, 3),
+            # Revisión de la Fase 4: en el oro el R ejecutado supone la misma salida
+            # ABSOLUTA; si pusiste SL/TP a las distancias del mensaje, no es tu R real.
+            "aviso": (GOLD_BASIS_NOTE.capitalize()
+                      if r_exec is not None and is_gold_symbol(s.get("symbol")) else ""),
         })
     return {"table": pd.DataFrame(rows), "summary": summary}
 
@@ -432,6 +439,28 @@ def shadow_summary(since=None) -> dict:
 # ---------------------------------------------------------------------------
 # Riesgo por operación
 # ---------------------------------------------------------------------------
+
+def signed_pct(x) -> str:
+    """'+0.38 %' / '-1.25 %' / '+0.00 %' (nunca '-0.00 %'). Revisión de la Fase 4."""
+    try:
+        v = round(float(x), 2) + 0.0
+    except (TypeError, ValueError):
+        return "—"
+    return f"{v:+.2f} %"
+
+
+DAY_RESULT_HELP = ("Suma de las señales live cerradas hoy (UTC), en % del capital: + ganancia, − pérdida. "
+                   "La regla R4 bloquea señales nuevas si la pérdida realizada del día llega al 3 %.")
+
+
+def level_deltas(entry, stop_loss, take_profit) -> tuple[str, str]:
+    """Distancia CON SIGNO del SL y del TP respecto a la entrada, en %: en un largo el
+    SL sale '-' y el TP '+'; en un corto al revés. Revisión de la Fase 4 (antes el
+    signo era fijo y en los cortos salía cambiado)."""
+    e = float(entry)
+    return (signed_pct((float(stop_loss) - e) / e * 100).replace(" ", ""),
+            signed_pct((float(take_profit) - e) / e * 100).replace(" ", ""))
+
 
 def risk_line() -> str:
     """'Riesgo por operación: 0.25 % del capital ($2.50 de $1,000); nominal máx. 1×

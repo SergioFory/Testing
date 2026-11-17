@@ -505,7 +505,10 @@ revisa a horas **fijas en UTC** (`CYCLE_SCHEDULE` en `config/settings.py`):
     La vela se acepta desde medianoche de Nueva York y la señal llega a las **04:01 UTC** del día
     siguiente. Antes llegaba en el primer ciclo después de las 04:00, por ejemplo a las 04:40.
 - **Comandos /fill /skip /help:** se leen cada 2 minutos (antes, una vez por hora). La respuesta llega en
-  1–2 minutos, o algo más si en ese momento el sistema está revisando los mercados.
+  1–2 minutos, o algo más si en ese momento el sistema está revisando los mercados. Si un /fill o
+  /skip no se puede guardar por un fallo de la base de datos, se reintenta en cada lectura y solo se da
+  por perdido (con un aviso "No pude registrar… Reenvíalo") tras 3 intentos **y** 2 horas desde el
+  primer fallo, como cuando se leían una vez por hora.
 - Sigue igual: una revisión nada más arrancar, el resumen nocturno de las 03:00 UTC (va justo antes del
   ciclo de las 03:01) y los reintentos de señales que no llegaron (a la hora y a las 2 horas).
 - El startCommand de Render (`--interval 60`) no hay que tocarlo: 60 = cada hora en HH:01. Otro
@@ -559,10 +562,17 @@ dashboard ya no escribe en la base de datos ni envía nada:
   contando como antes (`resolved_by='manual'`).
 - **Nuevo en el dashboard**, todo solo leyendo la base de datos:
   - vigilancia (SPRT live y del registro sombra, CUSUM y "configuración congelada N/150");
-  - cartera según el sistema y cuántas señales habría bloqueado cada regla;
-  - tus /fill y /skip por señal, con el R teórico y el R ejecutado (misma salida, entrando a tu precio);
+  - cartera según el sistema y cuántas señales habría bloqueado cada regla, con el "Resultado
+    realizado hoy (UTC)" en % del capital con su signo natural (+ ganancia, − pérdida; la regla R4
+    bloquea señales nuevas si la pérdida del día llega al 3 %);
+  - tus /fill y /skip por señal, con el R teórico y el R ejecutado (misma salida, entrando a tu precio).
+    La media "R ejecutado − R teórico" va **solo con BTC/ETH**; el oro sale aparte y marcado, porque
+    incluye la diferencia futuro GC=F / contado de XM (~0,1R), que no es coste (regla 6). Lo mismo en
+    el resumen nocturno;
   - registro sombra: setups por motivo y activo, y resultados de los resueltos;
   - la línea de riesgo por operación.
+- En la vista, el SL y el TP llevan su distancia a la entrada **con signo real** (en un corto el SL
+  sale "+", por encima, y el TP "−"), sin colores.
 - La prueba de Telegram se hace con `python trading_system/main.py telegram`.
 
 ## Mensaje y registro (Fase 4, 16-nov-2026; no cambia qué señales salen)
@@ -617,7 +627,8 @@ El disco del Shell de Render se borra en cada despliegue: guarda la copia fuera 
 worker te envía la copia por Telegram como documento (límite de Telegram: 50 MB; límite de
 tiempo total del envío: 10 s). Si falla, queda una línea en el log y en el resumen nocturno de
 esa noche ("💾 ⚠️ Copia de seguridad mensual NO enviada: motivo") y se reintenta las noches
-siguientes hasta el día 7. Nunca tumba la tarea nocturna ni el ciclo. Guarda el fichero que te
+siguientes hasta el día 7 (si el día 7 también falla, el resumen te dice que era el último intento
+y que la hagas a mano con `backup --send`). Nunca tumba la tarea nocturna ni el ciclo. Guarda el fichero que te
 llega fuera de Telegram si quieres conservarlo años.
 
 **Restaurar** (p. ej. si la BD de Render se perdió o se recreó):
@@ -625,11 +636,20 @@ llega fuera de Telegram si quieres conservarlo años.
     python trading_system/main.py restore --file copia.json.gz            # VISTA PREVIA: no escribe nada
     python trading_system/main.py restore --file copia.json.gz --apply    # inserta lo que falte
 
+- **Hazlo con el worker PARADO y sobre una BD VACÍA** (recién creada, antes de que el worker
+  guarde nada). Si el worker ya emitió señales en la BD nueva, sus id chocan con los de la copia.
 - Solo **inserta filas que no existan**; nunca modifica ni borra. Conserva los id originales (los
   /fill usan el id de la señal) y deja el contador de id por encima del mayor restaurado.
-- Si en la BD ya hay una fila con el mismo id y **otro** contenido (p. ej. la BD se recreó y el
-  worker ya guardó señales nuevas con esos id), es un **conflicto**: no se toca y el informe lo
-  dice (esas filas siguen en el fichero). Lo mismo con el offset de Telegram ya guardado.
+- Si en la BD ya hay una fila con el mismo id y **otro** contenido, es un **conflicto**: no se
+  toca y el informe lo dice (esas filas siguen en el fichero). Lo mismo con el offset de Telegram
+  ya guardado. Si una señal de la copia tiene el mismo setup (activo, dirección, vela) que una
+  señal de la BD con otro id, tampoco se inserta (sería la misma señal dos veces y la cartera
+  contaría dos posiciones). Los /fill y /skip de esas señales **no se insertan** (se pegarían a
+  otra señal); el informe los cuenta como "de señales en conflicto u omitidas".
+- **Si la vista previa muestra señales en conflicto o setups que ya están con otro id, NO hagas
+  `--apply`**: esas señales de la copia no se recuperarían. Detén el worker, vacía la BD y restaura
+  otra vez (antes de arrancarlo de nuevo). (Revisión de la Fase 4: antes este caso duplicaba
+  señales y colgaba /fill de señales equivocadas.)
 - Todo en una sola transacción: o entra todo lo nuevo o nada. Probado en SQLite; en PostgreSQL usa
   la misma vía y ajusta además las secuencias de los id (no probado contra un servidor real).
 - Después de restaurar, reconstruye las velas: `python trading_system/backfill_history.py --apply`.
